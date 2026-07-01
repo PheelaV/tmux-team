@@ -1,0 +1,13 @@
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.tmux-team/runtime/
+.tmux-team/codex-home/
+dist/
+build/
+*.egg-info/

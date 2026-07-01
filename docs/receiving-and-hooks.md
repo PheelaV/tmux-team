@@ -1,0 +1,166 @@
+# Receiving and Hooks
+
+## Current Message Receiving
+
+`tmux-team` currently uses explicit polling.
+
+The durable message lives in SQLite. A role receives work by running:
+
+```bash
+tmux-team inbox next --role implementer
+tmux-team inbox ack <message-id> --role implementer
+tmux-team inbox complete <message-id> --role implementer --status fixed --summary "..."
+```
+
+`inbox next` atomically moves the next claimable message from:
+
+```text
+queued/notified/retrying -> claimed
+```
+
+It claims one message. If a wake says there are multiple pending messages, the role should:
+
+```text
+inbox next -> ack -> do work -> complete -> inbox next again
+```
+
+and repeat until `inbox next` reports no pending messages. This keeps claim leases and completion evidence attached to one task at a time instead of letting a role hoard the whole backlog.
+
+Ordering is by priority first, then creation time:
+
+```text
+urgent -> high -> normal -> low
+```
+
+Messages blocked by role state, such as `blocked_by_role_paused`, are recorded but not claimable.
+
+## Current Wake-Up
+
+Non-app-server roles have two tmux notification modes, but only one should be considered safe by default.
+
+### `display-message`
+
+This is a human-visible tmux status-line marker:
+
+```bash
+tmux display-message -t <pane> "[tmux-team] N pending message(s). Run: tmux-team inbox next --role <role>"
+```
+
+It does not wake an idle agent because the agent does not see tmux status messages as user input.
+
+This is the default for human-visible panes. It should be treated as a visible marker for the operator, not a delivery guarantee.
+
+### `send-keys`
+
+This is an explicit unsafe/debug wake-up path:
+
+```bash
+tmux send-keys -t <pane> "You have N pending tmux-team inbox message(s). Run ..." Enter
+```
+
+It still does not inject task content. It submits only a short inbox-check prompt, and the agent must claim durable task content from SQLite.
+
+However, it can still collide with a human or agent composer. It is not safe as a default delivery mechanism for a human-visible Codex TUI pane.
+
+The implementation now fails closed if tmux reports the pane is in a mode such as copy mode:
+
+```text
+notify_deferred: pane is in tmux copy/mode; not sending keys
+```
+
+The queued message remains claimable, and the notification attempt is recorded. This handles the known copy-mode edge case, but it still cannot prove that a Codex prompt composer is empty.
+
+Use `send-keys` only when an operator or external pane-state guard has established that the pane is idle and the composer is empty:
+
+```toml
+[roles.implementer]
+pane = "example-team:1"
+notify_method = "send-keys"
+```
+
+Or force it from the CLI:
+
+```bash
+tmux-team notify implementer --method send-keys
+tmux-team send --to implementer --summary "..." --body-file task.md --notify-method send-keys
+```
+
+## Correct Wake-Up Boundary
+
+For wakeable Codex roles, the service should not wake an interactive TUI through tmux stdin.
+
+Use Codex app-server remote TUI mode instead:
+
+```text
+tmux-team queue
+  -> app-server turn/start
+  -> pane-resident Codex TUI receives and renders the same turn
+  -> service records turn submission status
+```
+
+The agent remains in the tmux pane. The difference is that the pane is connected to Codex through app-server, and `tmux-team` submits turns through the app-server control protocol instead of terminal keystrokes.
+
+Operator shape:
+
+```bash
+codex app-server --listen ws://127.0.0.1:4500
+codex --remote ws://127.0.0.1:4500
+tmux-team codex bind implementer --endpoint ws://127.0.0.1:4500 --thread-id <thread-id>
+tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
+```
+
+The normal startup path is `tmux-team bootstrap`, which creates role panes and discovers their app-server thread IDs for you.
+
+`app-server-turn` submits a short wake turn that instructs the role to claim durable work from SQLite:
+
+```text
+tmux-team inbox next --role <role>
+tmux-team inbox ack <message-id> --role <role>
+tmux-team inbox complete <message-id> --role <role> ...
+```
+
+If the wake says `N pending` with `N > 1`, the role repeats that sequence once per message until `inbox next` returns no pending work.
+
+The task body is not pasted into the pane or into tmux history. It remains in the durable message body file until the agent claims it.
+
+## Role Permissions
+
+Wake delivery through app-server solves prompt-composer corruption, but it does not by itself authorize a role agent to run local control commands.
+
+If a role is expected to send or notify other roles, launch the managed role panes with an appropriate Codex profile or explicit YOLO mode:
+
+```bash
+tmux-team bootstrap --project-root . --role-profile tmux-team-role
+tmux-team bootstrap --project-root . --role-yolo
+```
+
+`--role-profile` passes `--profile <name>` to each managed role TUI. Use this for a narrower policy when one is available.
+
+`--role-yolo` passes Codex `--dangerously-bypass-approvals-and-sandbox` to each managed role TUI. This prevents command approval and sandbox prompts from parking role-to-role messaging, but it is all-or-nothing for those role panes. Use it only when the project/worktree itself is the accepted external sandbox.
+
+Current Codex CLI supports non-interactive session resume:
+
+```bash
+codex exec resume <session-id> "prompt text"
+```
+
+That prompts a saved conversation through a separate Codex process. It is useful for automation, but the pane-resident path is app-server remote TUI plus `turn/start`.
+
+## Test Harness Driving
+
+The deterministic smoke tests also use `tmux send-keys ... Enter` to drive fake shell agents.
+
+That is test automation. The production `send-keys` wake-up path sends only the inbox-check prompt, not task bodies.
+
+## Hooks
+
+There is no hooks integration yet.
+
+The intended hook behavior is:
+
+- `SessionStart`: print role identity and pending inbox count;
+- `Stop`: remind an idle role if pending messages exist;
+- `UserPromptSubmit`: optionally ledger human-entered operator messages;
+- `PermissionRequest`: mark the role as parked on approval.
+
+Hooks should not become the durable transport. They are lifecycle nudges and observability points around the SQLite queue.

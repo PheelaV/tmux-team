@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmux-team"
+version = "0.1.0"
+description = "Minimal tmux-backed control plane for persistent agent teams."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "tmux-team contributors" }
+]
+dependencies = [
+  "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.8",
+]
+
+[project.scripts]
+tmux-team = "tmux_team.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tmux_team = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "scripts", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = [
+  "E501",
+  "RUF005",
+  "SIM105",
+  "SIM108",
+  "UP022",
+]
+select = [
+  "B",
+  "C4",
+  "E",
+  "F",
+  "I",
+  "RUF",
+  "SIM",
+  "UP",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tmux_team"]

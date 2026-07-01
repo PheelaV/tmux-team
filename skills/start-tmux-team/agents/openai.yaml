@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start tmux-team"
+  short_description: "Bootstrap a pane-resident Codex agent team in tmux."
+  default_prompt: "Start a tmux-team workspace for this project."

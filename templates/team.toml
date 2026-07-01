@@ -1,0 +1,47 @@
+[team]
+name = "example-team"
+runtime_dir = "/tmp/tmux-team-example"
+
+[roles.orchestrator]
+mode = "human_visible"
+state = "active"
+pane = "example-team:0"
+can_edit = false
+can_launch_slurm = false
+notify_method = "display-message"
+
+[roles.implementer]
+mode = "human_visible"
+state = "active"
+pane = "example-team:1"
+can_edit = true
+can_launch_slurm = false
+notify_method = "display-message"
+
+# Wake-capable Codex pane mode:
+# 1. Start app-server: codex app-server --listen ws://127.0.0.1:4500
+# 2. Run role pane: codex --remote ws://127.0.0.1:4500
+# 3. Bind the live thread ID created by that TUI:
+#    tmux-team codex bind implementer --endpoint ws://127.0.0.1:4500 --thread-id <thread-id>
+# 4. Use notify_method = "app-server-turn"
+# notify_method = "app-server-turn"
+# app_server_endpoint = "ws://127.0.0.1:4500"
+# codex_thread_id = "<thread-id>"
+
+[roles.collector-data]
+mode = "human_visible"
+state = "active"
+pane = "example-team:2"
+can_edit = false
+can_launch_slurm = true
+requires_stable_commit = true
+notify_method = "display-message"
+
+[roles.trainer]
+mode = "human_visible"
+state = "paused"
+pane = "example-team:3"
+can_edit = false
+can_launch_slurm = "approval_only"
+requires_stable_commit = true
+notify_method = "display-message"
