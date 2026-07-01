@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .policy import RolePolicy, TeamPolicy, parse_role_policy, parse_team_policy
+
 DEFAULT_CONFIG_PATH = Path(".tmux-team/team.toml")
 DEFAULT_RUNTIME_DIR = Path(".tmux-team/runtime")
 
@@ -18,6 +20,7 @@ class RoleConfig:
     pane: str | None = None
     worktree: str | None = None
     capabilities: dict[str, Any] = field(default_factory=dict)
+    policy: RolePolicy = field(default_factory=RolePolicy)
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ class TeamConfig:
     roles: dict[str, RoleConfig]
     config_path: Path | None = None
     project_root: Path | None = None
+    policy: TeamPolicy = field(default_factory=TeamPolicy)
 
 
 class ConfigError(RuntimeError):
@@ -61,6 +65,7 @@ def load_config(
             roles={},
             config_path=None,
             project_root=project_root,
+            policy=TeamPolicy(),
         )
 
     path = discovered_path.resolve()
@@ -75,6 +80,10 @@ def load_config(
     project_root = path.parent.parent if path.parent.name == ".tmux-team" else path.parent
     team_data = data.get("team", {})
     team_name = str(team_data.get("name") or "default")
+    try:
+        team_policy = parse_team_policy(team_data)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
     runtime_value = runtime_dir_override or os.environ.get("TMUX_TEAM_RUNTIME_DIR") or team_data.get("runtime_dir")
     if runtime_value:
@@ -88,9 +97,13 @@ def load_config(
     for role_name, role_data in data.get("roles", {}).items():
         if not isinstance(role_data, dict):
             raise ConfigError(f"Role {role_name!r} must be a TOML table")
-        known_keys = {"mode", "state", "pane", "worktree"}
+        known_keys = {"mode", "state", "pane", "worktree", "policy"}
         capabilities = {key: value for key, value in role_data.items() if key not in known_keys}
         state = str(role_data.get("state") or ("paused" if role_data.get("mode") == "paused" else "active"))
+        try:
+            role_policy = parse_role_policy(role_data.get("policy"))
+        except ValueError as exc:
+            raise ConfigError(f"Invalid policy for role {role_name!r}: {exc}") from exc
         roles[str(role_name)] = RoleConfig(
             name=str(role_name),
             mode=str(role_data.get("mode") or "human_visible"),
@@ -98,6 +111,7 @@ def load_config(
             pane=_optional_str(role_data.get("pane")),
             worktree=_optional_str(role_data.get("worktree")),
             capabilities=capabilities,
+            policy=role_policy,
         )
 
     return TeamConfig(
@@ -106,6 +120,7 @@ def load_config(
         roles=roles,
         config_path=path,
         project_root=project_root.resolve(),
+        policy=team_policy,
     )
 
 

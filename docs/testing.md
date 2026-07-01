@@ -31,16 +31,26 @@ Purpose: verify the tmux-backed control plane with fake deterministic agents.
 Run locally:
 
 ```bash
+make integration-test
 make bootstrap-layout-smoke-test
 make smoke-test
 make congestion-smoke-test
 ```
+
+`integration-test` is the default local confidence suite. It runs:
+
+- Ruff lint and format checks;
+- unit tests;
+- the real tmux bootstrap/sleep layout smoke;
+- the basic fake-agent workflow;
+- the congestion/multiple-message workflow.
 
 `bootstrap-layout-smoke-test` verifies the real bootstrap tmux shape with a fake Codex binary: `control-plane`, isolated `app-server`, and one tiled `agents` window with the default role panes. It then runs `tmux-team sleep`, verifies a TOML sleep snapshot, and confirms only `control-plane` remains.
 
 Run in Docker:
 
 ```bash
+make docker-test
 make docker-smoke-test
 make docker-congestion-smoke-test
 ```

@@ -1,6 +1,6 @@
 # Permissions Roadmap
 
-`--role-yolo` is a bootstrap escape hatch, not the target permission model.
+`--role-yolo` is an explicit opt-out/breakglass path, not the target permission model.
 
 Codex implements YOLO with its native `--dangerously-bypass-approvals-and-sandbox` flag. tmux-team only passes that flag to managed role panes when `--role-yolo` is requested. This is reliable for role-to-role autonomy, but it gives each role broad local execution as the current user.
 
@@ -35,7 +35,7 @@ There is no current single switch for “allow exactly tmux-team plus exactly th
 
 ## Near-Term Target
 
-Keep `--role-yolo` as breakglass. Prefer role profiles:
+Keep `--role-yolo` available when the operator wants to ignore tmux-team/Codex permission narrowing for a trusted local run. Prefer role profiles for normal autonomous teams:
 
 ```bash
 tmux-team bootstrap --project-root . --role-profile tmux-team-role
@@ -66,7 +66,7 @@ Do not use broad prefixes such as `python`, `uv run`, or `tmux-team` without sub
 
 ## tmux-team Policy Layer
 
-Codex profiles are not enough by themselves. tmux-team also needs its own local authorization because any role that can run the CLI can currently claim any inbox or impersonate any sender.
+Codex profiles are not enough by themselves. tmux-team also needs its own local authorization so authenticated role commands cannot claim another inbox, impersonate another sender, or use unsafe wake methods.
 
 Target policy shape:
 
@@ -82,13 +82,41 @@ can_approve_stable = false
 can_use_send_keys = false
 ```
 
-Implementation direction:
+First-pass implementation:
 
-- add `tmux_team.policy.authorize(actor, action, resource, context)`;
+- `tmux_team.policy.authorize(actor, action, resource, context)`;
+- CLI `--actor` for authenticated role context;
+- strict role defaults: send as self, claim/ack/complete own inbox, notify self only;
+- explicit `can_notify` and `can_use_send_keys` gates;
+- `--policy-mode permissive` breakglass for local experiments.
+
+Remaining implementation direction:
+
 - issue per-role runtime credentials at bootstrap;
 - store only credential hashes in SQLite;
 - derive sender/claim role from authenticated role context for role commands;
 - keep `codex bind`, `stable approve`, `sleep`, `--force`, role-state changes, and `send-keys` operator-only.
+- make permissive mode visible in `status` and config.
+
+Policy should be enforced by default for authenticated role contexts. Operator commands remain intentionally broad unless an operator policy is added later.
+
+## MCP/App-Server Control Surface
+
+MCP is a near-term control surface, not a long-term nice-to-have.
+
+The shell CLI is useful for humans and tests, but role agents should not need broad shell execution just to move messages through tmux-team. A tmux-team MCP server should expose a small tool surface:
+
+- `team_status`;
+- `team_inbox_next`;
+- `team_ack`;
+- `team_complete`;
+- `team_send`;
+- `team_notify` / `team_wake`;
+- `team_stable_current`.
+
+Codex role panes still receive wake turns through app-server remote TUI. The role then uses MCP tools to claim and complete work instead of shelling out to `tmux-team`. This narrows Codex permissions from “can run local commands” to “can call these tmux-team tools,” while tmux-team enforces role policy centrally.
+
+The first MCP-shaped implementation is a thin wrapper over the same `Store` operations. It does not fork a second state model.
 
 ## Transport Hardening
 
@@ -101,24 +129,25 @@ The app-server wake path is the right transport because it avoids tmux prompt in
 
 ## Correctness Work Before Policy
 
-The policy model depends on reliable state transitions. Priority fixes:
+The policy model depends on reliable state transitions. Implemented first-pass fixes:
 
 - make `inbox next` claim atomically with `UPDATE ... RETURNING` or a write transaction;
 - reclaim expired claims;
 - enforce valid ack/complete state transitions;
+
+Remaining priority fixes:
+
 - add a lifecycle lock for sleep/bootstrap/bind/notify/claim races;
 - use restrictive runtime file permissions when storing future credentials.
 
-## Long-Term Target
+## Later Isolation Work
 
-Move role control from shell commands to a tmux-team MCP server:
+For adversarial or high-risk roles, policy and MCP are still not a hard security boundary. The harder boundary is per-role OS/process isolation:
 
-- `team_send`;
-- `team_notify`;
-- `team_inbox_next`;
-- `team_ack`;
-- `team_complete`;
-- `team_status`;
-- `team_stable_current`.
+- containers or remote workers;
+- separate Unix users;
+- constrained worktree mounts;
+- explicit network policy;
+- no ambient host secrets.
 
-That gives Codex a narrower tool surface than arbitrary shell execution, while tmux-team enforces role policy centrally.
+This can layer under the same tmux-visible/app-server-visible control plane.

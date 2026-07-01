@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from tmux_team.app_server import AppServerClient, AppServerError, is_loopback_host
 from tmux_team.cli import main
 
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -94,6 +95,16 @@ notify_method = "app-server-turn"
         self.assertEqual(notification["method"], "app-server-turn")
         self.assertEqual(notification["state"], "submitted")
         self.assertIn("turn_fake", notification["details"])
+
+    def test_app_server_endpoint_must_be_loopback(self) -> None:
+        self.assertTrue(is_loopback_host("localhost"))
+        self.assertTrue(is_loopback_host("127.0.0.1"))
+        self.assertTrue(is_loopback_host("::1"))
+        self.assertFalse(is_loopback_host("example.com"))
+        self.assertFalse(is_loopback_host("192.168.1.10"))
+
+        with self.assertRaisesRegex(AppServerError, "loopback-only"):
+            AppServerClient("ws://example.com:4500").connect()
 
     def run_cli(self, *args: str) -> tuple[int, str, str]:
         stdout = StringIO()

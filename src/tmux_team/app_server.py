@@ -7,6 +7,7 @@ import os
 import socket
 import struct
 from dataclasses import dataclass
+from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,6 +45,8 @@ class AppServerClient:
             raise AppServerError(f"only local ws:// app-server endpoints are supported now: {self.endpoint}")
         if parsed.hostname is None:
             raise AppServerError(f"app-server endpoint is missing a host: {self.endpoint}")
+        if not is_loopback_host(parsed.hostname):
+            raise AppServerError(f"app-server endpoint must be loopback-only: {self.endpoint}")
         port = parsed.port or 80
         path = parsed.path or "/"
         if parsed.query:
@@ -249,6 +252,16 @@ def submit_app_server_wake(
     with AppServerClient(endpoint, timeout=timeout) as client:
         client.initialize()
         return client.start_turn(thread_id, prompt, client_user_message_id=client_user_message_id)
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _read_http_response(sock: socket.socket) -> str:

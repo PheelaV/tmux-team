@@ -106,10 +106,13 @@ The unit suite includes a fake app-server WebSocket test for `app-server-turn` d
 Deterministic fake-agent smoke test:
 
 ```bash
+make integration-test
 make bootstrap-layout-smoke-test
 make smoke-test
 make congestion-smoke-test
 ```
+
+`make integration-test` is the default local confidence suite. It runs Ruff, unit tests, the real tmux bootstrap/sleep layout smoke, the basic fake-agent workflow, and the congestion/multiple-message workflow.
 
 Visible tmux run:
 
@@ -127,6 +130,7 @@ uv run --with-editable . python scripts/sandbox_demo.py --session tt-sandbox --r
 Dockerized deterministic smoke test:
 
 ```bash
+make docker-test
 make docker-smoke-test
 make docker-congestion-smoke-test
 ```

@@ -89,6 +89,217 @@ requires_stable_commit = true
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
 
+    def test_authenticated_actor_defaults_send_sender_to_self(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "send",
+            "--to",
+            "orchestrator",
+            "--summary",
+            "status",
+            "--body",
+            "collector status",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn("from=collector", out)
+
+    def test_authenticated_actor_cannot_send_as_another_role(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "trainer",
+            "--summary",
+            "spoof",
+            "--body",
+            "bad sender",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to send as 'trainer'", err)
+
+    def test_authenticated_actor_cannot_claim_another_inbox(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--summary",
+            "incoming",
+            "--body",
+            "task",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "inbox",
+            "next",
+            "--role",
+            "orchestrator",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to run inbox.next", err)
+
+    def test_authenticated_actor_needs_policy_for_role_state_changes(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "role",
+            "pause",
+            "trainer",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to change role state", err)
+
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8")
+            + """
+[roles.collector.policy]
+can_change_role_state = true
+""",
+            encoding="utf-8",
+        )
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "role",
+            "pause",
+            "trainer",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("trainer state=paused", out)
+
+    def test_authenticated_actor_needs_policy_to_notify_another_role(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "notify",
+            "orchestrator",
+            "--method",
+            "app-server-turn",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to run role.notify", err)
+
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8")
+            + """
+[roles.collector.policy]
+can_notify = ["orchestrator"]
+""",
+            encoding="utf-8",
+        )
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--summary",
+            "queued for explicit notify",
+            "--body",
+            "task",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "notify",
+            "orchestrator",
+            "--method",
+            "app-server-turn",
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("no app-server endpoint/thread binding", err)
+
+    def test_authenticated_actor_cannot_use_send_keys_notify_without_breakglass_policy(self) -> None:
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8")
+            + """
+[roles.collector.policy]
+can_notify = ["orchestrator"]
+""",
+            encoding="utf-8",
+        )
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "notify",
+            "orchestrator",
+            "--method",
+            "send-keys",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to use tmux send-keys notification", err)
+
+    def test_authenticated_actor_cannot_run_privileged_cli_actions_by_default(self) -> None:
+        cases = (
+            (
+                ("codex", "bind", "collector", "--endpoint", "ws://127.0.0.1:4500", "--thread-id", "thread-1"),
+                "not authorized to bind Codex app-server roles",
+            ),
+            (("stable", "approve", "abc123"), "not authorized to approve stable commits"),
+            (("sleep", "--dry-run"), "not authorized to sleep the team"),
+        )
+        for command, expected_error in cases:
+            with self.subTest(command=command):
+                code, out, err = self.run_main("--config", str(self.config), "--actor", "collector", *command)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn(expected_error, err)
+
+    def test_policy_mode_permissive_is_cli_breakglass(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "--policy-mode",
+            "permissive",
+            "role",
+            "pause",
+            "trainer",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("trainer state=paused", out)
+
     def test_paused_role_blocks_normal_message_but_records_it(self) -> None:
         code, out, err = self.run_cli(
             "send",

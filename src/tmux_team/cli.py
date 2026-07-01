@@ -22,6 +22,7 @@ from .bootstrap import (
 )
 from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config, write_default_config
 from .lifecycle import LifecycleError, sleep_team
+from .policy import PolicyContext, authorize, normalize_policy_mode
 from .store import CLAIMABLE_STATES, ROLE_STATES, Store, normalize_priority
 
 
@@ -36,7 +37,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = load_config(args.config, args.runtime_dir)
-    except (BootstrapError, ConfigError) as exc:
+        policy_context = build_policy_context(args, config)
+        apply_actor_defaults(args, policy_context)
+        authorize_cli_command(args, config, policy_context)
+    except (BootstrapError, ConfigError, PermissionError, ValueError) as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
@@ -73,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmux-team")
     parser.add_argument("--config", help="Path to .tmux-team/team.toml")
     parser.add_argument("--runtime-dir", help="Override runtime directory")
+    parser.add_argument("--actor", help="Authenticated role actor for policy enforcement")
+    parser.add_argument(
+        "--policy-mode",
+        help="Policy mode override: strict or permissive. Use permissive as an explicit breakglass opt-out.",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -134,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     send = subparsers.add_parser("send", help="Queue a message")
     send.add_argument("--to", required=True, dest="recipient")
-    send.add_argument("--from", default="operator", dest="sender")
+    send.add_argument("--from", default=None, dest="sender")
     send.add_argument("--priority", default="normal", choices=("urgent", "high", "normal", "low"))
     send.add_argument("--summary", required=True)
     body = send.add_mutually_exclusive_group()
@@ -283,6 +292,56 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_policy_context(args: argparse.Namespace, config) -> PolicyContext:
+    mode = args.policy_mode or config.policy.mode
+    return PolicyContext(actor=args.actor, mode=normalize_policy_mode(mode))
+
+
+def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext) -> None:
+    if args.command == "send" and args.sender is None:
+        args.sender = policy_context.actor or "operator"
+
+
+def authorize_cli_command(args: argparse.Namespace, config, policy_context: PolicyContext) -> None:
+    if args.command == "send":
+        authorize(
+            config,
+            policy_context,
+            "message.send",
+            sender=args.sender,
+            recipient=args.recipient,
+        )
+        return
+
+    if args.command == "inbox":
+        authorize(config, policy_context, f"inbox.{args.inbox_command}", role=args.role)
+        return
+
+    if args.command == "role" and args.role_command != "list":
+        authorize(config, policy_context, "role.state.change", role=args.role)
+        return
+
+    if args.command == "notify":
+        authorize(config, policy_context, "role.notify", role=args.role, method=args.method)
+        return
+
+    if args.command == "sleep":
+        authorize(config, policy_context, "team.sleep")
+        return
+
+    if args.command == "codex" and args.codex_command == "bind":
+        authorize(config, policy_context, "codex.bind", role=args.role)
+        return
+
+    if args.command == "codex" and args.codex_command == "wake":
+        authorize(config, policy_context, "role.notify", role=args.role, method="app-server-turn")
+        return
+
+    if args.command == "stable" and args.stable_command == "approve":
+        authorize(config, policy_context, "stable.approve", role=args.role)
+        return
+
+
 def cmd_config(args: argparse.Namespace, config) -> int:
     if args.config_command != "show":
         return 2
@@ -404,7 +463,7 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
     state = state_by_command.get(args.role_command)
     if state not in ROLE_STATES:
         return 2
-    store.set_role_state(conn, args.role, state)
+    store.set_role_state(conn, args.role, state, actor=args.actor or "operator")
     print(f"{args.role} state={state}")
     return 0
 

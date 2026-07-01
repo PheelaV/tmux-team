@@ -276,52 +276,64 @@ class Store:
 
     def claim_next(self, conn: sqlite3.Connection, role: str, claim_seconds: int) -> sqlite3.Row | None:
         now = utc_now()
-        row = conn.execute(
-            """
-            SELECT * FROM messages
-            WHERE recipient = ?
-              AND state IN ('queued', 'notified', 'retrying')
-            ORDER BY
-              CASE priority
-                WHEN 'urgent' THEN 0
-                WHEN 'high' THEN 1
-                WHEN 'normal' THEN 2
-                ELSE 3
-              END,
-              created_at
-            LIMIT 1
-            """,
-            (role,),
-        ).fetchone()
-        if row is None:
-            return None
         claim_expires_at = (datetime.now(UTC) + timedelta(seconds=claim_seconds)).replace(microsecond=0).isoformat()
-        conn.execute(
+        row = conn.execute(
             """
             UPDATE messages
             SET state = 'claimed', claimed_by = ?, claim_expires_at = ?, updated_at = ?
-            WHERE id = ? AND state IN ('queued', 'notified', 'retrying')
+            WHERE id = (
+                SELECT id FROM messages
+                WHERE recipient = ?
+                  AND (
+                    state IN ('queued', 'notified', 'retrying')
+                    OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+                  )
+                ORDER BY
+                  CASE priority
+                    WHEN 'urgent' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    ELSE 3
+                  END,
+                  created_at
+                LIMIT 1
+            )
+              AND recipient = ?
+              AND (
+                state IN ('queued', 'notified', 'retrying')
+                OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+              )
+            RETURNING *
             """,
-            (role, claim_expires_at, now, row["id"]),
-        )
+            (role, claim_expires_at, now, role, now, role, now),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
         self.record_event(conn, "message.claimed", role, row["id"], {"claim_expires_at": claim_expires_at})
         conn.commit()
-        return conn.execute("SELECT * FROM messages WHERE id = ?", (row["id"],)).fetchone()
+        return row
 
     def ack_message(self, conn: sqlite3.Connection, role: str, message_id: str) -> sqlite3.Row:
         now = utc_now()
         row = self._message_for_role(conn, role, message_id)
-        conn.execute(
+        self._require_message_state(row, "acknowledge", ("claimed", "acknowledged"))
+        updated = conn.execute(
             """
             UPDATE messages
             SET state = 'acknowledged', acknowledged_at = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND recipient = ? AND state IN ('claimed', 'acknowledged')
+            RETURNING *
             """,
-            (now, now, message_id),
-        )
+            (now, now, message_id, role),
+        ).fetchone()
+        if updated is None:
+            current = self._message_for_role(conn, role, message_id)
+            self._require_message_state(current, "acknowledge", ("claimed", "acknowledged"))
+            raise ValueError(f"Message {message_id} could not be acknowledged")
         self.record_event(conn, "message.acknowledged", role, message_id, {})
         conn.commit()
-        return conn.execute("SELECT * FROM messages WHERE id = ?", (row["id"],)).fetchone()
+        return updated
 
     def complete_message(
         self,
@@ -333,7 +345,8 @@ class Store:
     ) -> sqlite3.Row:
         now = utc_now()
         row = self._message_for_role(conn, role, message_id)
-        conn.execute(
+        self._require_message_state(row, "complete", ("claimed", "acknowledged"))
+        updated = conn.execute(
             """
             UPDATE messages
             SET state = 'completed',
@@ -341,10 +354,15 @@ class Store:
                 result_status = ?,
                 result_summary = ?,
                 updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND recipient = ? AND state IN ('claimed', 'acknowledged')
+            RETURNING *
             """,
-            (now, result_status, result_summary, now, message_id),
-        )
+            (now, result_status, result_summary, now, message_id, role),
+        ).fetchone()
+        if updated is None:
+            current = self._message_for_role(conn, role, message_id)
+            self._require_message_state(current, "complete", ("claimed", "acknowledged"))
+            raise ValueError(f"Message {message_id} could not be completed")
         self.record_event(
             conn,
             "message.completed",
@@ -353,7 +371,7 @@ class Store:
             {"status": result_status, "summary": result_summary, "previous_state": row["state"]},
         )
         conn.commit()
-        return conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return updated
 
     def notify_role(self, conn: sqlite3.Connection, role: str, method: str = "auto") -> tuple[bool, str]:
         role_row = self.get_role(conn, role)
@@ -674,6 +692,11 @@ class Store:
         if row["recipient"] != role:
             raise PermissionError(f"Message {message_id} is addressed to {row['recipient']}, not {role}")
         return row
+
+    def _require_message_state(self, row: sqlite3.Row, action: str, allowed_states: tuple[str, ...]) -> None:
+        if row["state"] not in allowed_states:
+            allowed = ", ".join(allowed_states)
+            raise ValueError(f"Cannot {action} message {row['id']} in state {row['state']}; expected one of: {allowed}")
 
 
 def utc_now() -> str:

@@ -51,7 +51,7 @@ smoke-test: require-uv
 congestion-smoke-test: require-uv
 	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tmux-team-congestion-itest --root /tmp/tmux-team-congestion-itest --force --scenario congestion
 
-integration-test: smoke-test
+integration-test: lint test bootstrap-layout-smoke-test smoke-test congestion-smoke-test
 
 docker-smoke-test:
 	docker build -f Dockerfile.sandbox -t tmux-team-sandbox .
@@ -61,7 +61,7 @@ docker-congestion-smoke-test:
 	docker build -f Dockerfile.sandbox -t tmux-team-sandbox .
 	docker run --rm tmux-team-sandbox python scripts/sandbox_demo.py --spawn-session --session tt-docker-congestion --root /tmp/tmux-team-congestion-sandbox --force --scenario congestion
 
-docker-test: docker-smoke-test
+docker-test: docker-smoke-test docker-congestion-smoke-test
 
 codex-integration-test: require-uv
 	$(UV_RUN) python scripts/codex_task_integration.py --root /tmp/tmux-team-codex-itest --force
