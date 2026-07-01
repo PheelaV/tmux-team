@@ -23,10 +23,12 @@ install-dev:
 install-skill:
 	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/agents"
 	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references"
+	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/ponytail"
 	cp skills/start-tmux-team/SKILL.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/SKILL.md"
 	cp skills/start-tmux-team/agents/openai.yaml "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/agents/openai.yaml"
 	cp skills/start-tmux-team/references/invariants.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references/invariants.md"
 	cp skills/start-tmux-team/references/team-shapes.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references/team-shapes.md"
+	cp skills/ponytail/SKILL.md "$${CODEX_HOME:-$$HOME/.codex}/skills/ponytail/SKILL.md"
 
 lint: ruff-check format-check
 
