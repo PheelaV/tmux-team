@@ -175,4 +175,5 @@ Start with the knowledge base:
 - [kb/05_installable_extension.md](kb/05_installable_extension.md)
 - [kb/06_hermes_comparison.md](kb/06_hermes_comparison.md)
 - [kb/07_principles.md](kb/07_principles.md)
+- [kb/08_extensibility_and_hooks.md](kb/08_extensibility_and_hooks.md)
 - [docs/invariants.md](docs/invariants.md)

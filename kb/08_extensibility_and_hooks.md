@@ -38,7 +38,7 @@ For `tmux-team`, the same philosophy should become:
 
 ## Non-Negotiable Invariants
 
-Extensions must not weaken the control-plane invariants from [docs/invariants.md](docs/invariants.md):
+Extensions must not weaken the control-plane invariants from [docs/invariants.md](../docs/invariants.md):
 
 - Task bodies stay in the durable inbox, not wake prompts or tmux pane text.
 - Production Codex wake delivery stays app-server `turn/start`, not `tmux send-keys`.
