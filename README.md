@@ -65,6 +65,8 @@ tmux-team send --to orchestrator --summary "B19 failed" --body-file report.md
 tmux-team inbox next --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed"
+tmux-team ext list
+tmux-team ext doctor
 tmux-team sleep
 ```
 
@@ -91,6 +93,8 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 ```
 
 `app-server-turn` submits a real Codex turn to the role's thread. The pane stays the live Codex UI, but `tmux-team` never types into the pane.
+
+Project-local extensions live under `.tmux-team/extensions/<name>/extension.toml`. The first extension surface supports executable JSON hooks around message creation, claim, ack, completion, and notification operations. Hooks run through the shared service layer used by both the CLI and MCP facade.
 
 ## Tests
 

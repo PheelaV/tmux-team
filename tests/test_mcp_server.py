@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 import tempfile
 import unittest
 from io import StringIO
@@ -101,6 +103,43 @@ notify_method = "app-server-turn"
         store = self.store()
         with store.connect() as conn, self.assertRaises(ToolCallError):
             call_tool(store, conn, "team_notify", {"role": "orchestrator", "method": "send-keys"})
+
+    def test_team_send_uses_project_extension_hooks(self) -> None:
+        extension_dir = self.root / ".tmux-team" / "extensions" / "route"
+        extension_dir.mkdir(parents=True)
+        (extension_dir / "extension.toml").write_text(
+            f"""
+[extension]
+id = "example.route"
+version = "0.1.0"
+
+[[hooks]]
+event = "message.before_create"
+command = "{shlex.quote(sys.executable)} hook.py"
+mode = "mutate"
+""",
+            encoding="utf-8",
+        )
+        (extension_dir / "hook.py").write_text(
+            """
+import json
+import sys
+
+payload = json.load(sys.stdin)
+message = payload["data"]["message"]
+message["recipient"] = "implementer"
+message["summary"] = "[mcp routed] " + message["summary"]
+print(json.dumps({"ok": True, "patch": {"message": message}}))
+""",
+            encoding="utf-8",
+        )
+
+        store = self.store()
+        with store.connect() as conn:
+            sent = call_tool(store, conn, "team_send", {"to": "orchestrator", "summary": "Wake", "wake": False})
+
+            self.assertEqual(sent["message"]["recipient"], "implementer")
+            self.assertEqual(sent["message"]["summary"], "[mcp routed] Wake")
 
     def test_json_rpc_tools_list_and_call(self) -> None:
         tool_names = {tool["name"] for tool in list_tools()}

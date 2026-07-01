@@ -21,14 +21,23 @@ from .bootstrap import (
     parse_roles,
 )
 from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config, write_default_config
+from .extensions.manifest import ExtensionError, inspect_extensions
+from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, sleep_team
+from .logging_config import configure_logging
 from .policy import PolicyContext, authorize, normalize_policy_mode
+from .service import TeamService
 from .store import CLAIMABLE_STATES, ROLE_STATES, Store, normalize_priority
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        configure_logging(args.log_level, args.log_file)
+    except ValueError as exc:
+        print(f"tmux-team: {exc}", file=sys.stderr)
+        return 2
 
     if args.command == "init":
         return cmd_init(args)
@@ -40,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy_context = build_policy_context(args, config)
         apply_actor_defaults(args, policy_context)
         authorize_cli_command(args, config, policy_context)
-    except (BootstrapError, ConfigError, PermissionError, ValueError) as exc:
+    except (BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError) as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
@@ -51,21 +60,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_config(args, config)
             if args.command == "status":
                 return cmd_status(args, store, conn)
+            if args.command == "ext":
+                return cmd_ext(args, config)
+
+            service = TeamService(store)
             if args.command == "send":
-                return cmd_send(args, store, conn)
+                return cmd_send(args, service, conn)
             if args.command == "inbox":
-                return cmd_inbox(args, store, conn)
+                return cmd_inbox(args, service, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
             if args.command == "notify":
-                return cmd_notify(args, store, conn)
+                return cmd_notify(args, service, conn)
             if args.command == "sleep":
                 return cmd_sleep(args, store, conn, config)
             if args.command == "codex":
-                return cmd_codex(args, store, conn)
+                return cmd_codex(args, store, service, conn)
             if args.command == "stable":
                 return cmd_stable(args, store, conn)
-    except (ConfigError, LifecycleError, ValueError, KeyError, PermissionError) as exc:
+    except (
+        ConfigError,
+        ExtensionError,
+        HookDenied,
+        HookError,
+        LifecycleError,
+        ValueError,
+        KeyError,
+        PermissionError,
+    ) as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
@@ -78,6 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", help="Path to .tmux-team/team.toml")
     parser.add_argument("--runtime-dir", help="Override runtime directory")
     parser.add_argument("--actor", help="Authenticated role actor for policy enforcement")
+    parser.add_argument("--log-level", default="WARNING", help="Python log level: DEBUG, INFO, WARNING, ERROR")
+    parser.add_argument("--log-file", help="Write logs to a file instead of stderr")
     parser.add_argument(
         "--policy-mode",
         help="Policy mode override: strict or permissive. Use permissive as an explicit breakglass opt-out.",
@@ -95,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub.add_parser("show", help="Show resolved config")
 
     subparsers.add_parser("status", help="Show roles and queue counts")
+
+    ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
+    ext_sub = ext.add_subparsers(dest="ext_command", required=True)
+    ext_sub.add_parser("list", help="List discovered extensions")
+    ext_sub.add_parser("doctor", help="Validate extension manifests")
 
     bootstrap = subparsers.add_parser("bootstrap", help="Start a pane-resident Codex team in tmux")
     bootstrap.add_argument("--project-root", default=".", help="Project root for the team")
@@ -376,46 +405,78 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
-def cmd_send(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_ext(args: argparse.Namespace, config) -> int:
+    inspection = inspect_extensions(config)
+    if args.ext_command == "list":
+        if not config.extensions.enabled:
+            print("extensions: disabled")
+            return 0
+        if not inspection.manifests and not inspection.errors:
+            print("extensions: none")
+            return 0
+        print("extensions:")
+        for manifest in inspection.manifests:
+            print(
+                f"  {manifest.id} version={manifest.version} source={manifest.source} "
+                f"hooks={len(manifest.hooks)} path={manifest.path}"
+            )
+        if inspection.errors:
+            print("invalid:")
+            for error in inspection.errors:
+                print(f"  {error.path}: {error.message}")
+        return 0
+
+    if args.ext_command == "doctor":
+        if not config.extensions.enabled:
+            print("extensions disabled")
+            return 0
+        if inspection.errors:
+            print("extension errors:", file=sys.stderr)
+            for error in inspection.errors:
+                print(f"  {error.path}: {error.message}", file=sys.stderr)
+            return 1
+        print(f"extensions ok: {len(inspection.manifests)}")
+        for manifest in inspection.manifests:
+            print(f"  {manifest.id}: hooks={len(manifest.hooks)}")
+        return 0
+
+    return 2
+
+
+def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
     normalize_priority(args.priority)
-    role = store.get_role(conn, args.recipient)
-    if role is None:
-        raise KeyError(f"Unknown recipient role: {args.recipient}")
-
     body = read_body(args)
-    state = "queued"
-    exit_code = 0
-    if role["state"] != "active" and not args.force and args.priority != "urgent":
-        state = f"blocked_by_role_{role['state']}"
-        exit_code = 2
-
-    message = store.create_message(
+    result = service.send_message(
         conn,
         sender=args.sender,
         recipient=args.recipient,
         priority=args.priority,
         summary=args.summary,
         body=body,
-        state=state,
+        force=args.force,
+        wake=not args.no_notify,
+        notify_method=args.notify_method,
+        actor=args.actor or args.sender,
     )
+    message = result.message
     print(f"{message.id} {message.state} to={message.recipient} priority={message.priority}")
     print(f"body: {message.body_path}")
 
-    if state == "queued" and not args.no_notify:
-        ok, details = store.notify_role(conn, args.recipient, args.notify_method)
-        if ok:
-            print(f"notify: {details}")
+    if result.notification is not None:
+        if result.notification.ok:
+            print(f"notify: {result.notification.details}")
         else:
-            print(f"notify_failed: {details}", file=sys.stderr)
+            print(f"notify_failed: {result.notification.details}", file=sys.stderr)
 
-    if state != "queued":
-        print(f"blocked: role {args.recipient} is {role['state']}", file=sys.stderr)
-    return exit_code
+    if result.blocked is not None:
+        print(f"blocked: role {result.blocked['role']} is {result.blocked['state']}", file=sys.stderr)
+        return 2
+    return 0
 
 
-def cmd_inbox(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
     if args.inbox_command == "next":
-        row = store.claim_next(conn, args.role, args.claim_seconds)
+        row = service.claim_next(conn, args.role, args.claim_seconds, actor=args.actor)
         if row is None:
             print(f"no pending messages for {args.role}")
             return 1
@@ -424,7 +485,7 @@ def cmd_inbox(args: argparse.Namespace, store: Store, conn) -> int:
 
     if args.inbox_command == "list":
         states = tuple(args.state) if args.state else None
-        rows = store.list_messages(conn, role=args.role, states=states, limit=args.limit)
+        rows = service.store.list_messages(conn, role=args.role, states=states, limit=args.limit)
         if not rows:
             print(f"no messages for {args.role}")
             return 0
@@ -433,12 +494,12 @@ def cmd_inbox(args: argparse.Namespace, store: Store, conn) -> int:
         return 0
 
     if args.inbox_command == "ack":
-        row = store.ack_message(conn, args.role, args.message_id)
+        row = service.ack_message(conn, args.role, args.message_id, actor=args.actor)
         print(message_one_line(row))
         return 0
 
     if args.inbox_command == "complete":
-        row = store.complete_message(conn, args.role, args.message_id, args.status, args.summary)
+        row = service.complete_message(conn, args.role, args.message_id, args.status, args.summary, actor=args.actor)
         print(message_one_line(row))
         return 0
 
@@ -468,12 +529,12 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
-def cmd_notify(args: argparse.Namespace, store: Store, conn) -> int:
-    ok, details = store.notify_role(conn, args.role, args.method)
-    if ok:
-        print(details)
+def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
+    result = service.notify_role(conn, args.role, args.method, actor=args.actor)
+    if result.ok:
+        print(result.details)
         return 0
-    print(details, file=sys.stderr)
+    print(result.details, file=sys.stderr)
     return 1
 
 
@@ -519,7 +580,7 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
     return 0
 
 
-def cmd_codex(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_codex(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
     role = store.get_role(conn, args.role)
     if role is None:
         raise KeyError(f"Unknown role: {args.role}")
@@ -544,11 +605,11 @@ def cmd_codex(args: argparse.Namespace, store: Store, conn) -> int:
         return 0
 
     if args.codex_command == "wake":
-        ok, details = store.notify_role(conn, args.role, "app-server-turn")
-        if ok:
-            print(details)
+        result = service.notify_role(conn, args.role, "app-server-turn", actor=args.actor)
+        if result.ok:
+            print(result.details)
             return 0
-        print(details, file=sys.stderr)
+        print(result.details, file=sys.stderr)
         return 1
 
     return 2

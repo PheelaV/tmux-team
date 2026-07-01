@@ -154,9 +154,35 @@ That is test automation. The production `send-keys` wake-up path sends only the 
 
 ## Hooks
 
-There is no hooks integration yet.
+There is now a first project-local extension hook implementation for message and notification operations.
 
-The intended hook behavior is:
+Project extensions live under:
+
+```text
+.tmux-team/extensions/<extension-id>/extension.toml
+```
+
+The current executable-hook surface includes:
+
+- `message.before_create`;
+- `message.created`;
+- `message.before_claim`;
+- `message.claimed`;
+- `message.acknowledged`;
+- `message.before_complete`;
+- `message.completed`;
+- `notification.before`;
+- `notification.after`;
+- `notification.failed`.
+
+Hooks run through the shared `TeamService`, so CLI and MCP message paths use the same extension behavior. Validate extensions with:
+
+```bash
+tmux-team ext list
+tmux-team ext doctor
+```
+
+Still-future Codex lifecycle hooks include:
 
 - `SessionStart`: print role identity and pending inbox count;
 - `Stop`: remind an idle role if pending messages exist;

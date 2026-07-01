@@ -13,6 +13,13 @@ DEFAULT_RUNTIME_DIR = Path(".tmux-team/runtime")
 
 
 @dataclass(frozen=True)
+class ExtensionSettings:
+    enabled: bool = True
+    project: bool = True
+    user: bool = False
+
+
+@dataclass(frozen=True)
 class RoleConfig:
     name: str
     mode: str = "human_visible"
@@ -31,6 +38,7 @@ class TeamConfig:
     config_path: Path | None = None
     project_root: Path | None = None
     policy: TeamPolicy = field(default_factory=TeamPolicy)
+    extensions: ExtensionSettings = field(default_factory=ExtensionSettings)
 
 
 class ConfigError(RuntimeError):
@@ -66,6 +74,7 @@ def load_config(
             config_path=None,
             project_root=project_root,
             policy=TeamPolicy(),
+            extensions=ExtensionSettings(),
         )
 
     path = discovered_path.resolve()
@@ -82,6 +91,10 @@ def load_config(
     team_name = str(team_data.get("name") or "default")
     try:
         team_policy = parse_team_policy(team_data)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    try:
+        extension_settings = parse_extension_settings(team_data.get("extensions"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -121,6 +134,7 @@ def load_config(
         config_path=path,
         project_root=project_root.resolve(),
         policy=team_policy,
+        extensions=extension_settings,
     )
 
 
@@ -154,6 +168,25 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def parse_extension_settings(value: Any) -> ExtensionSettings:
+    if value is None:
+        return ExtensionSettings()
+    if not isinstance(value, dict):
+        raise ValueError("team.extensions must be a TOML table")
+    return ExtensionSettings(
+        enabled=_optional_bool(value, "enabled", True),
+        project=_optional_bool(value, "project", True),
+        user=_optional_bool(value, "user", False),
+    )
+
+
+def _optional_bool(data: dict[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"team.extensions.{key} must be a boolean")
 
 
 def _toml_string(value: str) -> str:

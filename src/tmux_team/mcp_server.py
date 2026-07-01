@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .config import ConfigError, load_config
+from .extensions.manifest import ExtensionError
+from .extensions.runner import HookDenied, HookError
+from .service import TeamService
 from .store import CLAIMABLE_STATES, Store, normalize_notify_method, normalize_priority
 
 JSONRPC_VERSION = "2.0"
@@ -113,19 +116,20 @@ def call_tool(store: Store, conn: Any, name: str, arguments: dict[str, Any] | No
     args = arguments or {}
     if not isinstance(args, dict):
         raise ToolCallError("tool arguments must be an object")
+    service = TeamService(store)
 
     if name == "team_status":
         return team_status(store, conn)
     if name == "team_inbox_next":
-        return team_inbox_next(store, conn, args)
+        return team_inbox_next(service, conn, args)
     if name == "team_ack":
-        return team_ack(store, conn, args)
+        return team_ack(service, conn, args)
     if name == "team_complete":
-        return team_complete(store, conn, args)
+        return team_complete(service, conn, args)
     if name == "team_send":
-        return team_send(store, conn, args)
+        return team_send(service, conn, args)
     if name in ("team_notify", "team_wake"):
-        return team_notify(store, conn, args)
+        return team_notify(service, conn, args)
     raise ToolCallError(f"unknown tool: {name}")
 
 
@@ -142,37 +146,37 @@ def team_status(store: Store, conn: Any) -> dict[str, Any]:
     }
 
 
-def team_inbox_next(store: Store, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def team_inbox_next(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     role = required_str(args, "role")
     claim_seconds = int_arg(args, "claim_seconds", 3600)
     include_body = bool_arg(args, "include_body", True)
-    row = store.claim_next(conn, role, claim_seconds)
+    row = service.claim_next(conn, role, claim_seconds, actor=role)
     if row is None:
-        return {"role": role, "message": None, "pending": store.pending_count(conn, role)}
+        return {"role": role, "message": None, "pending": service.store.pending_count(conn, role)}
     return {
         "role": role,
         "message": message_dict(row, include_body=include_body),
-        "pending": store.pending_count(conn, role),
+        "pending": service.store.pending_count(conn, role),
     }
 
 
-def team_ack(store: Store, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def team_ack(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     role = required_str(args, "role")
     message_id = required_str(args, "message_id")
-    row = store.ack_message(conn, role, message_id)
+    row = service.ack_message(conn, role, message_id, actor=role)
     return {"message": message_dict(row)}
 
 
-def team_complete(store: Store, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def team_complete(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     role = required_str(args, "role")
     message_id = required_str(args, "message_id")
     status = str_arg(args, "status", "done")
     summary = str_arg(args, "summary", "")
-    row = store.complete_message(conn, role, message_id, status, summary)
+    row = service.complete_message(conn, role, message_id, status, summary, actor=role)
     return {"message": message_dict(row)}
 
 
-def team_send(store: Store, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def team_send(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     recipient = required_str(args, "to")
     sender = str(args.get("from") or args.get("sender") or "operator")
     priority = str_arg(args, "priority", "normal")
@@ -182,44 +186,37 @@ def team_send(store: Store, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     force = bool_arg(args, "force", False)
     wake = bool_arg(args, "wake", True)
 
-    role = store.get_role(conn, recipient)
-    if role is None:
-        raise KeyError(f"Unknown recipient role: {recipient}")
-
-    state = "queued"
-    blocked = None
-    if role["state"] != "active" and not force and priority != "urgent":
-        state = f"blocked_by_role_{role['state']}"
-        blocked = {"role": recipient, "state": role["state"]}
-
-    message = store.create_message(
+    sent = service.send_message(
         conn,
         sender=sender,
         recipient=recipient,
         priority=priority,
         summary=summary,
         body=body,
-        state=state,
+        force=force,
+        wake=wake,
+        notify_method="app-server-turn",
+        actor=sender,
     )
-    row = conn.execute("SELECT * FROM messages WHERE id = ?", (message.id,)).fetchone()
-    result: dict[str, Any] = {"message": message_dict(row), "blocked": blocked}
+    row = conn.execute("SELECT * FROM messages WHERE id = ?", (sent.message.id,)).fetchone()
+    result: dict[str, Any] = {"message": message_dict(row), "blocked": sent.blocked}
 
-    if state == "queued" and wake:
-        result["notification"] = app_server_wake(store, conn, recipient)
+    if sent.notification is not None:
+        result["notification"] = {
+            "ok": sent.notification.ok,
+            "method": sent.notification.method,
+            "details": sent.notification.details,
+        }
     return result
 
 
-def team_notify(store: Store, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def team_notify(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     role = required_str(args, "role")
     method = normalize_notify_method(str_arg(args, "method", "app-server-turn"))
     if method != "app-server-turn":
         raise ToolCallError("MCP notify only supports app-server-turn delivery")
-    return app_server_wake(store, conn, role)
-
-
-def app_server_wake(store: Store, conn: Any, role: str) -> dict[str, Any]:
-    ok, details = store.notify_role(conn, role, "app-server-turn")
-    return {"ok": ok, "method": "app-server-turn", "details": details}
+    result = service.notify_role(conn, role, "app-server-turn", actor=role)
+    return {"ok": result.ok, "method": result.method, "details": result.details}
 
 
 def role_status_dict(store: Store, conn: Any, row: Any, counts: dict[str, int]) -> dict[str, Any]:
@@ -309,7 +306,7 @@ def handle_json_rpc_request(store: Store, conn: Any, request: Any) -> dict[str, 
             result = {"ok": True}
         else:
             return None if is_notification else json_rpc_error(request_id, -32601, f"Method not found: {method}")
-    except (ToolCallError, ValueError, KeyError, PermissionError) as exc:
+    except (ExtensionError, HookDenied, HookError, ToolCallError, ValueError, KeyError, PermissionError) as exc:
         return None if is_notification else json_rpc_error(request_id, -32000, str(exc))
     except OSError as exc:
         return None if is_notification else json_rpc_error(request_id, -32001, str(exc))
