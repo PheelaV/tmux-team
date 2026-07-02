@@ -4,38 +4,87 @@ Minimal tmux-backed control plane for pane-visible agent teams.
 
 Codex is the first target backend. Other agent CLIs can be added later without changing the core invariant: agents stay visible in tmux, while durable work moves through `tmux-team` state.
 
-## Current Shape
+## Install
 
-`tmux-team` is a small Python CLI backed by SQLite, TOML config, tmux windows, and Codex app-server remote TUI wake delivery.
+Prerequisites: `tmux`, Codex CLI authenticated locally, and either `uv` or `pipx`.
 
-Install requires `uv` or `pipx`; `make install-dev` prefers `uv` and falls back to `pipx`.
+Install the CLI from GitHub:
 
-Read the human docs before changing bootstrap or delivery behavior:
+```bash
+uv tool install git+https://github.com/PheelaV/tmux-team.git
+# or
+pipx install git+https://github.com/PheelaV/tmux-team.git
+```
 
-- [docs/index.md](docs/index.md)
-- [docs/invariants.md](docs/invariants.md)
+Install the Codex skill from a checkout:
+
+```bash
+git clone https://github.com/PheelaV/tmux-team.git
+cd tmux-team
+make install-skill
+```
+
+`tmux-team` is not packaged as a Codex plugin marketplace install yet; the skill is plain files copied into `$CODEX_HOME/skills`.
+
+For local development, use the checkout:
 
 ```bash
 make install-dev
 make install-skill
 ```
 
-The intended Codex workflow starts from one operator-owned tmux pane:
+Read the human docs before changing bootstrap or delivery behavior:
+
+- [docs/index.md](docs/index.md)
+- [docs/invariants.md](docs/invariants.md)
+
+## Getting Started: Fix A Failing Test
+
+Start with a low-risk repo. The point is not to manually chat with four panes; give the orchestrator one durable goal and let roles pass work through the inbox.
 
 ```bash
-tmux new-session -s my-project -c /path/to/project
+cd /path/to/project
+tmux new-session -s my-project -c "$PWD"
 codex
 ```
 
-Then ask Codex to use the `start-tmux-team` skill and start the team for the current project. The skill calls:
+In that Codex control pane, ask:
+
+```text
+Use the start-tmux-team skill.
+
+Goal:
+Run the smallest failing test, route implementation work to the implementer,
+and report the final test command and result. Keep changes inside this repo.
+```
+
+Equivalent direct command:
 
 ```bash
-tmux-team bootstrap --project-root . --goal "USER_GOAL"
+tmux-team bootstrap --project-root . --goal "Run the smallest failing test, route implementation work to the implementer, and report the final test command and result. Keep changes inside this repo."
 ```
 
 If bootstrap is launched from inside tmux, it uses the current tmux session unless `--session` is provided. Otherwise it creates a named session from the project directory.
 
 Bootstrap names the launcher window `control-plane`, starts a visible `app-server` tmux window, opens remote Codex TUI panes in a tiled `agents` window with `codex --remote ...`, waits for each TUI to create a loaded app-server thread, writes those discovered thread IDs and pane targets to `.tmux-team/team.toml`, queues the initial goal to `orchestrator`, and wakes the orchestrator with app-server `turn/start`. It does not type into any tmux prompt.
+
+Watch progress from the control pane:
+
+```bash
+tmux-team status
+tmux-team inbox list --role orchestrator
+tmux-team inbox list --role implementer
+```
+
+Stop the managed team without killing your control pane:
+
+```bash
+tmux-team sleep
+```
+
+## How It Works
+
+`tmux-team` is a small Python CLI backed by SQLite, TOML config, tmux windows, and Codex app-server remote TUI wake delivery.
 
 If role agents need to message each other without stopping at Codex approval prompts, launch managed role panes with an explicit role execution policy:
 

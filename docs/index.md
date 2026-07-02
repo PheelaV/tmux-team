@@ -4,7 +4,7 @@ Start here for operator-facing tmux-team docs. The `kb/` directory is agent-faci
 
 ## Operator Flow
 
-1. Install: `make install-dev` and `make install-skill`.
+1. Install the CLI: `uv tool install git+https://github.com/PheelaV/tmux-team.git`, then install the skill from a checkout with `make install-skill`.
 2. Start from a tmux control pane: `tmux new-session -s <project> -c <project-root>`, then launch Codex.
 3. Bootstrap the team through the `start-tmux-team` skill, or run `tmux-team bootstrap --project-root . --goal "..."`
 4. Operate with `tmux-team status`, `send`, `inbox next`, `inbox ack`, `inbox complete`, `role pause/resume/drain/retire`, and `stable approve/current/sync`.
