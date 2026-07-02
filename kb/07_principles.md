@@ -47,6 +47,7 @@ Use durable records for:
 
 - messages;
 - role state;
+- role scratchpad memory;
 - stable commits;
 - active runs;
 - delivery attempts;
@@ -55,6 +56,8 @@ Use durable records for:
 - operator overrides.
 
 Markdown is allowed for human-readable bodies and evidence, but the control state should be structured.
+
+Scratchpads are operational memory, not transcripts. They preserve long-term goals across context compression, sleep/resume, and pane restarts, and they let other agents and the human overseer inspect the role's current state. Keep the latest task, blocker, boundary, and next action near the top. Do not append routine startup, parking, no-pending, or "still waiting" notes. Put bulky reports in separate files and link or summarize them from memory.
 
 ## Tmux Is A View, Not The Transport
 

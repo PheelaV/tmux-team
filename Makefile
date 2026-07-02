@@ -1,10 +1,8 @@
-CODEX_NPM_PACKAGE ?= @openai/codex
-DOCKER_CODEX_HOME ?= $(CURDIR)/.tmux-team/codex-home
 UV ?= uv
 UV_RUN = $(UV) run --with-editable .
 UV_RUN_DEV = $(UV) run --with-editable . --extra dev
 
-.PHONY: require-uv install-dev install-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test docker-codex-image docker-codex-login docker-codex-login-api-key docker-codex-login-status docker-codex-integration-test
+.PHONY: require-uv install-dev install-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test
 
 require-uv:
 	@command -v "$(UV)" >/dev/null 2>&1 || (echo "tmux-team tests require uv. Install with: brew install uv" >&2; exit 2)
@@ -46,10 +44,10 @@ bootstrap-layout-smoke-test: require-uv
 	$(UV_RUN) python scripts/bootstrap_layout_smoke.py --session tt-bootstrap-layout-itest --root /tmp/tmux-team-bootstrap-layout-itest --force
 
 smoke-test: require-uv
-	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tt-itest --root /tmp/tmux-team-itest --force
+	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --cleanup-session --session tt-itest --root /tmp/tmux-team-itest --force
 
 congestion-smoke-test: require-uv
-	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tt-congestion-itest --root /tmp/tmux-team-congestion-itest --force --scenario congestion
+	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --cleanup-session --session tt-congestion-itest --root /tmp/tmux-team-congestion-itest --force --scenario congestion
 
 integration-test: lint test bootstrap-layout-smoke-test smoke-test congestion-smoke-test
 
@@ -59,7 +57,7 @@ docker-smoke-test:
 
 docker-congestion-smoke-test:
 	docker build -f Dockerfile.sandbox -t tmux-team-sandbox .
-	docker run --rm tmux-team-sandbox python scripts/sandbox_demo.py --spawn-session --session tt-docker-congestion --root /tmp/tmux-team-congestion-sandbox --force --scenario congestion
+	docker run --rm tmux-team-sandbox python scripts/sandbox_demo.py --spawn-session --cleanup-session --session tt-docker-congestion --root /tmp/tmux-team-congestion-sandbox --force --scenario congestion
 
 docker-test: docker-smoke-test docker-congestion-smoke-test
 
@@ -68,24 +66,3 @@ codex-integration-test: require-uv
 
 codex-docker-fs-integration-test: require-uv
 	$(UV_RUN) python scripts/codex_task_integration.py --root /tmp/tmux-team-codex-fs-itest --force --verify-in-docker
-
-docker-codex-image:
-	docker build -f Dockerfile.codex-integration -t tmux-team-codex-integration --build-arg CODEX_NPM_PACKAGE="$(CODEX_NPM_PACKAGE)" .
-
-docker-codex-login: docker-codex-image
-	mkdir -p "$(DOCKER_CODEX_HOME)"
-	docker run --rm -it -e CODEX_HOME=/codex-home -v "$(DOCKER_CODEX_HOME):/codex-home" tmux-team-codex-integration codex login --device-auth
-
-docker-codex-login-api-key: docker-codex-image
-	@test -n "$$OPENAI_API_KEY" || (echo "Set OPENAI_API_KEY before running API-key login." >&2; exit 2)
-	mkdir -p "$(DOCKER_CODEX_HOME)"
-	printf '%s' "$$OPENAI_API_KEY" | docker run --rm -i -e CODEX_HOME=/codex-home -v "$(DOCKER_CODEX_HOME):/codex-home" tmux-team-codex-integration codex login --with-api-key
-
-docker-codex-login-status: docker-codex-image
-	mkdir -p "$(DOCKER_CODEX_HOME)"
-	docker run --rm -e CODEX_HOME=/codex-home -v "$(DOCKER_CODEX_HOME):/codex-home" tmux-team-codex-integration codex login status
-
-docker-codex-integration-test: docker-codex-image
-	@mkdir -p "$(DOCKER_CODEX_HOME)"
-	@test -n "$$OPENAI_API_KEY$$CODEX_API_KEY" || test -f "$(DOCKER_CODEX_HOME)/auth.json" || (echo "Run 'make docker-codex-login' once, or set OPENAI_API_KEY/CODEX_API_KEY." >&2; exit 2)
-	docker run --rm -e TMUX_TEAM_RUN_CODEX=1 -e OPENAI_API_KEY -e CODEX_API_KEY -e CODEX_HOME=/codex-home -v "$(DOCKER_CODEX_HOME):/codex-home" tmux-team-codex-integration

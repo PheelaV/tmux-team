@@ -61,7 +61,7 @@ notify_method = "app-server-turn"
                 {
                     "to": "orchestrator",
                     "from": "collector",
-                    "summary": "B19 failed",
+                    "summary": "test failed",
                     "body": "Evidence goes here.",
                     "wake": False,
                 },
@@ -88,6 +88,45 @@ notify_method = "app-server-turn"
             status = call_tool(store, conn, "team_status", {})
             roles = {role["name"]: role for role in status["roles"]}
             self.assertEqual(roles["orchestrator"]["counts"]["completed"], 1)
+
+    def test_team_complete_can_reply_to_sender(self) -> None:
+        store = self.store()
+        with store.connect() as conn:
+            sent = call_tool(
+                store,
+                conn,
+                "team_send",
+                {
+                    "to": "orchestrator",
+                    "from": "implementer",
+                    "summary": "test failed",
+                    "body": "Evidence goes here.",
+                    "wake": False,
+                },
+            )
+            message_id = sent["message"]["id"]
+            call_tool(store, conn, "team_inbox_next", {"role": "orchestrator"})
+            call_tool(store, conn, "team_ack", {"role": "orchestrator", "message_id": message_id})
+
+            completed = call_tool(
+                store,
+                conn,
+                "team_complete",
+                {
+                    "role": "orchestrator",
+                    "message_id": message_id,
+                    "status": "done",
+                    "summary": "handled",
+                    "reply_to_sender": True,
+                    "reply_wake": False,
+                },
+            )
+
+            self.assertEqual(completed["message"]["state"], "completed")
+            self.assertIn("reply", completed)
+            self.assertEqual(completed["reply"]["recipient"], "implementer")
+            self.assertEqual(completed["reply"]["sender"], "orchestrator")
+            self.assertIn("Completed message", completed["reply"]["body"])
 
     def test_send_default_wake_uses_app_server_only_and_reports_missing_binding(self) -> None:
         store = self.store()

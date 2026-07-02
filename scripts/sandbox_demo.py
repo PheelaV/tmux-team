@@ -28,13 +28,14 @@ class Paths:
 
 def main() -> int:
     args = parse_args()
+    cleanup_session = False
     try:
         paths = reset_sandbox(Path(args.root).expanduser().resolve(), args.force)
         write_project(paths, args.scenario)
         write_config(paths, args.session)
 
         if args.spawn_session:
-            ensure_session(args.session, paths.root)
+            cleanup_session = ensure_session(args.session, paths.root, replace=args.cleanup_session)
         else:
             require_session(args.session)
 
@@ -44,6 +45,9 @@ def main() -> int:
     except DemoError as exc:
         print(f"sandbox demo failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if cleanup_session:
+            kill_session(args.session)
 
     print("")
     print("SANDBOX DEMO OK")
@@ -59,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session", default="tt-sandbox", help="tmux session name")
     parser.add_argument("--root", default="/tmp/tmux-team-sandbox", help="sandbox root")
     parser.add_argument("--spawn-session", action="store_true", help="create the tmux session if needed")
+    parser.add_argument("--cleanup-session", action="store_true", help="kill the spawned tmux session before exit")
     parser.add_argument("--force", action="store_true", help="replace an existing marked sandbox root")
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds to wait for each pane step")
     parser.add_argument("--scenario", choices=("basic", "congestion"), default="basic", help="smoke scenario")
@@ -190,10 +195,17 @@ notify_method = "display-message"
     )
 
 
-def ensure_session(session: str, cwd: Path) -> None:
+def ensure_session(session: str, cwd: Path, *, replace: bool) -> bool:
     if tmux_ok("has-session", "-t", session):
-        return
+        if not replace:
+            return False
+        kill_session(session)
     run(["tmux", "new-session", "-d", "-s", session, "-c", str(cwd)], check=True)
+    return True
+
+
+def kill_session(session: str) -> None:
+    run(["tmux", "kill-session", "-t", session], check=False)
 
 
 def require_session(session: str) -> None:

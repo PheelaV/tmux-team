@@ -16,3 +16,5 @@ Current high-value agent notes:
 - [06_hermes_comparison.md](06_hermes_comparison.md): what to borrow and what not to rebuild.
 - [07_principles.md](07_principles.md): product bias and non-goals.
 - [08_extensibility_and_hooks.md](08_extensibility_and_hooks.md): current extension authoring contract.
+- [09_omnigraph_memory_extension.md](09_omnigraph_memory_extension.md): plan for optional structured/RAG memory without moving coordination into Omnigraph.
+- [10_scratchpad_memory.md](10_scratchpad_memory.md): contract for top-loaded role memory that survives context compression and supports oversight.

@@ -48,6 +48,7 @@ class Store:
         self.runtime_dir = config.runtime_dir
         self.db_path = self.runtime_dir / "team.sqlite"
         self.events_path = self.runtime_dir / "events.jsonl"
+        self.milestones_path = self.runtime_dir / "milestones.jsonl"
         self.messages_dir = self.runtime_dir / "messages"
 
     def connect(self) -> sqlite3.Connection:
@@ -425,9 +426,8 @@ class Store:
                 return False, pane_details
             wake_prompt = (
                 f"You have {pending} pending tmux-team inbox message(s). "
-                f"Run `tmux-team inbox next --role {role}`, acknowledge and complete the claimed message, "
-                "then repeat `inbox next` until it reports no pending messages. "
-                "Do not rely on pane text as task content."
+                "Wake notice only. Claim durable work with `tmux-team inbox next`. "
+                "Follow the loaded tmux-team role loop and drain until empty."
             )
             command = [tmux, "send-keys", "-t", pane, wake_prompt, "Enter"]
 
@@ -549,23 +549,24 @@ class Store:
         return endpoint, thread_id, timeout
 
     def app_server_wake_prompt(self, role: str, pending: int) -> str:
-        config = self.cli_config_arg()
         return (
-            f"You have {pending} pending tmux-team inbox message(s) for role `{role}`.\n\n"
-            "Claim durable work now. Do not treat this wake-up prompt as the task body.\n\n"
-            "Process messages one at a time from the project worktree. After completing one message, "
-            "repeat `inbox next` until it reports no pending messages.\n\n"
-            "For each claimed message:\n\n"
-            f"1. `tmux-team{config} inbox next --role {role}`\n"
-            f"2. `tmux-team{config} inbox ack <message-id> --role {role}`\n"
-            f"3. Complete the work described in the claimed message body.\n"
-            f'4. `tmux-team{config} inbox complete <message-id> --role {role} --status <status> --summary "<summary>"`\n'
+            f"Inbox wake: {pending} pending message(s) for role `{role}`.\n"
+            "Wake notice only. Claim durable inbox work now.\n"
+            "Follow the loaded role loop and drain until empty.\n"
         )
 
-    def cli_config_arg(self) -> str:
+    def cli_config_arg(self, role: str | None = None) -> str:
         if self.config.config_path is None:
             return ""
         config_path = self.config.config_path
+        if role is not None:
+            role_config = self.config.roles.get(role)
+            if role_config is not None and role_config.worktree:
+                worktree = Path(role_config.worktree).expanduser().resolve()
+                try:
+                    return f" --config {shlex.quote(str(config_path.relative_to(worktree)))}"
+                except ValueError:
+                    return f" --config {shlex.quote(str(config_path))}"
         if self.config.project_root is not None:
             try:
                 config_path = config_path.relative_to(self.config.project_root)
@@ -643,6 +644,77 @@ class Store:
     def list_stable_commits(self, conn: sqlite3.Connection) -> list[sqlite3.Row]:
         return list(conn.execute("SELECT * FROM stable_commits ORDER BY scope"))
 
+    def record_milestone(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        actor: str,
+        summary: str,
+        body: str = "",
+        role: str | None = None,
+        kind: str = "milestone",
+        ref_id: str | None = None,
+        tags: tuple[str, ...] = (),
+        metadata: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        milestone = {
+            "created_at": utc_now(),
+            "actor": actor,
+            "role": role,
+            "kind": kind,
+            "summary": summary,
+            "body": body,
+            "ref_id": ref_id,
+            "tags": list(tags),
+            "metadata": metadata or {},
+        }
+        self.milestones_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.milestones_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(milestone, sort_keys=True) + "\n")
+        self.record_event(
+            conn,
+            "milestone.recorded",
+            actor,
+            ref_id,
+            {"summary": summary, "role": role, "kind": kind, "tags": list(tags)},
+        )
+        conn.commit()
+        return milestone
+
+    def list_milestones(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        role: str | None = None,
+        kind: str | None = None,
+        tags: tuple[str, ...] = (),
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if not self.milestones_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        required_tags = set(tags)
+        for line in self.milestones_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            created_at = parse_utc_datetime(str(row.get("created_at") or ""))
+            if since is not None and created_at < since:
+                continue
+            if until is not None and created_at > until:
+                continue
+            if role is not None and row.get("role") != role:
+                continue
+            if kind is not None and row.get("kind") != kind:
+                continue
+            if required_tags and not required_tags <= set(row.get("tags") or []):
+                continue
+            rows.append(row)
+        if limit > 0:
+            rows = rows[-limit:]
+        return rows
+
     def record_notification(
         self,
         conn: sqlite3.Connection,
@@ -706,6 +778,15 @@ class Store:
 
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def parse_utc_datetime(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def new_message_id() -> str:

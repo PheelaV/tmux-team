@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -9,9 +11,9 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from tmux_team.bootstrap import default_session_name
-from tmux_team.cli import main
-from tmux_team.config import TeamConfig, load_config
+from tmux_team.bootstrap import BootstrapError, default_session_name, prepare_role_worktrees, role_startup_prompt
+from tmux_team.cli import infer_role_from_tmux_pane, main
+from tmux_team.config import RoleConfig, TeamConfig, load_config
 from tmux_team.store import Store
 
 
@@ -73,6 +75,196 @@ requires_stable_commit = true
 
             self.assertEqual(config.runtime_dir, runtime.resolve())
 
+    def test_config_env_works_without_config_arg(self) -> None:
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config)}):
+            code, out, err = self.run_main("status")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("team: test-team", out)
+
+    def test_config_arg_overrides_config_env(self) -> None:
+        other = self.root / "other.toml"
+        other_runtime = self.root / "other-runtime"
+        other.write_text(
+            f"""[team]
+name = "other-team"
+runtime_dir = "{other_runtime}"
+""",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(other)}):
+            code, out, err = self.run_main("--config", str(self.config), "status")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("team: test-team", out)
+        self.assertNotIn("other-team", out)
+
+    def test_role_env_defaults_inbox_role_and_sender(self) -> None:
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
+            code, out, err = self.run_main(
+                "send",
+                "--to",
+                "collector",
+                "--summary",
+                "self task",
+                "--body",
+                "body",
+                "--no-notify",
+            )
+            self.assertEqual(code, 0, err)
+            message_id = out.split()[0]
+
+            code, out, err = self.run_main("inbox", "next")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_id}", out)
+        self.assertIn("from: collector", out)
+
+    def test_memory_commands_default_to_role_and_keep_latest_near_top(self) -> None:
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
+            code, out, err = self.run_main("memory", "append", "--body", "Active task: inspect failing tests")
+            self.assertEqual(code, 0, err)
+            memory_path = Path(out.strip())
+
+            code, out, err = self.run_main("memory", "show")
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(memory_path, (self.root / ".tmux-team" / "memory" / "collector.md").resolve())
+        self.assertIn("## Latest Updates", out)
+        self.assertIn("Active task: inspect failing tests", out)
+        self.assertLess(out.index("## Latest Updates"), out.index("Active task: inspect failing tests"))
+
+    def test_memory_can_read_body_file(self) -> None:
+        note = self.root / "memory-note.md"
+        note.write_text("Current blocker: provider quota", encoding="utf-8")
+
+        code, out, err = self.run_cli("memory", "append", "--role", "collector", "--body-file", str(note))
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("memory", "show", "--role", "collector")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Current blocker: provider quota", out)
+
+    def test_milestone_add_and_list_jsonl(self) -> None:
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "orchestrator"}):
+            code, out, err = self.run_main(
+                "milestone",
+                "add",
+                "--role",
+                "collector",
+                "--summary",
+                "targeted test failed",
+                "--kind",
+                "evidence",
+                "--ref",
+                "msg_123",
+                "--tag",
+                "test",
+                "--body",
+                "romanize_syllable returned broken-a",
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("evidence role=collector targeted test failed", out)
+
+            code, out, err = self.run_main("milestone", "list", "--since", "-4h")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("targeted test failed", out)
+        self.assertIn("romanize_syllable returned broken-a", out)
+        milestone_path = self.root / "runtime" / "milestones.jsonl"
+        rows = [json.loads(line) for line in milestone_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[0]["actor"], "orchestrator")
+        self.assertEqual(rows[0]["role"], "collector")
+        self.assertEqual(rows[0]["kind"], "evidence")
+        self.assertEqual(rows[0]["ref_id"], "msg_123")
+        self.assertEqual(rows[0]["tags"], ["test"])
+
+    def test_milestone_list_today_can_print_json(self) -> None:
+        code, out, err = self.run_cli("milestone", "add", "--summary", "goal completed", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("milestone", "list", "--today", "--json")
+
+        self.assertEqual(code, 0, err)
+        rows = json.loads(out)
+        self.assertEqual(rows[0]["summary"], "goal completed")
+
+    def test_milestone_add_defaults_role_from_env_actor(self) -> None:
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "orchestrator"}):
+            code, out, err = self.run_main("milestone", "add", "--summary", "orchestrator checkpoint")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("role=orchestrator", out)
+
+        milestone_path = self.root / "runtime" / "milestones.jsonl"
+        rows = [json.loads(line) for line in milestone_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[0]["actor"], "orchestrator")
+        self.assertEqual(rows[0]["role"], "orchestrator")
+
+    def test_non_orchestrator_actor_cannot_record_milestone(self) -> None:
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
+            code, _out, err = self.run_main(
+                "milestone",
+                "add",
+                "--summary",
+                "too noisy",
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("not authorized to record milestones", err)
+
+    def test_worktree_env_file_and_cwd_infer_config_and_role(self) -> None:
+        worktree = self.root / "collector"
+        env_file = worktree / ".tmux-team" / "team.env"
+        env_file.parent.mkdir()
+        env_file.write_text(f"TMUX_TEAM_CONFIG={self.config}\n", encoding="utf-8")
+        subdir = worktree / "py_scripts"
+        subdir.mkdir()
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "worktree task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(subdir)
+            with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": "", "TMUX_TEAM_ROLE": "", "TMUX_PANE": ""}):
+                code, out, err = self.run_main("inbox", "next")
+        finally:
+            os.chdir(old_cwd)
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_id}", out)
+
+    def test_tmux_pane_option_infers_role_when_worktree_is_shared(self) -> None:
+        config = TeamConfig(
+            name="test",
+            runtime_dir=self.root / "runtime",
+            roles={
+                "orchestrator": RoleConfig(name="orchestrator", worktree=str(self.root)),
+                "implementer": RoleConfig(name="implementer", worktree=str(self.root)),
+            },
+        )
+
+        completed = subprocess.CompletedProcess(["tmux"], 0, stdout="implementer\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX_PANE": "%1"}),
+            patch("tmux_team.cli.subprocess.run", return_value=completed),
+        ):
+            self.assertEqual(infer_role_from_tmux_pane(config), "implementer")
+
     def test_message_lifecycle(self) -> None:
         code, out, err = self.run_cli(
             "send",
@@ -81,7 +273,7 @@ requires_stable_commit = true
             "--from",
             "collector",
             "--summary",
-            "B19 failed",
+            "test failed",
             "--body",
             "Evidence goes here.",
             "--no-notify",
@@ -112,6 +304,202 @@ requires_stable_commit = true
         )
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
+
+    def test_complete_can_reply_to_sender(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "test failed",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", message_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            message_id,
+            "--role",
+            "orchestrator",
+            "--status",
+            "done",
+            "--summary",
+            "handled",
+            "--reply-to-sender",
+            "--reply-no-notify",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=completed", out)
+        self.assertIn("reply: msg_", out)
+        self.assertIn("to=collector", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn("from=orchestrator", out)
+        self.assertIn("orchestrator completed: test failed", out)
+
+    def test_complete_accepts_body_detail(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "test failed",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", message_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            message_id,
+            "--role",
+            "orchestrator",
+            "--status",
+            "done",
+            "--summary",
+            "handled",
+            "--body",
+            "detail line one\nline two",
+            "--reply-to-sender",
+            "--reply-no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=completed", out)
+        self.assertIn("reply: msg_", out)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Result: handled\n\ndetail line one\nline two", out)
+
+    def test_reply_to_sender_is_message_scoped(self) -> None:
+        for sender, summary in (("collector", "collector report"), ("trainer", "trainer report")):
+            code, out, err = self.run_cli(
+                "send",
+                "--to",
+                "orchestrator",
+                "--from",
+                sender,
+                "--summary",
+                summary,
+                "--body",
+                "body",
+                "--no-notify",
+            )
+            self.assertEqual(code, 0, err)
+            message_id = out.split()[0]
+            code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+            self.assertEqual(code, 0, err)
+            code, out, err = self.run_cli("inbox", "ack", message_id, "--role", "orchestrator")
+            self.assertEqual(code, 0, err)
+            code, out, err = self.run_cli(
+                "inbox",
+                "complete",
+                message_id,
+                "--role",
+                "orchestrator",
+                "--status",
+                "done",
+                "--summary",
+                "handled",
+                "--reply-to-sender",
+                "--reply-no-notify",
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"to={sender}", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn("orchestrator completed: collector report", out)
+        self.assertNotIn("trainer report", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "trainer")
+        self.assertEqual(code, 0, err)
+        self.assertIn("orchestrator completed: trainer report", out)
+        self.assertNotIn("collector report", out)
+
+    def test_reply_to_sender_skips_completion_reply_loops(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "collector report",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        original_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", original_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            original_id,
+            "--role",
+            "orchestrator",
+            "--status",
+            "done",
+            "--summary",
+            "routed",
+            "--reply-to-sender",
+            "--reply-no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        reply_id = ""
+        for line in out.splitlines():
+            if line.startswith("id: "):
+                reply_id = line.removeprefix("id: ")
+        self.assertTrue(reply_id.startswith("msg_"))
+        code, out, err = self.run_cli("inbox", "ack", reply_id, "--role", "collector")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            reply_id,
+            "--role",
+            "collector",
+            "--status",
+            "done",
+            "--summary",
+            "acknowledged",
+            "--reply-to-sender",
+            "--reply-no-notify",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("reply_skipped: message is already a completion reply", err)
+        self.assertNotIn("reply: msg_", out)
 
     def test_init_writes_valid_toml_config(self) -> None:
         config_path = self.root / "new-project" / ".tmux-team" / "team.toml"
@@ -346,6 +734,62 @@ can_notify = ["orchestrator"]
         self.assertEqual(code, 0, err)
         self.assertIn("trainer state=paused", out)
 
+    def test_codex_session_context_includes_recovery_contract_and_memory(self) -> None:
+        memory = self.root / ".tmux-team" / "memory" / "collector.md"
+        memory.parent.mkdir(parents=True, exist_ok=True)
+        memory.write_text(
+            "# collector Scratchpad\n\n## Latest Updates\n\nActive task: collect evidence.\n", encoding="utf-8"
+        )
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--summary",
+            "collect evidence",
+            "--body",
+            "task",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("codex", "session-context", "--role", "collector", "--max-memory-chars", "200")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("same operating contract as the initial role startup prompt", out)
+        self.assertIn("not a new task", out)
+        self.assertIn("Role: collector", out)
+        self.assertIn("Pending inbox messages: 1", out)
+        self.assertIn("Scratchpad excerpt:", out)
+        self.assertIn("Active task: collect evidence.", out)
+
+    def test_codex_session_context_defaults_to_actor_role(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "codex",
+            "session-context",
+            "--max-memory-chars",
+            "0",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("Role: collector", out)
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "codex",
+            "session-context",
+            "--role",
+            "orchestrator",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to run memory.read", err)
+
     def test_paused_role_blocks_normal_message_but_records_it(self) -> None:
         code, out, err = self.run_cli(
             "send",
@@ -437,6 +881,40 @@ can_notify = ["orchestrator"]
         self.assertIn("display-message -p", log)
         self.assertNotIn("send-keys", log)
 
+    def test_send_keys_notification_uses_blunt_prompt_when_explicitly_allowed(self) -> None:
+        fake_dir, log_path = self.write_fake_tmux("0\t0\tcodex\n", allow_send_keys=True)
+
+        with patch.dict(os.environ, {"PATH": f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            code, out, err = self.run_cli(
+                "send",
+                "--to",
+                "orchestrator",
+                "--summary",
+                "debug wake",
+                "--body",
+                "body",
+                "--notify-method",
+                "send-keys",
+            )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(" queued to=orchestrator ", out)
+        log = log_path.read_text(encoding="utf-8")
+        self.assertIn("send-keys", log)
+        self.assertIn("Wake notice only", log)
+        self.assertIn("tmux-team inbox next", log)
+        self.assertNotIn("tmux-team memory show", log)
+        self.assertNotIn("tmux-team inbox ack", log)
+        self.assertNotIn("tmux-team inbox complete", log)
+
+    def test_role_startup_prompt_discourages_memory_spam(self) -> None:
+        prompt = role_startup_prompt("collector")
+
+        self.assertIn("Append memory only for high-value durable changes", prompt)
+        self.assertIn("Do not append routine startup/parking/status chatter", prompt)
+        self.assertNotIn("missing or stale", prompt)
+        self.assertNotIn("durable status update", prompt)
+
     def test_bootstrap_dry_run_plans_visible_remote_tui_team(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"
 
@@ -470,9 +948,14 @@ can_notify = ["orchestrator"]
         self.assertIn("tmux select-pane -t tt-bootstrap:tt-agents.1 -T tt-implementer", out)
         self.assertIn("tmux select-layout -t tt-bootstrap:tt-agents tiled", out)
         self.assertIn("codex app-server --listen ws://127.0.0.1:4500", out)
-        self.assertIn("codex --remote ws://127.0.0.1:4500", out)
+        self.assertIn(f"codex --cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
+        self.assertIn("You are the `orchestrator` role in a tmux-team managed Codex team.", out)
+        self.assertIn("tmux-team memory show", out)
+        self.assertIn(f"TMUX_TEAM_CONFIG={generated_config}", out)
+        self.assertIn("TMUX_TEAM_ROLE=orchestrator", out)
         self.assertIn("[roles.orchestrator]", out)
         self.assertIn('pane = "tt-bootstrap:tt-agents.0"', out)
+        self.assertIn('scratchpad = ".tmux-team/memory/orchestrator.md"', out)
         self.assertIn('mode = "app_server_remote_tui"', out)
         self.assertIn('notify_method = "app-server-turn"', out)
         self.assertIn("session: tt-bootstrap", out)
@@ -522,7 +1005,10 @@ can_notify = ["orchestrator"]
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("codex --dangerously-bypass-approvals-and-sandbox --remote ws://127.0.0.1:4500", out)
+        self.assertIn(
+            f"codex --dangerously-bypass-approvals-and-sandbox --cd {self.root.resolve()} --remote ws://127.0.0.1:4500",
+            out,
+        )
         self.assertIn("codex_yolo = true", out)
         self.assertFalse(generated_config.exists())
 
@@ -547,9 +1033,222 @@ can_notify = ["orchestrator"]
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("codex --profile tmux-team-role --remote ws://127.0.0.1:4500", out)
+        self.assertIn(f"codex --profile tmux-team-role --cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
         self.assertIn('codex_profile = "tmux-team-role"', out)
         self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_can_launch_roles_with_role_codex_options(self) -> None:
+        generated_config = self.root / ".tmux-team" / "generated.toml"
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-bootstrap-options",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "orchestrator,collector",
+            "--role-model",
+            "orchestrator=gpt-5.5",
+            "--role-reasoning-effort",
+            "orchestrator=xhigh",
+            "--role-codex-profile",
+            "collector=collector-profile",
+            "--role-codex-config",
+            'collector=model_reasoning_effort="high"',
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("--model gpt-5.5", out)
+        self.assertIn('model_reasoning_effort="xhigh"', out)
+        self.assertIn("codex --profile collector-profile", out)
+        self.assertIn('model_reasoning_effort="high"', out)
+        self.assertIn('codex_model = "gpt-5.5"', out)
+        self.assertIn('codex_reasoning_effort = "xhigh"', out)
+        self.assertIn('codex_profile = "collector-profile"', out)
+        self.assertIn("codex_config = [", out)
+        self.assertIn('"model_reasoning_effort=\\"high\\""', out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_accepts_custom_role_memory(self) -> None:
+        generated_config = self.root / ".tmux-team" / "generated.toml"
+        memory_path = self.root / "memory" / "collector.md"
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-bootstrap-memory",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "collector",
+            "--role-memory",
+            f"collector={memory_path}",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'scratchpad = "{memory_path.resolve()}"', out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_uses_per_role_worktrees(self) -> None:
+        generated_config = self.root / ".tmux-team" / "generated.toml"
+        collector = (self.root / "collector-wt").resolve()
+        trainer = (self.root / "trainer-wt").resolve()
+        collector.mkdir()
+        trainer.mkdir()
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-bootstrap-worktrees",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "orchestrator,collector,trainer",
+            "--role-worktree",
+            f"collector={collector}",
+            "--role-worktree",
+            f"trainer={trainer}",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"tmux split-window -t tt-bootstrap-worktrees:tt-agents -c {collector}", out)
+        self.assertIn(f"tmux split-window -t tt-bootstrap-worktrees:tt-agents -c {trainer}", out)
+        self.assertIn(f"codex --cd {collector} --remote ws://127.0.0.1:4500", out)
+        self.assertIn(f"codex --cd {trainer} --remote ws://127.0.0.1:4500", out)
+        self.assertIn("TMUX_TEAM_ROLE=collector", out)
+        self.assertIn("TMUX_TEAM_ROLE=trainer", out)
+        self.assertIn(f'worktree = "{collector}"', out)
+        self.assertIn(f'worktree = "{trainer}"', out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_role_worktree_validation(self) -> None:
+        missing = (self.root / "missing-worktree").resolve()
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(self.root / ".tmux-team" / "generated.toml"),
+            "--session",
+            "tt-bootstrap-missing",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "collector",
+            "--role-worktree",
+            f"collector={missing}",
+            "--dry-run",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("does not exist", err)
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(self.root / ".tmux-team" / "generated.toml"),
+            "--session",
+            "tt-bootstrap-create",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "collector",
+            "--role-worktree",
+            f"collector={missing}",
+            "--create-missing-worktrees",
+            "--worktree-base-ref",
+            "origin/main",
+            "--dry-run",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"git -C {self.root.resolve()} worktree add {missing} origin/main", out)
+
+    def test_bootstrap_duplicate_explicit_worktree_requires_allow_flag(self) -> None:
+        shared = self.root / "shared-wt"
+        shared.mkdir()
+        base_args = (
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(self.root / ".tmux-team" / "generated.toml"),
+            "--session",
+            "tt-bootstrap-shared",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "collector,trainer",
+            "--role-worktree",
+            f"collector={shared}",
+            "--role-worktree",
+            f"trainer={shared}",
+        )
+
+        code, _out, err = self.run_main(*base_args, "--dry-run")
+        self.assertEqual(code, 2)
+        self.assertIn("roles share worktree", err)
+
+        code, _out, err = self.run_main(*base_args, "--allow-shared-worktree", "collector,trainer", "--dry-run")
+        self.assertEqual(code, 0, err)
+
+    def test_role_worktree_dirty_tracked_files_require_allow_flag(self) -> None:
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "tracked.txt"], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+        )
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(BootstrapError, "dirty tracked files"):
+            prepare_role_worktrees(
+                repo,
+                ("worker",),
+                {"worker": repo},
+                create_missing_worktrees=False,
+                worktree_base_ref="HEAD",
+                allow_shared_worktree_groups=(),
+                allow_dirty_roles=frozenset(),
+                dry_run=False,
+            )
+
+        worktrees, commands = prepare_role_worktrees(
+            repo,
+            ("worker",),
+            {"worker": repo},
+            create_missing_worktrees=False,
+            worktree_base_ref="HEAD",
+            allow_shared_worktree_groups=(),
+            allow_dirty_roles=frozenset({"worker"}),
+            dry_run=False,
+        )
+        self.assertEqual(worktrees["worker"], repo.resolve())
+        self.assertEqual(commands, [])
 
     def test_sleep_dry_run_plans_managed_window_teardown(self) -> None:
         self.write_remote_tui_config()
@@ -597,11 +1296,18 @@ can_notify = ["orchestrator"]
         prompt = store.app_server_wake_prompt("implementer", 3)
 
         self.assertIn("3 pending", prompt)
-        self.assertIn("one at a time", prompt)
-        self.assertIn("repeat", prompt)
-        self.assertIn("until it reports no pending messages", prompt)
+        self.assertIn("Wake notice only", prompt)
+        self.assertIn("loaded role loop", prompt)
+        self.assertIn("drain until empty", prompt)
+        self.assertNotIn("tmux-team inbox next", prompt)
+        self.assertNotIn("tmux-team", prompt)
+        self.assertNotIn("tmux-team inbox ack", prompt)
+        self.assertNotIn("tmux-team inbox complete", prompt)
+        self.assertNotIn("--reply-to-sender", prompt)
+        self.assertNotIn("tmux-team memory append", prompt)
+        self.assertNotIn("start-tmux-team", prompt)
 
-    def test_app_server_wake_prompt_prefers_project_relative_config_path(self) -> None:
+    def test_app_server_wake_prompt_uses_pane_env_instead_of_config_path(self) -> None:
         store = Store(
             TeamConfig(
                 name="test",
@@ -614,8 +1320,30 @@ can_notify = ["orchestrator"]
 
         prompt = store.app_server_wake_prompt("implementer", 1)
 
-        self.assertIn("tmux-team --config .tmux-team/team.toml inbox next --role implementer", prompt)
+        self.assertIn("Inbox wake", prompt)
+        self.assertNotIn("tmux-team", prompt)
+        self.assertNotIn("--config", prompt)
+        self.assertNotIn("--role implementer", prompt)
         self.assertNotIn(str(self.root), prompt)
+
+    def test_app_server_wake_prompt_omits_absolute_config_for_role_worktree(self) -> None:
+        config_path = self.root / ".tmux-team" / "team.toml"
+        role_worktree = self.root / "implementer-worktree"
+        store = Store(
+            TeamConfig(
+                name="test",
+                runtime_dir=self.root / "runtime",
+                roles={"implementer": RoleConfig(name="implementer", worktree=str(role_worktree))},
+                config_path=config_path,
+                project_root=self.root,
+            )
+        )
+
+        prompt = store.app_server_wake_prompt("implementer", 1)
+
+        self.assertIn("Wake notice only", prompt)
+        self.assertNotIn(str(config_path), prompt)
+        self.assertNotIn("--role implementer", prompt)
 
     def run_cli(self, *args: str) -> tuple[int, str, str]:
         return self.run_main("--config", str(self.config), *args)
@@ -627,11 +1355,14 @@ can_notify = ["orchestrator"]
             code = main([*args])
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def write_fake_tmux(self, inspection_output: str) -> tuple[Path, Path]:
+    def write_fake_tmux(self, inspection_output: str, *, allow_send_keys: bool = False) -> tuple[Path, Path]:
         fake_dir = self.root / "bin"
         fake_dir.mkdir()
         log_path = self.root / "tmux.log"
         tmux = fake_dir / "tmux"
+        send_keys_block = (
+            "exit 0" if allow_send_keys else "printf 'send-keys should not be called in this test\\n' >&2\n  exit 9"
+        )
         tmux.write_text(
             f"""#!/bin/sh
 printf '%s\\n' "$*" >> {log_path}
@@ -640,8 +1371,7 @@ if [ "$1" = "display-message" ] && [ "$2" = "-p" ]; then
   exit 0
 fi
 if [ "$1" = "send-keys" ]; then
-  printf 'send-keys should not be called in this test\\n' >&2
-  exit 9
+  {send_keys_block}
 fi
 exit 0
 """,

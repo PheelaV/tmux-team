@@ -141,6 +141,15 @@ can_sleep = true
         authorize(config, context, "stable.approve", role="global")
         authorize(config, context, "team.sleep")
 
+    def test_milestones_are_operator_or_orchestrator_only(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "milestone.add", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "milestone.add", role="collector")
+
+        with self.assertRaisesRegex(PolicyError, "send evidence to orchestrator"):
+            authorize(config, PolicyContext(actor="collector"), "milestone.add", role="collector")
+
     def test_permissive_policy_mode_is_breakglass(self) -> None:
         config = self.config()
         context = PolicyContext(actor="implementer", mode="permissive")

@@ -71,7 +71,11 @@ tmux-team bootstrap --project-root . --goal "Run the smallest failing test, rout
 
 If bootstrap is launched from inside tmux, it uses the current tmux session unless `--session` is provided. Otherwise it creates `tt-<project>` from the project directory name.
 
-Bootstrap names the launcher window `tt-control`, starts a visible `tt-app-server` tmux window, opens remote Codex TUI panes in a tiled `tt-agents` window with `codex --remote ...`, waits for each TUI to create a loaded app-server thread, writes those discovered thread IDs and pane targets to `.tmux-team/team.toml`, queues the initial goal to `orchestrator`, and wakes the orchestrator with app-server `turn/start`. It does not type into any tmux prompt.
+Bootstrap names the launcher window `tt-control`, starts a visible `tt-app-server` tmux window, opens remote Codex TUI panes in a tiled `tt-agents` window with `codex --cd <role-worktree> --remote ...`, waits for each TUI to create a loaded app-server thread, writes those discovered thread IDs and pane targets to `.tmux-team/team.toml`, queues the initial goal to `orchestrator`, and wakes the orchestrator with app-server `turn/start`. It does not type into any tmux prompt.
+
+`--goal` and `--goal-file` seed only the initial operator message to `orchestrator`. Keep them to the objective, boundaries, and success criteria; the orchestrator should decompose that into scoped role inbox messages.
+
+Each spawned role starts with a small tmux-team bootstrap prompt: load the `start-tmux-team` skill, read scratchpad memory, then claim inbox work or park. Scratchpads keep latest operational state near the top so context compression or pane restart does not erase the role's long-term goal.
 
 Watch progress from the control pane:
 
@@ -79,6 +83,7 @@ Watch progress from the control pane:
 tmux-team status
 tmux-team inbox list --role orchestrator
 tmux-team inbox list --role implementer
+tmux-team milestone list --today
 ```
 
 Stop the managed team without killing your control pane:
@@ -100,6 +105,24 @@ tmux-team bootstrap --project-root . --role-yolo
 
 `--role-profile` passes a named Codex profile to each managed role TUI. `--role-yolo` passes Codex `--dangerously-bypass-approvals-and-sandbox` to managed role TUIs only. Use YOLO mode only when the project/worktree is already the sandbox you accept for those agents.
 
+Set role-specific Codex launch options when roles need different models, reasoning effort, or profiles:
+
+```bash
+tmux-team bootstrap \
+  --project-root . \
+  --role-model orchestrator=gpt-5.5 \
+  --role-reasoning-effort orchestrator=xhigh \
+  --role-model collector=gpt-5.5 \
+  --role-reasoning-effort collector=high \
+  --role-codex-profile implementer=tmux-team-role
+```
+
+For advanced Codex config, pass repeatable per-role `-c` overrides:
+
+```bash
+tmux-team bootstrap --project-root . --role-codex-config collector='model_reasoning_effort="high"'
+```
+
 The default agent layout is grouped:
 
 ```bash
@@ -112,26 +135,79 @@ Use separate role windows only when you explicitly want that layout:
 tmux-team bootstrap --project-root . --agent-layout separate-windows
 ```
 
+Use per-role worktrees when roles need isolated checkout state:
+
+```bash
+tmux-team bootstrap \
+  --project-root /repo/main \
+  --roles orchestrator,implementer,collector,trainer \
+  --role-worktree orchestrator=/repo/main \
+  --role-worktree implementer=/repo/main \
+  --role-worktree collector=/repo/main-collector \
+  --role-worktree trainer=/repo/main-trainer \
+  --allow-shared-worktree orchestrator,implementer
+```
+
+`project_root` remains the control/config root and the default role worktree. Each role with `--role-worktree ROLE=PATH` launches its Codex TUI with tmux `-c <path>` and Codex `--cd <path>`, and the generated `.tmux-team/team.toml` records `worktree = "..."` for the role.
+
+To create missing worktrees before launch:
+
+```bash
+tmux-team bootstrap \
+  --project-root /repo/main \
+  --role-worktree collector=/repo/main-collector \
+  --create-missing-worktrees \
+  --worktree-base-ref HEAD
+```
+
+Bootstrap refuses explicitly mapped missing worktrees, non-git directories, dirty tracked files, and duplicated role worktrees unless allowed. Use `--allow-dirty-role ROLE` or `--allow-shared-worktree ROLE,ROLE` only when that is intentional.
+
 Manual CLI operations are still available:
 
 ```bash
 tmux-team init --name example-team --runtime-dir /tmp/tmux-team-example
 tmux-team status
-tmux-team send --to orchestrator --summary "B19 failed" --body-file report.md
+tmux-team send --to orchestrator --summary "test failed" --body-file report.md
 tmux-team inbox next --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
-tmux-team inbox complete <message-id> --role orchestrator --summary "routed"
+tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
 tmux-team ext list
 tmux-team ext doctor
 tmux-team sleep
 ```
 
-`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work.
+`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+
+Role panes spawned by bootstrap are bound to team config and role. Inside a role pane, agents can use short commands such as `tmux-team memory show`, `tmux-team inbox next`, and `tmux-team inbox complete <id> --reply-to-sender`; explicit `--config` and `--role` flags remain overrides for operator scripts and ad-hoc control commands. The binding uses pane-local env when available, plus a `.tmux-team/team.env` worktree pointer and tmux pane role metadata for Codex tool shells.
+
+For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks.
+
+Scratchpad memory is durable role state, not the queue. Use it for long-term goals, current task, blockers, boundaries, stable inputs, owned artifacts, and next action. Record only high-value durable updates near the top:
+
+```bash
+tmux-team memory show
+tmux-team memory append --body "Active task: reproduce failing segment test; next action: run targeted pytest."
+```
+
+Use existing scratchpads during migration with `--role-memory ROLE=PATH`.
+
+Do not append routine startup, parking, no-pending, command transcript, or "still waiting" notes. A practical threshold: append only when the update changes an active task, blocker, boundary, long-running job, final result, or next action; fold minor status facts into the next important update.
+
+Milestones are the append-only operator timeline. Use them for broad state changes and results that answer "what happened today?" without reading every inbox message or pane transcript. By default, the operator/control plane and orchestrator record milestones; other roles report evidence through inbox completion and let the orchestrator decide what is milestone-worthy:
+
+```bash
+tmux-team milestone add --kind result --summary "Targeted test fixed and passed" --tag test
+tmux-team milestone list --today
+tmux-team milestone list --since -4h
+```
+
+Do not use milestones for command transcripts or routine chatter. Good milestone events include team start, task routing, evidence accepted, blocker found/resolved, tests passing, stable commit approval, sleep/resume, and team resize.
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
 
 - `team.sqlite` for durable state;
 - `events.jsonl` for append-only audit;
+- `milestones.jsonl` for append-only operator milestones;
 - `messages/*.md` for message bodies;
 - `sleeps/*.toml` for operator-facing sleep/restart snapshots.
 
@@ -212,21 +288,6 @@ TMUX_TEAM_RUN_CODEX=1 make codex-docker-fs-integration-test
 ```
 
 This runs Codex on the host, using your normal local Codex auth, while Docker only sees the bind-mounted sandbox filesystem for final verification.
-
-Dockerized real Codex integration is configurable:
-
-```bash
-make docker-codex-login
-make docker-codex-integration-test
-```
-
-For API-key auth instead:
-
-```bash
-OPENAI_API_KEY="$OPENAI_API_KEY" make docker-codex-integration-test
-```
-
-The Docker image installs Codex with `npm install -g @openai/codex`. Override with `CODEX_NPM_PACKAGE` if you need a pinned version. Docker Codex auth is persisted under `.tmux-team/codex-home`, which is ignored by git.
 
 ## Docs
 

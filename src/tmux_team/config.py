@@ -12,6 +12,9 @@ from .policy import RolePolicy, TeamPolicy, parse_role_policy, parse_team_policy
 
 DEFAULT_CONFIG_PATH = Path(".tmux-team/team.toml")
 DEFAULT_RUNTIME_DIR = Path(".tmux-team/runtime")
+ENV_FILE_PATH = Path(".tmux-team/team.env")
+CONFIG_PATH_ENV = "TMUX_TEAM_CONFIG"
+ROLE_ENV = "TMUX_TEAM_ROLE"
 RUNTIME_HOME_ENV = "TMUX_TEAM_HOME"
 RUNTIME_DIR_ENV = "TMUX_TEAM_RUNTIME_DIR"
 
@@ -29,6 +32,7 @@ class RoleConfig:
     state: str = "active"
     pane: str | None = None
     worktree: str | None = None
+    scratchpad: str | None = None
     capabilities: dict[str, Any] = field(default_factory=dict)
     policy: RolePolicy = field(default_factory=RolePolicy)
 
@@ -51,6 +55,11 @@ class ConfigError(RuntimeError):
 def find_config(start: Path | None = None) -> Path | None:
     current = (start or Path.cwd()).resolve()
     for parent in [current, *current.parents]:
+        pointer = parent / ENV_FILE_PATH
+        if pointer.exists():
+            target = config_path_from_env_file(pointer)
+            if target is not None:
+                return target
         candidate = parent / DEFAULT_CONFIG_PATH
         if candidate.exists():
             return candidate
@@ -62,7 +71,8 @@ def load_config(
     runtime_dir_override: Path | str | None = None,
     start: Path | None = None,
 ) -> TeamConfig:
-    explicit_path = Path(config_path).expanduser() if config_path else None
+    config_value = config_path or config_path_env()
+    explicit_path = Path(config_value).expanduser() if config_value else None
     discovered_path = explicit_path or find_config(start)
 
     if discovered_path is None:
@@ -106,7 +116,7 @@ def load_config(
     for role_name, role_data in data.get("roles", {}).items():
         if not isinstance(role_data, dict):
             raise ConfigError(f"Role {role_name!r} must be a TOML table")
-        known_keys = {"mode", "state", "pane", "worktree", "policy"}
+        known_keys = {"mode", "state", "pane", "worktree", "scratchpad", "policy"}
         capabilities = {key: value for key, value in role_data.items() if key not in known_keys}
         state = str(role_data.get("state") or ("paused" if role_data.get("mode") == "paused" else "active"))
         try:
@@ -119,6 +129,7 @@ def load_config(
             state=state,
             pane=_optional_str(role_data.get("pane")),
             worktree=_optional_str(role_data.get("worktree")),
+            scratchpad=_optional_str(role_data.get("scratchpad")),
             capabilities=capabilities,
             policy=role_policy,
         )
@@ -171,8 +182,39 @@ def resolve_runtime_dir(project_root: Path, value: Path | str | None) -> Path:
     return runtime_dir.resolve()
 
 
+def role_scratchpad_path(config: TeamConfig, role: str) -> Path:
+    role_config = config.roles.get(role)
+    if role_config is None:
+        raise ConfigError(f"Unknown role: {role}")
+    raw_path = role_config.scratchpad or f".tmux-team/memory/{role}.md"
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        base = config.project_root or Path.cwd()
+        path = base / path
+    return path.resolve()
+
+
 def runtime_dir_env() -> str | None:
     return os.environ.get(RUNTIME_HOME_ENV) or os.environ.get(RUNTIME_DIR_ENV)
+
+
+def config_path_env() -> str | None:
+    return os.environ.get(CONFIG_PATH_ENV)
+
+
+def config_path_from_env_file(path: Path) -> Path | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if not line.startswith(f"{CONFIG_PATH_ENV}="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if not value:
+            return None
+        return Path(value).expanduser()
+    return None
 
 
 def _optional_str(value: Any) -> str | None:

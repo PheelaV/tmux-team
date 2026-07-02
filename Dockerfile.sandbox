@@ -13,5 +13,4 @@ COPY tests ./tests
 
 RUN python -m pip install -e .
 
-CMD ["python", "scripts/sandbox_demo.py", "--spawn-session", "--session", "tt-docker", "--root", "/tmp/tmux-team-sandbox", "--force"]
-
+CMD ["python", "scripts/sandbox_demo.py", "--spawn-session", "--cleanup-session", "--session", "tt-docker", "--root", "/tmp/tmux-team-sandbox", "--force"]

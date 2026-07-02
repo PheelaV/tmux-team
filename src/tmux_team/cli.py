@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
+import logging
 import os
 import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .bootstrap import (
     AGENT_LAYOUTS,
+    CONTROL_MODES,
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
     DEFAULT_CONTROL_WINDOW,
+    ROLE_PANE_OPTION,
     BootstrapError,
+    RoleLaunchOptions,
     bootstrap_team,
     default_session_name,
     detect_current_tmux_session,
@@ -22,26 +28,31 @@ from .bootstrap import (
     parse_roles,
 )
 from .config import (
+    CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
     DEFAULT_RUNTIME_DIR,
+    ROLE_ENV,
     RUNTIME_HOME_ENV,
     ConfigError,
     load_config,
+    role_scratchpad_path,
     runtime_dir_env,
     write_default_config,
 )
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, sleep_team
-from .logging_config import configure_logging
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
 from .store import CLAIMABLE_STATES, ROLE_STATES, Store, normalize_priority
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(normalize_time_option_values(raw_argv))
     try:
         configure_logging(args.log_level, args.log_file)
     except ValueError as exc:
@@ -77,6 +88,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_send(args, service, conn)
             if args.command == "inbox":
                 return cmd_inbox(args, service, conn)
+            if args.command == "memory":
+                return cmd_memory(args, config)
+            if args.command == "milestone":
+                return cmd_milestone(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
             if args.command == "notify":
@@ -104,11 +119,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 2
 
 
+def configure_logging(level: str | None = None, log_file: str | None = None) -> None:
+    numeric_level = parse_log_level(level or "WARNING")
+    if log_file:
+        path = Path(log_file).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handlers: list[logging.Handler] = [logging.FileHandler(path, encoding="utf-8")]
+    else:
+        handlers = [logging.StreamHandler()]
+    logging.basicConfig(level=numeric_level, format=LOG_FORMAT, handlers=handlers, force=True)
+
+
+def parse_log_level(level: str) -> int:
+    value = getattr(logging, level.strip().upper(), None)
+    if not isinstance(value, int):
+        raise ValueError(f"invalid log level: {level}")
+    return value
+
+
+def normalize_time_option_values(argv: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        value = argv[index]
+        if value in ("--since", "--until") and index + 1 < len(argv):
+            next_value = argv[index + 1]
+            if next_value.startswith("-") and parse_duration(next_value) is not None:
+                normalized.append(f"{value}={next_value}")
+                index += 2
+                continue
+        normalized.append(value)
+        index += 1
+    return normalized
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmux-team")
-    parser.add_argument("--config", help="Path to .tmux-team/team.toml")
+    parser.add_argument("--config", help=f"Path to .tmux-team/team.toml; overrides ${CONFIG_PATH_ENV}")
     parser.add_argument("--runtime-dir", help="Override runtime directory")
-    parser.add_argument("--actor", help="Authenticated role actor for policy enforcement")
+    parser.add_argument("--actor", help=f"Authenticated role actor for policy enforcement; defaults to ${ROLE_ENV}")
     parser.add_argument("--log-level", default="WARNING", help="Python log level: DEBUG, INFO, WARNING, ERROR")
     parser.add_argument("--log-file", help="Write logs to a file instead of stderr")
     parser.add_argument(
@@ -166,6 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument(
         "--control-window", default=DEFAULT_CONTROL_WINDOW, help="Name for the launcher/operator window"
     )
+    bootstrap.add_argument(
+        "--control-mode",
+        default="auto",
+        choices=CONTROL_MODES,
+        help="tt-control startup mode: auto reuses an existing tmux launcher or starts Codex; shell starts a plain shell",
+    )
     bootstrap.add_argument("--agents-window", default=DEFAULT_AGENTS_WINDOW, help="Window name for grouped agent panes")
     bootstrap.add_argument(
         "--role-yolo",
@@ -176,6 +231,72 @@ def build_parser() -> argparse.ArgumentParser:
         "--role-profile",
         default=None,
         help="Launch managed role Codex TUIs with the named Codex profile",
+    )
+    bootstrap.add_argument(
+        "--role-codex-profile",
+        action="append",
+        default=[],
+        metavar="ROLE=PROFILE",
+        help="Override Codex profile for one role; repeatable",
+    )
+    bootstrap.add_argument(
+        "--role-model",
+        action="append",
+        default=[],
+        metavar="ROLE=MODEL",
+        help="Launch one role with a specific Codex model; repeatable",
+    )
+    bootstrap.add_argument(
+        "--role-reasoning-effort",
+        action="append",
+        default=[],
+        metavar="ROLE=EFFORT",
+        help="Launch one role with a specific model_reasoning_effort config value; repeatable",
+    )
+    bootstrap.add_argument(
+        "--role-codex-config",
+        action="append",
+        default=[],
+        metavar="ROLE=KEY=VALUE",
+        help="Pass a Codex -c key=value override to one role; repeatable",
+    )
+    bootstrap.add_argument(
+        "--role-worktree",
+        action="append",
+        default=[],
+        metavar="ROLE=PATH",
+        help="Launch a role from a specific git worktree; repeatable",
+    )
+    bootstrap.add_argument(
+        "--role-memory",
+        action="append",
+        default=[],
+        metavar="ROLE=PATH",
+        help="Use an existing or custom scratchpad memory path for one role; repeatable",
+    )
+    bootstrap.add_argument(
+        "--create-missing-worktrees",
+        action="store_true",
+        help="Create missing role worktrees with git worktree add",
+    )
+    bootstrap.add_argument(
+        "--worktree-base-ref",
+        default="HEAD",
+        help="Base ref for --create-missing-worktrees; default: HEAD",
+    )
+    bootstrap.add_argument(
+        "--allow-shared-worktree",
+        action="append",
+        default=[],
+        metavar="ROLE,ROLE",
+        help="Allow a deliberate shared worktree for a comma-separated role group; repeatable",
+    )
+    bootstrap.add_argument(
+        "--allow-dirty-role",
+        action="append",
+        default=[],
+        metavar="ROLE",
+        help="Allow dirty tracked files in one role worktree; repeatable",
     )
     bootstrap.add_argument("--goal", default=None, help="Initial goal body to queue to orchestrator after startup")
     bootstrap.add_argument("--goal-file", default=None, help="Read initial goal body from a file")
@@ -206,20 +327,65 @@ def build_parser() -> argparse.ArgumentParser:
     inbox = subparsers.add_parser("inbox", help="Work with role inboxes")
     inbox_sub = inbox.add_subparsers(dest="inbox_command", required=True)
     inbox_next = inbox_sub.add_parser("next", help="Claim and print the next message")
-    inbox_next.add_argument("--role", required=True)
+    inbox_next.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_next.add_argument("--claim-seconds", type=int, default=3600)
     inbox_list = inbox_sub.add_parser("list", help="List inbox messages")
-    inbox_list.add_argument("--role", required=True)
+    inbox_list.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_list.add_argument("--state", action="append", help="Filter state; repeatable")
     inbox_list.add_argument("--limit", type=int, default=50)
     inbox_ack = inbox_sub.add_parser("ack", help="Acknowledge a message")
     inbox_ack.add_argument("message_id")
-    inbox_ack.add_argument("--role", required=True)
+    inbox_ack.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_complete = inbox_sub.add_parser("complete", help="Complete a message")
     inbox_complete.add_argument("message_id")
-    inbox_complete.add_argument("--role", required=True)
+    inbox_complete.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_complete.add_argument("--status", default="done")
     inbox_complete.add_argument("--summary", default="")
+    inbox_complete_body = inbox_complete.add_mutually_exclusive_group()
+    inbox_complete_body.add_argument("--body", help="Detailed result text, or '-' to read stdin")
+    inbox_complete_body.add_argument("--body-file", help="Path to detailed result text")
+    inbox_complete.add_argument(
+        "--reply-to-sender",
+        action="store_true",
+        help="Queue a completion reply to the original sender and wake it when it is a managed role",
+    )
+    inbox_complete.add_argument("--reply-no-notify", action="store_true", help="Queue the reply without waking sender")
+
+    memory = subparsers.add_parser("memory", help="Inspect or update role scratchpad memory")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+    memory_path = memory_sub.add_parser("path", help="Print the role scratchpad path")
+    memory_path.add_argument("--role", help=f"Role scratchpad; defaults to --actor or ${ROLE_ENV}")
+    memory_show = memory_sub.add_parser("show", help="Print the role scratchpad")
+    memory_show.add_argument("--role", help=f"Role scratchpad; defaults to --actor or ${ROLE_ENV}")
+    memory_append = memory_sub.add_parser("append", help="Record a durable note near the top of the role scratchpad")
+    memory_append.add_argument("--role", help=f"Role scratchpad; defaults to --actor or ${ROLE_ENV}")
+    memory_body = memory_append.add_mutually_exclusive_group()
+    memory_body.add_argument("--body", help="Inline note text, or '-' to read stdin")
+    memory_body.add_argument("--body-file", help="Path to markdown note")
+    memory_append.add_argument("note", nargs="?", help="Note text; kept for quick one-line updates")
+
+    milestone = subparsers.add_parser("milestone", help="Record or inspect append-only team milestones")
+    milestone_sub = milestone.add_subparsers(dest="milestone_command", required=True)
+    milestone_add = milestone_sub.add_parser("add", help="Append a milestone to runtime milestones.jsonl")
+    milestone_add.add_argument("--summary", required=True, help="Concise milestone summary")
+    milestone_add.add_argument("--role", help=f"Role associated with the milestone; defaults to --actor or ${ROLE_ENV}")
+    milestone_add.add_argument("--kind", default="milestone", help="Milestone kind, e.g. result, blocker, routing")
+    milestone_add.add_argument("--ref", dest="ref_id", help="Related message id, commit, job id, or artifact id")
+    milestone_add.add_argument("--tag", action="append", default=[], help="Tag for filtering; repeatable")
+    milestone_add.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE", help="Metadata; repeatable")
+    milestone_body = milestone_add.add_mutually_exclusive_group()
+    milestone_body.add_argument("--body", help="Optional detail text, or '-' to read stdin")
+    milestone_body.add_argument("--body-file", help="Path to optional detail text")
+
+    milestone_list = milestone_sub.add_parser("list", help="List recorded milestones")
+    milestone_list.add_argument("--since", help="Start time: ISO timestamp or relative duration like -4h, 30m, 2d")
+    milestone_list.add_argument("--until", help="End time: ISO timestamp or relative duration")
+    milestone_list.add_argument("--today", action="store_true", help="Show milestones since local midnight")
+    milestone_list.add_argument("--role", help="Filter by role")
+    milestone_list.add_argument("--kind", help="Filter by kind")
+    milestone_list.add_argument("--tag", action="append", default=[], help="Require tag; repeatable")
+    milestone_list.add_argument("--limit", type=int, default=50)
+    milestone_list.add_argument("--json", action="store_true", help="Print JSON array instead of human output")
 
     role = subparsers.add_parser("role", help="Inspect or change role state")
     role_sub = role.add_subparsers(dest="role_command", required=True)
@@ -266,6 +432,14 @@ def build_parser() -> argparse.ArgumentParser:
     codex_show.add_argument("role")
     codex_wake = codex_sub.add_parser("wake", help="Submit a wake turn to a role's Codex app-server thread")
     codex_wake.add_argument("role")
+    codex_context = codex_sub.add_parser("session-context", help="Print reset-safe role context for Codex hooks")
+    codex_context.add_argument("--role", help=f"Role context; defaults to --actor or ${ROLE_ENV}")
+    codex_context.add_argument(
+        "--max-memory-chars",
+        type=int,
+        default=4000,
+        help="Maximum scratchpad characters to include; 0 omits scratchpad content",
+    )
 
     stable = subparsers.add_parser("stable", help="Manage stable commit approvals")
     stable_sub = stable.add_subparsers(dest="stable_command", required=True)
@@ -300,6 +474,16 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         session = args.session or detect_current_tmux_session(args.tmux_bin) or default_session_name(project_root)
         endpoint = args.endpoint or free_local_endpoint()
         roles = parse_roles(args.roles)
+        role_worktrees = parse_role_worktrees(args.role_worktree)
+        role_scratchpads = parse_role_paths(args.role_memory, "--role-memory")
+        role_launch_options = parse_role_launch_options(
+            role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
+            role_models=parse_assignments(args.role_model, "--role-model"),
+            role_reasoning_efforts=parse_assignments(args.role_reasoning_effort, "--role-reasoning-effort"),
+            role_config_overrides=parse_role_config_overrides(args.role_codex_config),
+        )
+        shared_worktrees = parse_role_groups(args.allow_shared_worktree)
+        allow_dirty_roles = frozenset(args.allow_dirty_role)
         goal = args.goal
         if args.goal_file:
             try:
@@ -320,9 +504,17 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             start_app_server=not args.no_start_app_server,
             agent_layout=args.agent_layout,
             control_window=args.control_window,
+            control_mode=args.control_mode,
             agents_window=args.agents_window,
             role_yolo=args.role_yolo,
             role_profile=args.role_profile,
+            role_launch_options=role_launch_options,
+            role_scratchpads=role_scratchpads,
+            role_worktrees=role_worktrees,
+            create_missing_worktrees=args.create_missing_worktrees,
+            worktree_base_ref=args.worktree_base_ref,
+            allow_shared_worktree_groups=shared_worktrees,
+            allow_dirty_roles=allow_dirty_roles,
             dry_run=args.dry_run,
         )
     except BootstrapError as exc:
@@ -340,12 +532,140 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def build_policy_context(args: argparse.Namespace, config) -> PolicyContext:
     mode = args.policy_mode or config.policy.mode
-    return PolicyContext(actor=args.actor, mode=normalize_policy_mode(mode))
+    actor = args.actor or os.environ.get(ROLE_ENV) or infer_role_from_tmux_pane(config) or infer_role_from_cwd(config)
+    return PolicyContext(actor=actor, mode=normalize_policy_mode(mode))
+
+
+def parse_role_worktrees(values: Sequence[str]) -> dict[str, Path]:
+    return parse_role_paths(values, "--role-worktree")
+
+
+def parse_role_paths(values: Sequence[str], flag: str) -> dict[str, Path]:
+    parsed: dict[str, Path] = {}
+    for value in values:
+        role, path = parse_assignment(value, flag)
+        parsed[role] = Path(path)
+    return parsed
+
+
+def parse_assignments(values: Sequence[str], flag: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values:
+        key, assigned = parse_assignment(value, flag)
+        parsed[key] = assigned
+    return parsed
+
+
+def parse_role_config_overrides(values: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    parsed: dict[str, list[str]] = {}
+    for value in values:
+        role, override = parse_assignment(value, "--role-codex-config")
+        if "=" not in override:
+            raise BootstrapError("--role-codex-config expects ROLE=KEY=VALUE")
+        parsed.setdefault(role, []).append(override)
+    return {role: tuple(overrides) for role, overrides in parsed.items()}
+
+
+def parse_role_launch_options(
+    *,
+    role_profiles: dict[str, str],
+    role_models: dict[str, str],
+    role_reasoning_efforts: dict[str, str],
+    role_config_overrides: dict[str, tuple[str, ...]],
+) -> dict[str, RoleLaunchOptions]:
+    roles = set(role_profiles) | set(role_models) | set(role_reasoning_efforts) | set(role_config_overrides)
+    return {
+        role: RoleLaunchOptions(
+            model=role_models.get(role),
+            reasoning_effort=role_reasoning_efforts.get(role),
+            profile=role_profiles.get(role),
+            config_overrides=role_config_overrides.get(role, ()),
+        )
+        for role in roles
+    }
+
+
+def parse_role_groups(values: Sequence[str]) -> tuple[frozenset[str], ...]:
+    groups: list[frozenset[str]] = []
+    for value in values:
+        roles = frozenset(part.strip() for part in value.split(",") if part.strip())
+        if len(roles) < 2:
+            raise BootstrapError("--allow-shared-worktree expects at least two comma-separated roles")
+        groups.append(roles)
+    return tuple(groups)
+
+
+def parse_assignment(value: str, flag: str) -> tuple[str, str]:
+    if "=" not in value:
+        raise BootstrapError(f"{flag} expects ROLE=PATH")
+    role, path = value.split("=", 1)
+    role = role.strip()
+    path = path.strip()
+    if not role or not path:
+        raise BootstrapError(f"{flag} expects ROLE=PATH")
+    return role, path
 
 
 def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext) -> None:
     if args.command == "send" and args.sender is None:
         args.sender = policy_context.actor or "operator"
+    if args.command == "inbox" and getattr(args, "role", None) is None:
+        args.role = policy_context.actor
+        if args.role is None:
+            raise ValueError(f"inbox --role is required unless --actor or ${ROLE_ENV} is set")
+    if args.command == "memory" and getattr(args, "role", None) is None:
+        args.role = policy_context.actor
+        if args.role is None:
+            raise ValueError(f"memory --role is required unless --actor or ${ROLE_ENV} is set")
+    if args.command == "milestone" and args.milestone_command == "add":
+        if args.role is None:
+            args.role = policy_context.actor
+        if args.actor is None:
+            args.actor = policy_context.actor or "operator"
+    if args.command == "codex" and args.codex_command == "session-context" and args.role is None:
+        args.role = policy_context.actor
+        if args.role is None:
+            raise ValueError(f"codex session-context --role is required unless --actor or ${ROLE_ENV} is set")
+
+
+def infer_role_from_cwd(config) -> str | None:
+    cwd = Path.cwd().resolve()
+    matches: list[str] = []
+    for role in config.roles.values():
+        if not role.worktree:
+            continue
+        try:
+            worktree = Path(role.worktree).expanduser().resolve()
+        except OSError:
+            continue
+        if cwd == worktree or worktree in cwd.parents:
+            matches.append(role.name)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def infer_role_from_tmux_pane(config) -> str | None:
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane, f"#{{{ROLE_PANE_OPTION}}}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    role = result.stdout.strip()
+    if role in config.roles:
+        return role
+    return None
 
 
 def authorize_cli_command(args: argparse.Namespace, config, policy_context: PolicyContext) -> None:
@@ -361,6 +681,18 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
 
     if args.command == "inbox":
         authorize(config, policy_context, f"inbox.{args.inbox_command}", role=args.role)
+        return
+
+    if args.command == "memory":
+        action = "memory.update" if args.memory_command == "append" else "memory.read"
+        authorize(config, policy_context, action, role=args.role)
+        return
+
+    if args.command == "milestone":
+        if args.milestone_command == "add":
+            authorize(config, policy_context, "milestone.add", role=args.role or "")
+        else:
+            authorize(config, policy_context, "milestone.list", role=args.role or "")
         return
 
     if args.command == "role" and args.role_command != "list":
@@ -381,6 +713,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
 
     if args.command == "codex" and args.codex_command == "wake":
         authorize(config, policy_context, "role.notify", role=args.role, method="app-server-turn")
+        return
+
+    if args.command == "codex" and args.codex_command == "session-context":
+        authorize(config, policy_context, "memory.read", role=args.role)
         return
 
     if args.command == "stable" and args.stable_command == "approve":
@@ -415,8 +751,9 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
         acknowledged = role_counts.get("acknowledged", 0)
         completed = role_counts.get("completed", 0)
         pane = role["pane"] or "-"
+        worktree = role["worktree"] or "-"
         print(
-            f"  {role['name']}: state={role['state']} mode={role['mode']} pane={pane} "
+            f"  {role['name']}: state={role['state']} mode={role['mode']} pane={pane} worktree={worktree} "
             f"pending={pending} claimed={claimed} ack={acknowledged} done={completed}"
         )
     return 0
@@ -455,6 +792,72 @@ def cmd_ext(args: argparse.Namespace, config) -> int:
         print(f"extensions ok: {len(inspection.manifests)}")
         for manifest in inspection.manifests:
             print(f"  {manifest.id}: hooks={len(manifest.hooks)}")
+        return 0
+
+    return 2
+
+
+def cmd_memory(args: argparse.Namespace, config) -> int:
+    path = role_scratchpad_path(config, args.role)
+
+    if args.memory_command == "path":
+        print(path)
+        return 0
+
+    if args.memory_command == "show":
+        if not path.exists():
+            print(f"{path} (missing)")
+            return 0
+        print(path.read_text(encoding="utf-8"), end="")
+        return 0
+
+    if args.memory_command == "append":
+        note = read_memory_note(args)
+        if not note:
+            raise ValueError("memory append requires a note or '-'")
+        record_memory_update(path, note)
+        print(path)
+        return 0
+
+    return 2
+
+
+def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.milestone_command == "add":
+        body = read_optional_body(args)
+        milestone = store.record_milestone(
+            conn,
+            actor=args.actor or "operator",
+            role=args.role,
+            kind=args.kind,
+            summary=args.summary,
+            body=body,
+            ref_id=args.ref_id,
+            tags=tuple(args.tag),
+            metadata=parse_metadata(args.meta),
+        )
+        print(f"{milestone['created_at']} {milestone['kind']} role={milestone['role'] or '-'} {milestone['summary']}")
+        print(f"path: {store.milestones_path}")
+        return 0
+
+    if args.milestone_command == "list":
+        since, until = milestone_time_window(args)
+        rows = store.list_milestones(
+            since=since,
+            until=until,
+            role=args.role,
+            kind=args.kind,
+            tags=tuple(args.tag),
+            limit=args.limit,
+        )
+        if args.json:
+            print(json_dumps(rows))
+            return 0
+        if not rows:
+            print("no milestones")
+            return 0
+        for row in rows:
+            print(format_milestone(row))
         return 0
 
     return 2
@@ -516,8 +919,30 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
         return 0
 
     if args.inbox_command == "complete":
-        row = service.complete_message(conn, args.role, args.message_id, args.status, args.summary, actor=args.actor)
-        print(message_one_line(row))
+        summary = completion_summary(args)
+        result = service.complete_message_with_optional_reply(
+            conn,
+            args.role,
+            args.message_id,
+            args.status,
+            summary,
+            reply_to_sender=args.reply_to_sender,
+            reply_wake=not args.reply_no_notify,
+            actor=args.actor,
+        )
+        print(message_one_line(result.message))
+        if result.reply is not None:
+            print(
+                f"reply: {result.reply.message.id} {result.reply.message.state} "
+                f"to={result.reply.message.recipient} priority={result.reply.message.priority}"
+            )
+            if result.reply.notification is not None:
+                if result.reply.notification.ok:
+                    print(f"reply_notify: {result.reply.notification.details}")
+                else:
+                    print(f"reply_notify_failed: {result.reply.notification.details}", file=sys.stderr)
+        if result.reply_skipped is not None:
+            print(f"reply_skipped: {result.reply_skipped}", file=sys.stderr)
         return 0
 
     return 2
@@ -602,6 +1027,10 @@ def cmd_codex(args: argparse.Namespace, store: Store, service: TeamService, conn
     if role is None:
         raise KeyError(f"Unknown role: {args.role}")
 
+    if args.codex_command == "session-context":
+        print(codex_session_context(args, store, conn, role), end="")
+        return 0
+
     if args.codex_command == "bind":
         store.bind_role_app_server(conn, args.role, args.endpoint, args.thread_id)
         print(f"{args.role} app-server endpoint={args.endpoint} thread_id={args.thread_id}")
@@ -630,6 +1059,54 @@ def cmd_codex(args: argparse.Namespace, store: Store, service: TeamService, conn
         return 1
 
     return 2
+
+
+def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row) -> str:
+    role = str(role_row["name"])
+    memory_path = role_scratchpad_path(store.config, role)
+    pending = store.pending_count(conn, role)
+    worktree = role_row["worktree"] or store.config.project_root or Path.cwd()
+    config_path = store.config.config_path or "(auto-discovered)"
+    memory_excerpt = scratchpad_excerpt(memory_path, max(0, args.max_memory_chars))
+
+    lines = [
+        "tmux-team role recovery context.",
+        "This is the same operating contract as the initial role startup prompt, not a new task.",
+        "It restores role/framework context after Codex startup, resume, clear, or compact. It does not override user messages, inbox task bodies, or higher-priority instructions.",
+        "",
+        f"Role: {role}",
+        f"Config: {config_path}",
+        f"Runtime dir: {store.runtime_dir}",
+        f"Worktree: {worktree}",
+        f"Scratchpad: {memory_path}",
+        f"Pending inbox messages: {pending}",
+        "",
+        "Operating loop:",
+        "1. Load the start-tmux-team skill and invariants if they are not already loaded in this context.",
+        "2. Read scratchpad memory before claiming work.",
+        "3. Claim one durable inbox message, acknowledge it, do the work, then complete it.",
+        "4. Use --summary for the concise completion result and --body or --body-file for detailed evidence.",
+        "5. Use --reply-to-sender for delegated role work so the sender is woken through the normal path.",
+        "6. Update scratchpad memory only for high-value durable changes: active task, blocker, changed boundary, long-running work, final result, or next action.",
+        "7. If no inbox message exists, park and wait for app-server wake. Do not invent work.",
+    ]
+    if memory_excerpt:
+        lines.extend(["", "Scratchpad excerpt:", memory_excerpt])
+    else:
+        lines.extend(["", "Scratchpad excerpt: (missing or omitted)"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def scratchpad_excerpt(path: Path, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[truncated]"
 
 
 def cmd_stable(args: argparse.Namespace, store: Store, conn) -> int:
@@ -703,6 +1180,139 @@ def read_body(args: argparse.Namespace) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read()
     return ""
+
+
+def read_optional_body(args: argparse.Namespace) -> str:
+    if getattr(args, "body_file", None):
+        return Path(args.body_file).expanduser().read_text(encoding="utf-8")
+    if getattr(args, "body", None) == "-":
+        return sys.stdin.read()
+    if getattr(args, "body", None) is not None:
+        return args.body
+    return ""
+
+
+def completion_summary(args: argparse.Namespace) -> str:
+    body = read_optional_body(args).strip()
+    summary = args.summary.strip()
+    if not body:
+        return summary
+    if not summary:
+        return body
+    return f"{summary}\n\n{body}"
+
+
+def read_memory_note(args: argparse.Namespace) -> str:
+    if getattr(args, "body_file", None):
+        return Path(args.body_file).expanduser().read_text(encoding="utf-8")
+    if getattr(args, "body", None) == "-":
+        return sys.stdin.read()
+    if getattr(args, "body", None) is not None:
+        return args.body
+    if args.note == "-":
+        return sys.stdin.read()
+    if args.note is not None:
+        return args.note
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    return ""
+
+
+def record_memory_update(path: Path, note: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = path.read_text(encoding="utf-8") if path.exists() else f"# {path.stem} Scratchpad\n\n"
+    timestamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    block = f"### {timestamp}\n{note.strip()}\n\n"
+    marker = "## Latest Updates\n"
+    if marker in content:
+        content = content.replace(marker, marker + "\n" + block, 1)
+    elif "## Latest\n" in content:
+        content = content.replace("## Latest\n", f"{marker}\n{block}## Latest\n", 1)
+    else:
+        first_break = content.find("\n\n")
+        if first_break == -1:
+            content = f"{content.rstrip()}\n\n{marker}\n{block}"
+        else:
+            content = content[: first_break + 2] + f"\n{marker}\n{block}" + content[first_break + 2 :]
+    path.write_text(content, encoding="utf-8")
+
+
+def parse_metadata(values: Sequence[str]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for value in values:
+        key, assigned = parse_assignment(value, "--meta")
+        metadata[key] = assigned
+    return metadata
+
+
+def milestone_time_window(args: argparse.Namespace) -> tuple[datetime | None, datetime | None]:
+    if args.today and args.since:
+        raise ValueError("milestone list accepts either --today or --since, not both")
+    since = local_midnight_utc() if args.today else parse_time_arg(args.since)
+    until = parse_time_arg(args.until)
+    return since, until
+
+
+def parse_time_arg(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.lower() == "now":
+        return datetime.now(UTC).replace(microsecond=0)
+    duration = parse_duration(raw)
+    if duration is not None:
+        return (datetime.now(UTC) + duration).replace(microsecond=0)
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone(UTC)
+
+
+def parse_duration(value: str) -> timedelta | None:
+    sign = -1
+    raw = value
+    if raw[0] in ("-", "+"):
+        sign = -1 if raw[0] == "-" else 1
+        raw = raw[1:]
+    if not raw:
+        return None
+    number = raw[:-1]
+    unit = raw[-1:]
+    if unit not in ("s", "m", "h", "d") or not number:
+        return None
+    try:
+        amount = float(number)
+    except ValueError:
+        return None
+    seconds_by_unit = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    return timedelta(seconds=sign * amount * seconds_by_unit[unit])
+
+
+def local_midnight_utc() -> datetime:
+    now = datetime.now().astimezone()
+    local_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(UTC)
+
+
+def json_dumps(value) -> str:
+    return json.dumps(value, indent=2, sort_keys=True)
+
+
+def format_milestone(row: dict) -> str:
+    role = row.get("role") or "-"
+    kind = row.get("kind") or "milestone"
+    ref_id = row.get("ref_id") or "-"
+    tags = ",".join(row.get("tags") or []) or "-"
+    line = f"{row.get('created_at')} [{kind}] role={role} ref={ref_id} tags={tags} {row.get('summary')}"
+    body = str(row.get("body") or "").strip()
+    if body:
+        first_line = body.splitlines()[0]
+        line += f"\n  {first_line}"
+    return line
 
 
 def print_message(row, include_body: bool = False) -> None:

@@ -7,9 +7,10 @@
 The durable message lives in SQLite. A role receives work by running:
 
 ```bash
+tmux-team memory show --role implementer
 tmux-team inbox next --role implementer
 tmux-team inbox ack <message-id> --role implementer
-tmux-team inbox complete <message-id> --role implementer --status fixed --summary "..."
+tmux-team inbox complete <message-id> --role implementer --status fixed --summary "..." --body-file result.md --reply-to-sender
 ```
 
 `inbox next` atomically moves the next claimable message from:
@@ -21,7 +22,7 @@ queued/notified/retrying -> claimed
 It claims one message. If a wake says there are multiple pending messages, the role should:
 
 ```text
-inbox next -> ack -> do work -> complete -> inbox next again
+memory show -> inbox next -> ack -> do work -> memory update only for high-value durable changes -> complete --reply-to-sender -> inbox next again
 ```
 
 and repeat until `inbox next` reports no pending messages. This keeps claim leases and completion evidence attached to one task at a time instead of letting a role hoard the whole backlog.
@@ -111,15 +112,54 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 The normal startup path is `tmux-team bootstrap`, which creates role panes and discovers their app-server thread IDs for you.
 
-`app-server-turn` submits a short wake turn that instructs the role to claim durable work from SQLite:
+`app-server-turn` submits a short wake turn that tells the role durable inbox work exists. The wake turn is deliberately blunt. It does not restate the skill, command syntax, scratchpad rules, ack/complete syntax, or role boundaries. Role panes spawned by bootstrap already received the startup prompt and have the `start-tmux-team` skill available; the wake is only an interrupt that says "claim durable inbox work now."
 
-```text
-tmux-team inbox next --role <role>
-tmux-team inbox ack <message-id> --role <role>
-tmux-team inbox complete <message-id> --role <role> ...
+Role panes spawned by bootstrap are bound to team config and role, so normal role commands do not need `--config` or `--role`. The fast path is `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE`; fallback discovery uses the role worktree `.tmux-team/team.env` pointer and tmux pane role option. Explicit flags remain available as overrides for scripts and operator control sessions.
+
+Each spawned role also receives a startup prompt that tells it to load the `start-tmux-team` skill, read scratchpad memory, then claim inbox work or park. Scratchpads are top-loaded operational memory, not transport: use them for long-term goals, role boundaries, current task, blocker, stable inputs, owned artifacts, and next action. Use `tmux-team memory append --body "..."` only for high-value durable updates; it records the newest note near the top of the file. Routine startup, parking, no-pending, and "still waiting" notes should not be appended.
+
+If the wake says `N pending` with `N > 1`, the role follows its loaded tmux-team role loop and drains one durable inbox message at a time until `inbox next` returns no pending work.
+
+`--reply-to-sender` is the lazy conversational path: completion is recorded on the original message, and a reply message is queued back to the sender when the sender is a managed role. Use `--summary` for the concise result and `--body` or `--body-file` for evidence, test output, or handoff detail that should travel with the completion reply.
+
+## Codex Reset Recovery
+
+The initial role spawn prompt remains the normal first-turn instruction. It tells the role to load the `start-tmux-team` skill, read memory, then claim inbox work or park.
+
+For context resets, use Codex's native `SessionStart` hook to inject the same role contract again from durable state. Configure it for `startup|resume|clear|compact` and have it print `tmux-team codex session-context` output:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tmux-team codex session-context",
+            "statusMessage": "Loading tmux-team role context"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-If the wake says `N pending` with `N > 1`, the role repeats that sequence once per message until `inbox next` returns no pending work.
+This hook is not a replacement for the startup prompt and is not a task. It only restores the role/framework context, current scratchpad excerpt, pending count, config path, and role loop after Codex starts, resumes, clears, or compacts a session. User messages, system/developer instructions, and claimed inbox task bodies still take precedence.
+
+Do not rely on `PostCompact` for role-contract injection. Current Codex hook behavior supports model-context injection through `SessionStart`; the `compact` SessionStart source is the reset-safe path after compaction.
+
+Milestones are the broad operator timeline, separate from the inbox and scratchpads. Record only durable achievements or state changes:
+
+```bash
+tmux-team milestone add --kind result --summary "Targeted tests passed" --tag test
+tmux-team milestone list --today
+tmux-team milestone list --since -4h
+```
+
+By default, non-orchestrator roles do not write milestones. They complete their inbox message with evidence; the orchestrator records a milestone only if the result is important enough for the operator timeline.
 
 The task body is not pasted into the pane or into tmux history. It remains in the durable message body file until the agent claims it.
 

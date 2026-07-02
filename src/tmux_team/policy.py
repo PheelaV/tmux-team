@@ -126,6 +126,18 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
         _authorize_role_resource(actor, resource, "role", policy.can_complete, action)
         return
 
+    if action in ("memory.read", "memory.update"):
+        _authorize_role_resource(actor, resource, "role", (), action)
+        return
+
+    if action == "milestone.add":
+        if actor != "orchestrator":
+            raise PolicyError(f"actor {actor!r} is not authorized to record milestones; send evidence to orchestrator")
+        return
+
+    if action == "milestone.list":
+        return
+
     if action == "role.state.change":
         if not policy.can_change_role_state:
             raise PolicyError(f"actor {actor!r} is not authorized to change role state")

@@ -32,6 +32,16 @@ tt-agents window
 
 Use `--agent-layout grouped` unless the user asks for another layout. `--agent-layout separate-windows` is the current alternate.
 
+## Role Worktrees
+
+When roles already have separate git worktrees, bootstrap must preserve them with `--role-worktree ROLE=PATH`.
+
+- `--project-root` is the control/config root and default role worktree.
+- The role worktree must be passed to Codex with `--cd`; tmux pane cwd alone is not enough for remote TUI sessions.
+- Do not silently collapse collector/trainer/reviewer roles into the project root when the user provided separate worktrees.
+- Shared worktrees must be explicit with `--allow-shared-worktree ROLE,ROLE`.
+- Keep examples generic; do not write private project names, branches, jobs, or absolute operator paths into reusable docs.
+
 ## Delivery
 
 Never use tmux stdin as the production wake path for Codex roles.
@@ -39,8 +49,54 @@ Never use tmux stdin as the production wake path for Codex roles.
 - Do not paste task bodies into panes.
 - Do not use `tmux send-keys` for normal Codex wake.
 - Use app-server `turn/start`.
+- Wake prompts should be blunt interrupts; do not restate the skill, scratchpad rules, or ack/complete syntax in every wake turn.
 - Durable task content must be claimed from the tmux-team inbox.
-- A role handles work as: `inbox next -> ack -> do work -> complete -> inbox next` until there is no pending work.
+- A role handles work as: `inbox next -> ack -> do work -> complete --reply-to-sender -> inbox next` until there is no pending work.
+- Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command.
+- Completion can carry detail with `--body` or `--body-file`; keep `--summary` concise.
+- Role panes are bound to team config and role; do not put full config paths in normal wake instructions.
+- `--goal` and `--goal-file` seed only the initial operator message to orchestrator. They are not role startup prompts; the orchestrator decomposes the objective into role-specific inbox messages.
+
+## Skill Availability
+
+Every Codex role spawned by bootstrap must have the `start-tmux-team` skill available in the active `CODEX_HOME`. The skill may not be loaded into the current turn context until triggered, so wake prompts still include a compact role wake signal.
+
+## Role Memory
+
+Every managed role has a scratchpad memory file declared by config.
+
+- Bootstrap must create the scratchpad if it is missing.
+- A newly spawned role must be instructed to read this skill, read memory, then claim inbox work or park.
+- Codex `SessionStart` hooks for `startup|resume|clear|compact` should inject `tmux-team codex session-context` output after resets. This restores the same role contract as startup; it is not a new task and does not replace the inbox.
+- A role must run `tmux-team memory show` before claiming pending inbox work.
+- Use memory for durable context: long-lived goals, constraints, decisions, blockers, handoff notes, current worktree/commit/dirty state, running jobs, owned artifacts, stable inputs, and next action.
+- Keep the latest and most important state at the top so it remains useful after context compression and for human oversight.
+- Update memory only when durable state changed materially. Use a threshold: append when the update would score at least 3 points, where active task/blocker/boundary/long-running job/final-result changes are 3, stable input/artifact/handoff decisions are 2, minor status/test/dirty-state facts are 1, and routine startup/parking/no-pending chatter is 0.
+- Do not append just because startup ran, inbox was empty, git status was checked, or the role is still waiting.
+- Do not use memory as transport. The SQLite inbox is the source of truth for tasks and delivery status.
+- Do not append routine command transcripts or full replacement sections. Append concise notes likely to matter after context reset, sleep/resume, or operator handoff.
+- If an inbox message conflicts with scratchpad boundaries, stop and ask the orchestrator instead of guessing.
+
+## Milestone Log
+
+`milestones.jsonl` is the append-only operator timeline.
+
+- Record broad achievements and state changes with `tmux-team milestone add`.
+- Only the operator/control plane and orchestrator record milestones by default. Other roles report evidence or blockers through inbox completion; the orchestrator decides whether the result is milestone-worthy.
+- Good milestones: team start, task routed, evidence accepted, blocker found/resolved, tests passing, stable commit approved, sleep/resume, and team resize.
+- Do not store chat logs, command transcripts, reasoning dumps, or task bodies in milestones.
+- Query from the control plane with `tmux-team milestone list --today` or `tmux-team milestone list --since -4h`.
+
+## Runtime Env
+
+Role pane env is pane-local state derived from the current config:
+
+- `TMUX_TEAM_CONFIG`: path to the active team config;
+- `TMUX_TEAM_ROLE`: role name for this pane.
+
+Because Codex tool shells may not inherit every role-process variable, tmux-team also writes `.tmux-team/team.env` inside each role worktree and records the role in tmux pane option `@tmux-team-role`. The CLI discovery order is explicit flags, env, worktree pointer, tmux pane role, then cwd role inference.
+
+When roles are added, removed, slept, resumed, or respawned, the new role process must receive fresh env bindings, pointer files, pane labels, and pane options from the current config. Do not set role env at tmux session scope because grouped role panes need different `TMUX_TEAM_ROLE` values.
 
 ## Role Permissions
 

@@ -173,8 +173,31 @@ def team_complete(service: TeamService, conn: Any, args: dict[str, Any]) -> dict
     message_id = required_str(args, "message_id")
     status = str_arg(args, "status", "done")
     summary = str_arg(args, "summary", "")
-    row = service.complete_message(conn, role, message_id, status, summary, actor=role)
-    return {"message": message_dict(row)}
+    reply_to_sender = bool_arg(args, "reply_to_sender", False)
+    reply_wake = bool_arg(args, "reply_wake", True)
+    completed = service.complete_message_with_optional_reply(
+        conn,
+        role,
+        message_id,
+        status,
+        summary,
+        reply_to_sender=reply_to_sender,
+        reply_wake=reply_wake,
+        actor=role,
+    )
+    result: dict[str, Any] = {"message": message_dict(completed.message)}
+    if completed.reply is not None:
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (completed.reply.message.id,)).fetchone()
+        result["reply"] = message_dict(row, include_body=True)
+        if completed.reply.notification is not None:
+            result["reply_notification"] = {
+                "ok": completed.reply.notification.ok,
+                "method": completed.reply.notification.method,
+                "details": completed.reply.notification.details,
+            }
+    if completed.reply_skipped is not None:
+        result["reply_skipped"] = completed.reply_skipped
+    return result
 
 
 def team_send(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:

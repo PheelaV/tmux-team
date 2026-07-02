@@ -117,30 +117,3 @@ Docker verifier
 ```
 
 This avoids trying to copy host keychain or ChatGPT browser-login state into Linux Docker. Docker is the isolated filesystem/verifier, not the Codex runtime.
-
-Docker-Codex execution is supported by a configurable image build:
-
-```bash
-make docker-codex-login
-make docker-codex-integration-test
-```
-
-The Docker image installs a Linux Codex CLI with:
-
-```bash
-npm install -g @openai/codex
-```
-
-Override the npm package if needed:
-
-```bash
-CODEX_NPM_PACKAGE='@openai/codex@0.142.2' OPENAI_API_KEY="$OPENAI_API_KEY" make docker-codex-integration-test
-```
-
-Auth options:
-
-- `make docker-codex-login`: runs `codex login --device-auth` inside the container and persists container auth under `.tmux-team/codex-home`.
-- `OPENAI_API_KEY=... make docker-codex-integration-test`: uses API-key auth for that run.
-- `make docker-codex-login-api-key`: stores API-key auth in the mounted container `CODEX_HOME` by piping `OPENAI_API_KEY` to `codex login --with-api-key`.
-
-Codex access tokens are not required for this test. They are for ChatGPT Business and Enterprise workspace automation; individual Pro users should use device auth or Platform API-key auth.

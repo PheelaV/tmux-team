@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ def main() -> int:
 
     try:
         reset_root(root, args.force)
+        install_test_skill(root)
         fake_codex = write_fake_codex(root)
         patch_app_server_probes()
         result = bootstrap_mod.bootstrap_team(
@@ -42,6 +44,7 @@ def main() -> int:
             start_app_server=True,
             agent_layout="grouped",
             control_window=bootstrap_mod.DEFAULT_CONTROL_WINDOW,
+            control_mode="shell",
             agents_window=bootstrap_mod.DEFAULT_AGENTS_WINDOW,
             role_yolo=False,
             role_profile=None,
@@ -49,6 +52,7 @@ def main() -> int:
         )
         config_path = root / "project" / ".tmux-team" / "team.toml"
         verify_layout(session, config_path, result.role_panes)
+        verify_scratchpads(config_path)
         run_sleep(config_path, session)
         verify_sleep(session, config_path)
     except SmokeError as exc:
@@ -88,6 +92,14 @@ def reset_root(root: Path, force: bool) -> None:
 
     (root / "project").mkdir(parents=True)
     (root / MARKER).write_text("owned by bootstrap_layout_smoke.py\n", encoding="utf-8")
+
+
+def install_test_skill(root: Path) -> None:
+    codex_home = root / "codex-home"
+    target = codex_home / "skills" / "start-tmux-team"
+    source = Path(__file__).resolve().parents[1] / "skills" / "start-tmux-team"
+    shutil.copytree(source, target)
+    os.environ["CODEX_HOME"] = str(codex_home)
 
 
 def write_fake_codex(root: Path) -> Path:
@@ -147,6 +159,19 @@ def verify_layout(session: str, config_path: Path, role_panes: dict[str, str]) -
             raise SmokeError(f"bootstrap result pane for {role}={role_panes.get(role)!r}, config={pane!r}")
         if role_config.get("notify_method") != "app-server-turn":
             raise SmokeError(f"{role} notify_method is not app-server-turn")
+        if role_config.get("scratchpad") != f".tmux-team/memory/{role}.md":
+            raise SmokeError(f"{role} scratchpad path mismatch: {role_config.get('scratchpad')}")
+
+
+def verify_scratchpads(config_path: Path) -> None:
+    project_root = config_path.parent.parent
+    for role in DEFAULT_ROLES:
+        path = project_root / ".tmux-team" / "memory" / f"{role}.md"
+        if not path.exists():
+            raise SmokeError(f"missing scratchpad for {role}: {path}")
+        text = path.read_text(encoding="utf-8")
+        if "## Latest" not in text or "## Boundaries" not in text:
+            raise SmokeError(f"scratchpad seed missing required sections for {role}: {path}")
 
 
 def run_sleep(config_path: Path, session: str) -> None:

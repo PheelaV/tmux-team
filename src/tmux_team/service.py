@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .extensions.runner import HookRunner
@@ -20,6 +21,13 @@ class SendMessageResult:
     message: Message
     blocked: dict[str, str] | None = None
     notification: NotificationResult | None = None
+
+
+@dataclass(frozen=True)
+class CompleteMessageResult:
+    message: sqlite3.Row
+    reply: SendMessageResult | None = None
+    reply_skipped: str | None = None
 
 
 class TeamService:
@@ -182,6 +190,48 @@ class TeamService:
         )
         return row
 
+    def complete_message_with_optional_reply(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        message_id: str,
+        status: str,
+        summary: str,
+        *,
+        reply_to_sender: bool = False,
+        reply_wake: bool = True,
+        actor: str | None = None,
+    ) -> CompleteMessageResult:
+        row = self.complete_message(conn, role, message_id, status, summary, actor=actor)
+        if not reply_to_sender:
+            return CompleteMessageResult(message=row)
+
+        sender = str(row["sender"])
+        if sender not in self.store.config.roles:
+            return CompleteMessageResult(message=row, reply_skipped=f"sender {sender!r} is not a managed role")
+        if is_completion_reply(row):
+            return CompleteMessageResult(message=row, reply_skipped="message is already a completion reply")
+
+        reply_summary = f"{role} completed: {row['summary']}"
+        reply_body = (
+            f"Completed message: {row['id']}\n"
+            f"Original summary: {row['summary']}\n"
+            f"Status: {row['result_status']}\n"
+            f"Result: {row['result_summary']}"
+        )
+        reply = self.send_message(
+            conn,
+            sender=role,
+            recipient=sender,
+            priority="normal",
+            summary=reply_summary,
+            body=reply_body,
+            wake=reply_wake,
+            notify_method="app-server-turn",
+            actor=actor or role,
+        )
+        return CompleteMessageResult(message=row, reply=reply)
+
     def notify_role(
         self,
         conn: sqlite3.Connection,
@@ -235,3 +285,11 @@ def required_str(data: dict[str, Any], key: str) -> str:
     if value is None or str(value).strip() == "":
         raise ValueError(f"missing required message field: {key}")
     return str(value)
+
+
+def is_completion_reply(row: sqlite3.Row) -> bool:
+    try:
+        body = Path(str(row["body_path"])).read_text(encoding="utf-8")
+    except OSError:
+        return " completed: " in str(row["summary"])
+    return body.startswith("Completed message: ") and "\nOriginal summary: " in body
