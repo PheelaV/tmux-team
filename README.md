@@ -135,6 +135,8 @@ Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the co
 - `messages/*.md` for message bodies;
 - `sleeps/*.toml` for operator-facing sleep/restart snapshots.
 
+Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime-dir`, `TMUX_TEAM_HOME`, or `[team].runtime_dir` in `.tmux-team/team.toml`; that is also the precedence order.
+
 `tmux-team sleep` snapshots role state, pane targets, tmux session/window/pane IDs, and Codex app-server thread bindings before tearing down managed role/app-server windows. It leaves `tt-control` alive by default and marks active/draining roles paused so stale bindings do not receive new work. Use `tmux-team sleep --dry-run` to inspect the plan first.
 
 Tmux notification uses `tmux display-message` by default. It does not type into the agent's prompt composer.

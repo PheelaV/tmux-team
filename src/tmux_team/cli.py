@@ -21,7 +21,15 @@ from .bootstrap import (
     free_local_endpoint,
     parse_roles,
 )
-from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config, write_default_config
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_RUNTIME_DIR,
+    RUNTIME_HOME_ENV,
+    ConfigError,
+    load_config,
+    runtime_dir_env,
+    write_default_config,
+)
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, sleep_team
@@ -129,7 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = subparsers.add_parser("bootstrap", help="Start a pane-resident Codex team in tmux")
     bootstrap.add_argument("--project-root", default=".", help="Project root for the team")
     bootstrap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Config path to create")
-    bootstrap.add_argument("--runtime-dir", default=".tmux-team/runtime", help="Runtime directory for team state")
+    bootstrap.add_argument(
+        "--runtime-dir",
+        default=None,
+        help=f"Runtime directory for team state; defaults to ${RUNTIME_HOME_ENV} or {DEFAULT_RUNTIME_DIR}",
+    )
     bootstrap.add_argument(
         "--session",
         default=None,
@@ -297,7 +309,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         result = bootstrap_team(
             project_root=project_root,
             config_path=Path(args.config),
-            runtime_dir=args.runtime_dir,
+            runtime_dir=args.runtime_dir or runtime_dir_env() or str(DEFAULT_RUNTIME_DIR),
             session=session,
             roles=roles,
             endpoint=endpoint,

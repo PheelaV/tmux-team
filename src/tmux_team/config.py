@@ -12,6 +12,8 @@ from .policy import RolePolicy, TeamPolicy, parse_role_policy, parse_team_policy
 
 DEFAULT_CONFIG_PATH = Path(".tmux-team/team.toml")
 DEFAULT_RUNTIME_DIR = Path(".tmux-team/runtime")
+RUNTIME_HOME_ENV = "TMUX_TEAM_HOME"
+RUNTIME_DIR_ENV = "TMUX_TEAM_RUNTIME_DIR"
 
 
 @dataclass(frozen=True)
@@ -65,12 +67,10 @@ def load_config(
 
     if discovered_path is None:
         project_root = (start or Path.cwd()).resolve()
-        runtime_dir = (
-            Path(runtime_dir_override).expanduser() if runtime_dir_override else project_root / DEFAULT_RUNTIME_DIR
-        )
+        runtime_dir = resolve_runtime_dir(project_root, runtime_dir_override or runtime_dir_env())
         return TeamConfig(
             name="default",
-            runtime_dir=runtime_dir.resolve(),
+            runtime_dir=runtime_dir,
             roles={},
             config_path=None,
             project_root=project_root,
@@ -99,13 +99,8 @@ def load_config(
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
-    runtime_value = runtime_dir_override or os.environ.get("TMUX_TEAM_RUNTIME_DIR") or team_data.get("runtime_dir")
-    if runtime_value:
-        runtime_dir = Path(str(runtime_value)).expanduser()
-        if not runtime_dir.is_absolute():
-            runtime_dir = project_root / runtime_dir
-    else:
-        runtime_dir = project_root / DEFAULT_RUNTIME_DIR
+    runtime_value = runtime_dir_override or runtime_dir_env() or team_data.get("runtime_dir")
+    runtime_dir = resolve_runtime_dir(project_root, runtime_value)
 
     roles: dict[str, RoleConfig] = {}
     for role_name, role_data in data.get("roles", {}).items():
@@ -130,7 +125,7 @@ def load_config(
 
     return TeamConfig(
         name=team_name,
-        runtime_dir=runtime_dir.resolve(),
+        runtime_dir=runtime_dir,
         roles=roles,
         config_path=path,
         project_root=project_root.resolve(),
@@ -143,7 +138,7 @@ def write_default_config(path: Path, name: str, runtime_dir: str | None) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ConfigError(f"Config already exists: {path}")
-    runtime = runtime_dir or ".tmux-team/runtime"
+    runtime = runtime_dir or runtime_dir_env() or str(DEFAULT_RUNTIME_DIR)
     data = {
         "team": {"name": name, "runtime_dir": runtime},
         "roles": {
@@ -164,6 +159,20 @@ def write_default_config(path: Path, name: str, runtime_dir: str | None) -> None
         },
     }
     path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+
+def resolve_runtime_dir(project_root: Path, value: Path | str | None) -> Path:
+    if value:
+        runtime_dir = Path(str(value)).expanduser()
+        if not runtime_dir.is_absolute():
+            runtime_dir = project_root / runtime_dir
+    else:
+        runtime_dir = project_root / DEFAULT_RUNTIME_DIR
+    return runtime_dir.resolve()
+
+
+def runtime_dir_env() -> str | None:
+    return os.environ.get(RUNTIME_HOME_ENV) or os.environ.get(RUNTIME_DIR_ENV)
 
 
 def _optional_str(value: Any) -> str | None:

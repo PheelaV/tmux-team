@@ -54,6 +54,25 @@ requires_stable_commit = true
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
         self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
 
+    def test_runtime_dir_uses_cli_then_env_then_config(self) -> None:
+        env_runtime = self.root / "env-runtime"
+        cli_runtime = self.root / "cli-runtime"
+
+        with patch.dict(os.environ, {"TMUX_TEAM_HOME": str(env_runtime), "TMUX_TEAM_RUNTIME_DIR": ""}):
+            self.assertEqual(load_config(self.config).runtime_dir, env_runtime.resolve())
+            self.assertEqual(load_config(self.config, cli_runtime).runtime_dir, cli_runtime.resolve())
+
+    def test_runtime_home_env_works_without_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "project"
+            runtime = Path(temp) / "state"
+            root.mkdir()
+
+            with patch.dict(os.environ, {"TMUX_TEAM_HOME": str(runtime), "TMUX_TEAM_RUNTIME_DIR": ""}):
+                config = load_config(start=root)
+
+            self.assertEqual(config.runtime_dir, runtime.resolve())
+
     def test_message_lifecycle(self) -> None:
         code, out, err = self.run_cli(
             "send",
@@ -457,6 +476,30 @@ can_notify = ["orchestrator"]
         self.assertIn('mode = "app_server_remote_tui"', out)
         self.assertIn('notify_method = "app-server-turn"', out)
         self.assertIn("session: tt-bootstrap", out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_uses_runtime_home_env(self) -> None:
+        generated_config = self.root / ".tmux-team" / "generated.toml"
+        runtime = self.root / "team-state"
+
+        with patch.dict(os.environ, {"TMUX_TEAM_HOME": str(runtime), "TMUX_TEAM_RUNTIME_DIR": ""}):
+            code, out, err = self.run_main(
+                "bootstrap",
+                "--project-root",
+                str(self.root),
+                "--config",
+                str(generated_config),
+                "--session",
+                "tt-bootstrap",
+                "--endpoint",
+                "ws://127.0.0.1:4500",
+                "--roles",
+                "orchestrator",
+                "--dry-run",
+            )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f'runtime_dir = "{runtime}"', out)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_can_launch_roles_in_yolo_mode(self) -> None:
