@@ -2,9 +2,13 @@
 
 ![tmux-team banner](docs/assets/banner.png)
 
-Minimal tmux-backed control plane for pane-visible agent teams.
+`tmux-team` is a lightweight tmux control plane for persistent Codex agent teams.
 
-Codex is the first target backend. Other agent CLIs can be added later without changing the core invariant: agents stay visible in tmux, while durable work moves through `tmux-team` state.
+It exists because plain `tmux send-keys` does not scale once several agents are active. Messages can collide with your own prompt, panes can be in copy mode, input can be cleared accidentally, and delivery is hard to verify.
+
+`tmux-team` keeps the good part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: database-backed messages, acknowledgments, app-server wakeups, scratchpad memory files, and sleep/resume snapshots.
+
+Use it when a handful of Codex agents are working in parallel and plain tmux coordination starts breaking down: prompt collisions, `send-keys` races, copy-mode weirdness, lost messages, and too much manual routing.
 
 ## Install
 
