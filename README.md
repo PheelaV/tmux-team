@@ -46,56 +46,13 @@ make install-dev
 make install-skill
 ```
 
-Read the human docs before changing bootstrap or delivery behavior:
-
-- [docs/index.md](docs/index.md)
-- [docs/invariants.md](docs/invariants.md)
-
-## Versioning And Updates
-
-Maintainer release checklist:
-
-1. Bump both versions to the same value:
-   - `pyproject.toml` -> `[project].version`
-   - `.codex-plugin/plugin.json` -> `"version"`
-2. Set `.agents/plugins/marketplace.json` plugin source `ref` to the matching tag, for example `v0.1.1`.
-3. Run:
-
-```bash
-make lint
-make test
-uv run --with pyyaml python /path/to/validate_plugin.py .
-```
-
-4. Commit, tag, and push:
-
-```bash
-git commit -am "Release v0.1.1"
-git tag v0.1.1
-git push
-git push origin v0.1.1
-```
-
-User update:
-
-```bash
-uv tool install --force git+https://github.com/PheelaV/tmux-team.git
-# or
-pipx install --force git+https://github.com/PheelaV/tmux-team.git
-
-codex plugin marketplace upgrade tmux-team
-codex plugin add tmux-team@tmux-team
-```
-
-Start a new Codex thread after updating the plugin so Codex reloads the skill.
-
 ## Getting Started: Fix A Failing Test
 
 Start with a low-risk repo. The point is not to manually chat with four panes; give the orchestrator one durable goal and let roles pass work through the inbox.
 
 ```bash
 cd /path/to/project
-tmux new-session -s my-project -c "$PWD"
+tmux new-session -s tt-my-project -c "$PWD"
 codex
 ```
 
@@ -271,5 +228,50 @@ OPENAI_API_KEY="$OPENAI_API_KEY" make docker-codex-integration-test
 ```
 
 The Docker image installs Codex with `npm install -g @openai/codex`. Override with `CODEX_NPM_PACKAGE` if you need a pinned version. Docker Codex auth is persisted under `.tmux-team/codex-home`, which is ignored by git.
+
+## Versioning And Updates
+
+Maintainer release checklist:
+
+1. Bump both versions to the same value:
+   - `pyproject.toml` -> `[project].version`
+   - `.codex-plugin/plugin.json` -> `"version"`
+2. Set `.agents/plugins/marketplace.json` plugin source `ref` to the matching tag, for example `v0.1.1`.
+3. Run:
+
+```bash
+make lint
+make test
+uv run --with pyyaml python /path/to/validate_plugin.py .
+```
+
+4. Commit, tag, and push:
+
+```bash
+git commit -am "Release v0.1.1"
+git tag v0.1.1
+git push
+git push origin v0.1.1
+```
+
+User update:
+
+```bash
+uv tool install --force git+https://github.com/PheelaV/tmux-team.git
+# or
+pipx install --force git+https://github.com/PheelaV/tmux-team.git
+
+codex plugin marketplace upgrade tmux-team
+codex plugin add tmux-team@tmux-team
+```
+
+Start a new Codex thread after updating the plugin so Codex reloads the skill.
+
+## Docs
+
+Read the human docs before changing bootstrap or delivery behavior:
+
+- [docs/index.md](docs/index.md)
+- [docs/invariants.md](docs/invariants.md)
 
 Agent-facing design memory lives in [kb/00_index.md](kb/00_index.md).
