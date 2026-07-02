@@ -9,6 +9,22 @@ description: Bootstrap and operate a pane-resident Codex agent team with tmux-te
 
 Before starting a team, read `references/invariants.md`.
 
+Before running `tmux-team`, verify the CLI exists:
+
+```bash
+command -v tmux-team
+```
+
+If it is missing, stop and tell the user:
+
+```text
+tmux-team CLI is not installed. Install it with:
+uv tool install git+https://github.com/PheelaV/tmux-team.git
+
+or:
+pipx install git+https://github.com/PheelaV/tmux-team.git
+```
+
 Use `tmux-team bootstrap` as the entry point. Do not manually type prompts into role panes with `tmux send-keys`.
 
 The Codex session that invoked this skill is the control-plane. Bootstrap names it `control-plane`, keeps `app-server` isolated, and uses a grouped `agents` window by default. If the launcher is already inside tmux, bootstrap uses that tmux session by default.

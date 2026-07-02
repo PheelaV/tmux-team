@@ -29,6 +29,8 @@ You can also add the marketplace from Codex and install through `/plugins instal
 
 The plugin installs the `start-tmux-team` skill. The CLI is still installed separately with `uv` or `pipx`; the plugin does not mutate global Python tools.
 
+If the skill says `tmux-team` is missing, install the CLI with one of the commands above and retry.
+
 Checkout fallback for the skill:
 
 ```bash
@@ -48,6 +50,44 @@ Read the human docs before changing bootstrap or delivery behavior:
 
 - [docs/index.md](docs/index.md)
 - [docs/invariants.md](docs/invariants.md)
+
+## Versioning And Updates
+
+Maintainer release checklist:
+
+1. Bump both versions to the same value:
+   - `pyproject.toml` -> `[project].version`
+   - `.codex-plugin/plugin.json` -> `"version"`
+2. Set `.agents/plugins/marketplace.json` plugin source `ref` to the matching tag, for example `v0.1.1`.
+3. Run:
+
+```bash
+make lint
+make test
+uv run --with pyyaml python /path/to/validate_plugin.py .
+```
+
+4. Commit, tag, and push:
+
+```bash
+git commit -am "Release v0.1.1"
+git tag v0.1.1
+git push
+git push origin v0.1.1
+```
+
+User update:
+
+```bash
+uv tool install --force git+https://github.com/PheelaV/tmux-team.git
+# or
+pipx install --force git+https://github.com/PheelaV/tmux-team.git
+
+codex plugin marketplace upgrade tmux-team
+codex plugin add tmux-team@tmux-team
+```
+
+Start a new Codex thread after updating the plugin so Codex reloads the skill.
 
 ## Getting Started: Fix A Failing Test
 

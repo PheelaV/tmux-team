@@ -9,7 +9,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/PheelaV/tmux-team.git",
-        "ref": "main"
+        "ref": "v0.1.0"
       },
       "policy": {
         "installation": "AVAILABLE",
