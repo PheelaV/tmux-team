@@ -9,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from tmux_team.bootstrap import default_session_name
 from tmux_team.cli import main
 from tmux_team.config import TeamConfig, load_config
 from tmux_team.store import Store
@@ -48,6 +49,10 @@ requires_stable_commit = true
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_default_session_name_is_tt_prefixed(self) -> None:
+        self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
+        self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
 
     def test_message_lifecycle(self) -> None:
         code, out, err = self.run_cli(
@@ -436,19 +441,19 @@ can_notify = ["orchestrator"]
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("tmux new-session -d -s tt-bootstrap -n control-plane", out)
-        self.assertIn("tmux new-window -t tt-bootstrap -n app-server", out)
-        self.assertIn("tmux new-window -t tt-bootstrap -n agents", out)
-        self.assertIn("tmux split-window -t tt-bootstrap:agents", out)
-        self.assertIn("tmux set-option -p -t tt-bootstrap:agents.0 @tmux-team-role orchestrator", out)
-        self.assertIn("tmux set-option -p -t tt-bootstrap:agents.1 @tmux-team-role implementer", out)
-        self.assertIn("tmux select-pane -t tt-bootstrap:agents.0 -T orchestrator", out)
-        self.assertIn("tmux select-pane -t tt-bootstrap:agents.1 -T implementer", out)
-        self.assertIn("tmux select-layout -t tt-bootstrap:agents tiled", out)
+        self.assertIn("tmux new-session -d -s tt-bootstrap -n tt-control", out)
+        self.assertIn("tmux new-window -t tt-bootstrap -n tt-app-server", out)
+        self.assertIn("tmux new-window -t tt-bootstrap -n tt-agents", out)
+        self.assertIn("tmux split-window -t tt-bootstrap:tt-agents", out)
+        self.assertIn("tmux set-option -p -t tt-bootstrap:tt-agents.0 @tmux-team-role orchestrator", out)
+        self.assertIn("tmux set-option -p -t tt-bootstrap:tt-agents.1 @tmux-team-role implementer", out)
+        self.assertIn("tmux select-pane -t tt-bootstrap:tt-agents.0 -T tt-orchestrator", out)
+        self.assertIn("tmux select-pane -t tt-bootstrap:tt-agents.1 -T tt-implementer", out)
+        self.assertIn("tmux select-layout -t tt-bootstrap:tt-agents tiled", out)
         self.assertIn("codex app-server --listen ws://127.0.0.1:4500", out)
         self.assertIn("codex --remote ws://127.0.0.1:4500", out)
         self.assertIn("[roles.orchestrator]", out)
-        self.assertIn('pane = "tt-bootstrap:agents.0"', out)
+        self.assertIn('pane = "tt-bootstrap:tt-agents.0"', out)
         self.assertIn('mode = "app_server_remote_tui"', out)
         self.assertIn('notify_method = "app-server-turn"', out)
         self.assertIn("session: tt-bootstrap", out)
@@ -511,10 +516,10 @@ can_notify = ["orchestrator"]
         self.assertEqual(code, 0, err)
         self.assertIn("snapshot: (dry-run)", out)
         self.assertIn("roles: 2", out)
-        self.assertIn("roles: target=tt:agents", out)
-        self.assertIn("app-server: target=tt:app-server", out)
-        self.assertIn("tmux kill-window -t tt:agents", out)
-        self.assertIn("tmux kill-window -t tt:app-server", out)
+        self.assertIn("roles: target=tt:tt-agents", out)
+        self.assertIn("app-server: target=tt:tt-app-server", out)
+        self.assertIn("tmux kill-window -t tt:tt-agents", out)
+        self.assertIn("tmux kill-window -t tt:tt-app-server", out)
         self.assertFalse((self.root / "runtime" / "sleeps" / "latest.toml").exists())
 
     def test_sleep_snapshots_and_tears_down_managed_windows(self) -> None:
@@ -612,7 +617,7 @@ runtime_dir = "{runtime}"
 [roles.orchestrator]
 mode = "app_server_remote_tui"
 state = "active"
-pane = "tt:agents.0"
+pane = "tt:tt-agents.0"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-orch"
@@ -620,7 +625,7 @@ codex_thread_id = "thread-orch"
 [roles.implementer]
 mode = "app_server_remote_tui"
 state = "active"
-pane = "tt:agents.1"
+pane = "tt:tt-agents.1"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-impl"
@@ -638,14 +643,14 @@ codex_thread_id = "thread-impl"
 printf '%s\\n' "$*" >> {log_path}
 if [ "$1" = "display-message" ] && [ "$2" = "-p" ]; then
   case "$4" in
-    tt:agents.0) printf 'tt\\t@3\\tagents\\t%%10\\torchestrator\\t0\\tbash\\n'; exit 0 ;;
-    tt:agents.1) printf 'tt\\t@3\\tagents\\t%%11\\timplementer\\t0\\tbash\\n'; exit 0 ;;
+    tt:tt-agents.0) printf 'tt\\t@3\\ttt-agents\\t%%10\\ttt-orchestrator\\t0\\tbash\\n'; exit 0 ;;
+    tt:tt-agents.1) printf 'tt\\t@3\\ttt-agents\\t%%11\\ttt-implementer\\t0\\tbash\\n'; exit 0 ;;
   esac
   printf 'unknown target %s\\n' "$4" >&2
   exit 1
 fi
 if [ "$1" = "list-windows" ]; then
-  printf '@1\\tcontrol-plane\\n@2\\tapp-server\\n@3\\tagents\\n'
+  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n'
   exit 0
 fi
 if [ "$1" = "kill-window" ]; then

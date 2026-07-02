@@ -4,17 +4,17 @@ Follow these constraints when starting or operating tmux-team.
 
 ## Control Plane
 
-The Codex session that invokes the skill is the control-plane.
+The Codex session that invokes the skill is the operator control session.
 
-- Name the launcher/operator tmux window `control-plane`.
-- Do not treat the control-plane as a managed role.
-- Do not route `tmux-team send` work to the control-plane unless the operator explicitly adds it as a role.
+- Name the launcher/operator tmux window `tt-control`.
+- Do not treat `tt-control` as a managed role.
+- Do not route `tmux-team send` work to `tt-control` unless the operator explicitly adds it as a role.
 
 ## App Server
 
 The app-server is isolated infrastructure.
 
-- Keep it in its own tmux window named `app-server`.
+- Keep it in its own tmux window named `tt-app-server`.
 - Do not group it with role agents.
 - Use it for app-server `turn/start` wake delivery.
 
@@ -23,7 +23,7 @@ The app-server is isolated infrastructure.
 The default role layout is grouped:
 
 ```text
-agents window
+tt-agents window
   pane 0: orchestrator
   pane 1: implementer
   pane 2: collector
@@ -56,4 +56,4 @@ Autonomous role-to-role messaging requires role panes that can run the `tmux-tea
 
 ## Sleep
 
-Use `tmux-team sleep` to snapshot role state, pane targets, and app-server bindings before tearing down managed windows. Sleep must leave `control-plane` alive by default and pauses active/draining roles unless explicitly told not to.
+Use `tmux-team sleep` to snapshot role state, pane targets, and app-server bindings before tearing down managed windows. Sleep must leave `tt-control` alive by default and pauses active/draining roles unless explicitly told not to.

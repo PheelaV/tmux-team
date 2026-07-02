@@ -13,8 +13,8 @@ import tomli_w
 from .config import TeamConfig
 from .store import Store, utc_now
 
-APP_SERVER_WINDOW = "app-server"
-CONTROL_PLANE_WINDOW = "control-plane"
+APP_SERVER_WINDOW = "tt-app-server"
+CONTROL_PLANE_WINDOW = "tt-control"
 SLEEP_SCHEMA_VERSION = 1
 
 
@@ -249,7 +249,7 @@ def managed_window_targets(
             continue
         if target.window_name == CONTROL_PLANE_WINDOW and not force:
             raise LifecycleError(
-                f"refusing to manage control-plane window for role {role}; rerun with --force if intended"
+                f"refusing to manage {CONTROL_PLANE_WINDOW} window for role {role}; rerun with --force if intended"
             )
         windows.setdefault(
             key,

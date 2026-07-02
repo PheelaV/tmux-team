@@ -41,8 +41,8 @@ def main() -> int:
             force_config=True,
             start_app_server=True,
             agent_layout="grouped",
-            control_window="control-plane",
-            agents_window="agents",
+            control_window=bootstrap_mod.DEFAULT_CONTROL_WINDOW,
+            agents_window=bootstrap_mod.DEFAULT_AGENTS_WINDOW,
             role_yolo=False,
             role_profile=None,
             dry_run=False,
@@ -64,14 +64,14 @@ def main() -> int:
     print(f"root: {root}")
     print(f"session: {session}")
     print(
-        "verified: bootstrap creates control-plane, app-server, and one tiled agents window; sleep snapshots TOML and tears down managed windows"
+        "verified: bootstrap creates tt-control, tt-app-server, and one tiled tt-agents window; sleep snapshots TOML and tears down managed windows"
     )
     return 0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify tmux-team bootstrap creates the default grouped tmux layout.")
-    parser.add_argument("--session", default="tmux-team-bootstrap-layout-itest")
+    parser.add_argument("--session", default="tt-bootstrap-layout-itest")
     parser.add_argument("--root", default="/tmp/tmux-team-bootstrap-layout-itest")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
@@ -118,11 +118,15 @@ def patch_app_server_probes() -> None:
 
 def verify_layout(session: str, config_path: Path, role_panes: dict[str, str]) -> None:
     windows = list_windows(session)
-    expected_windows = ["control-plane", "app-server", "agents"]
+    expected_windows = [
+        bootstrap_mod.DEFAULT_CONTROL_WINDOW,
+        bootstrap_mod.DEFAULT_APP_SERVER_WINDOW,
+        bootstrap_mod.DEFAULT_AGENTS_WINDOW,
+    ]
     if windows != expected_windows:
         raise SmokeError(f"expected windows {expected_windows}, got {windows}")
 
-    panes = list_panes(session, "agents")
+    panes = list_panes(session, bootstrap_mod.DEFAULT_AGENTS_WINDOW)
     role_labels = [pane["role"] for pane in panes]
     if role_labels != list(DEFAULT_ROLES):
         raise SmokeError(f"expected agent role labels {list(DEFAULT_ROLES)}, got {role_labels}")
@@ -170,8 +174,8 @@ def run_sleep(config_path: Path, session: str) -> None:
 
 def verify_sleep(session: str, config_path: Path) -> None:
     windows = list_windows(session)
-    if windows != ["control-plane"]:
-        raise SmokeError(f"expected only control-plane after sleep, got {windows}")
+    if windows != [bootstrap_mod.DEFAULT_CONTROL_WINDOW]:
+        raise SmokeError(f"expected only {bootstrap_mod.DEFAULT_CONTROL_WINDOW} after sleep, got {windows}")
 
     latest = config_path.parent / "runtime" / "sleeps" / "latest.toml"
     if not latest.exists():

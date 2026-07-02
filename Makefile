@@ -43,13 +43,13 @@ test: require-uv
 	$(UV_RUN) python -m unittest discover -s tests
 
 bootstrap-layout-smoke-test: require-uv
-	$(UV_RUN) python scripts/bootstrap_layout_smoke.py --session tmux-team-bootstrap-layout-itest --root /tmp/tmux-team-bootstrap-layout-itest --force
+	$(UV_RUN) python scripts/bootstrap_layout_smoke.py --session tt-bootstrap-layout-itest --root /tmp/tmux-team-bootstrap-layout-itest --force
 
 smoke-test: require-uv
-	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tmux-team-itest --root /tmp/tmux-team-itest --force
+	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tt-itest --root /tmp/tmux-team-itest --force
 
 congestion-smoke-test: require-uv
-	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tmux-team-congestion-itest --root /tmp/tmux-team-congestion-itest --force --scenario congestion
+	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --session tt-congestion-itest --root /tmp/tmux-team-congestion-itest --force --scenario congestion
 
 integration-test: lint test bootstrap-layout-smoke-test smoke-test congestion-smoke-test
 

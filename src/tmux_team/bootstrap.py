@@ -18,10 +18,12 @@ from .store import Store
 
 DEFAULT_ROLES = ("orchestrator", "implementer", "collector", "trainer")
 DEFAULT_AGENT_LAYOUT = "grouped"
-DEFAULT_CONTROL_WINDOW = "control-plane"
-DEFAULT_AGENTS_WINDOW = "agents"
+DEFAULT_CONTROL_WINDOW = "tt-control"
+DEFAULT_APP_SERVER_WINDOW = "tt-app-server"
+DEFAULT_AGENTS_WINDOW = "tt-agents"
 AGENT_LAYOUTS = ("grouped", "separate-windows")
 ROLE_PANE_OPTION = "@tmux-team-role"
+TT_PREFIX = "tt-"
 
 
 @dataclass(frozen=True)
@@ -155,9 +157,11 @@ def dry_run_tmux_commands(
     if start_app_server:
         app_server_command = keep_open_command(
             f"{shlex.quote(codex_bin)} app-server --listen {shlex.quote(endpoint)}",
-            "app-server",
+            DEFAULT_APP_SERVER_WINDOW,
         )
-        commands.append(new_window_command(tmux_bin, session, "app-server", project_root, app_server_command))
+        commands.append(
+            new_window_command(tmux_bin, session, DEFAULT_APP_SERVER_WINDOW, project_root, app_server_command)
+        )
     for index, role in enumerate(role_bindings):
         command = role_shell_command(codex_bin, endpoint, project_root, role_yolo=role_yolo, role_profile=role_profile)
         if agent_layout == "grouped":
@@ -194,12 +198,12 @@ def app_server_tmux_commands(
 ) -> list[list[str]]:
     command = keep_open_command(
         f"{shlex.quote(codex_bin)} app-server --listen {shlex.quote(endpoint)}",
-        "app-server",
+        DEFAULT_APP_SERVER_WINDOW,
     )
     if tmux_session_exists(tmux_bin, session):
-        if tmux_window_exists(tmux_bin, session, "app-server"):
+        if tmux_window_exists(tmux_bin, session, DEFAULT_APP_SERVER_WINDOW):
             return []
-        return [new_window_command(tmux_bin, session, "app-server", project_root, command)]
+        return [new_window_command(tmux_bin, session, DEFAULT_APP_SERVER_WINDOW, project_root, command)]
     return [app_server_new_session_command(tmux_bin, session, project_root, command)]
 
 
@@ -216,7 +220,7 @@ def ensure_control_plane_window(tmux_bin: str, session: str, project_root: Path,
             return
 
     if not tmux_window_exists(tmux_bin, session, control_window):
-        command = keep_open_command('printf "[tmux-team] control-plane shell\\n"', "control-plane")
+        command = keep_open_command(f'printf "[tmux-team] {control_window} shell\\n"', control_window)
         run(new_window_command(tmux_bin, session, control_window, project_root, command), check=True)
 
 
@@ -297,9 +301,13 @@ def ensure_role_pane(
             return pane
         return f"{session}:{agents_window}.{index}"
 
-    if tmux_window_exists(tmux_bin, session, role):
-        run([tmux_bin, "respawn-window", "-k", "-t", f"{session}:{role}", "-c", str(project_root), command], check=True)
-        pane = first_pane_id(tmux_bin, f"{session}:{role}")
+    role_window = tt_name(role)
+    if tmux_window_exists(tmux_bin, session, role_window):
+        run(
+            [tmux_bin, "respawn-window", "-k", "-t", f"{session}:{role_window}", "-c", str(project_root), command],
+            check=True,
+        )
+        pane = first_pane_id(tmux_bin, f"{session}:{role_window}")
     else:
         result = run(
             role_new_window_command(
@@ -319,7 +327,7 @@ def ensure_role_pane(
     if pane:
         label_role_pane(tmux_bin, pane, role)
         return pane
-    return f"{session}:{role}.0"
+    return f"{session}:{role_window}.0"
 
 
 def configure_agent_window(tmux_bin: str, session: str, agents_window: str) -> None:
@@ -346,7 +354,7 @@ def label_role_pane(tmux_bin: str, pane: str, role: str) -> None:
 def label_role_pane_commands(tmux_bin: str, pane: str, role: str) -> list[list[str]]:
     return [
         [tmux_bin, "set-option", "-p", "-t", pane, ROLE_PANE_OPTION, role],
-        [tmux_bin, "select-pane", "-t", pane, "-T", role],
+        [tmux_bin, "select-pane", "-t", pane, "-T", tt_name(role)],
     ]
 
 
@@ -528,7 +536,7 @@ def app_server_new_session_command(
     cwd: Path,
     command: str,
 ) -> list[str]:
-    return [tmux_bin, "new-session", "-d", "-s", session, "-n", "app-server", "-c", str(cwd), command]
+    return [tmux_bin, "new-session", "-d", "-s", session, "-n", DEFAULT_APP_SERVER_WINDOW, "-c", str(cwd), command]
 
 
 def shell_session_command(tmux_bin: str, session: str, cwd: Path, window: str = DEFAULT_CONTROL_WINDOW) -> list[str]:
@@ -578,7 +586,7 @@ def role_new_window_command(
     return new_window_command(
         tmux_bin,
         session,
-        role,
+        tt_name(role),
         project_root,
         role_shell_command(codex_bin, endpoint, project_root, role_yolo=role_yolo, role_profile=role_profile),
         print_pane=print_pane,
@@ -625,7 +633,7 @@ def dry_run_role_bindings(
 ) -> dict[str, RoleBinding]:
     bindings: dict[str, RoleBinding] = {}
     for index, role in enumerate(roles):
-        pane = f"{session}:{agents_window}.{index}" if agent_layout == "grouped" else f"{session}:{role}.0"
+        pane = f"{session}:{agents_window}.{index}" if agent_layout == "grouped" else f"{session}:{tt_name(role)}.0"
         bindings[role] = RoleBinding(thread_id=f"dry-thread-{role}", pane=pane)
     return bindings
 
@@ -641,4 +649,8 @@ def normalize_agent_layout(value: str) -> str:
 
 def default_session_name(project_root: Path) -> str:
     name = project_root.resolve().name or "tmux-team"
-    return "".join(char if char.isalnum() or char in ("-", "_") else "-" for char in name)
+    return tt_name("".join(char if char.isalnum() or char in ("-", "_") else "-" for char in name))
+
+
+def tt_name(value: str) -> str:
+    return value if value.startswith(TT_PREFIX) else f"{TT_PREFIX}{value}"

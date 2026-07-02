@@ -151,7 +151,7 @@ Pros:
 
 - no lock-in;
 - lets Hermes become an optional dashboard or gateway later;
-- keeps control-plane semantics narrow and explicit.
+- keeps `tt-control` semantics narrow and explicit.
 
 Cons:
 

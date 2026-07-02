@@ -27,7 +27,7 @@ pipx install git+https://github.com/PheelaV/tmux-team.git
 
 Use `tmux-team bootstrap` as the entry point. Do not manually type prompts into role panes with `tmux send-keys`.
 
-The Codex session that invoked this skill is the control-plane. Bootstrap names it `control-plane`, keeps `app-server` isolated, and uses a grouped `agents` window by default. If the launcher is already inside tmux, bootstrap uses that tmux session by default.
+The Codex session that invoked this skill is the operator control session. Bootstrap names its tmux window `tt-control`, keeps `tt-app-server` isolated, and uses a grouped `tt-agents` window by default. If the launcher is already inside tmux, bootstrap uses that tmux session by default.
 
 Default team shape:
 
@@ -50,7 +50,7 @@ For an explicit team:
 ```bash
 tmux-team bootstrap \
   --project-root /path/to/project \
-  --session my-team \
+  --session tt-my-team \
   --roles orchestrator,implementer,collector,trainer \
   --agent-layout grouped \
   --goal-file /path/to/goal.md
@@ -65,14 +65,14 @@ tmux-team bootstrap --project-root . --role-profile tmux-team-role
 tmux-team bootstrap --project-root . --role-yolo
 ```
 
-Prefer `--role-profile` when the user already has a suitable Codex profile. Use `--role-yolo` only when the operator accepts Codex allow-all mode for managed role panes. It passes `--dangerously-bypass-approvals-and-sandbox` to role TUIs only; the control-plane session remains separate.
+Prefer `--role-profile` when the user already has a suitable Codex profile. Use `--role-yolo` only when the operator accepts Codex allow-all mode for managed role panes. It passes `--dangerously-bypass-approvals-and-sandbox` to role TUIs only; the `tt-control` session remains separate.
 
 What bootstrap does:
 
 - uses the current tmux session when launched inside tmux, or starts a tmux session if needed;
-- names the launcher/operator window `control-plane`;
-- starts a visible `app-server` tmux window running `codex app-server`;
-- opens role panes in one tiled `agents` window by default using `codex --remote ...`;
+- names the launcher/operator window `tt-control`;
+- starts a visible `tt-app-server` tmux window running `codex app-server`;
+- opens role panes in one tiled `tt-agents` window by default using `codex --remote ...`;
 - waits for each role TUI to create a loaded app-server thread;
 - writes `.tmux-team/team.toml` with app-server endpoint and discovered thread IDs;
 - queues the initial goal to `orchestrator` when a goal is provided;
@@ -98,16 +98,16 @@ tmux-team role resume trainer
 tmux-team sleep
 ```
 
-Use `tmux-team sleep` to snapshot role/app-server bindings and tear down managed role/app-server windows. It leaves `control-plane` alive by default and pauses active/draining roles unless `--no-pause-roles` is used.
+Use `tmux-team sleep` to snapshot role/app-server bindings and tear down managed role/app-server windows. It leaves `tt-control` alive by default and pauses active/draining roles unless `--no-pause-roles` is used.
 
 ## Safety Rules
 
 - Keep agents in tmux panes.
-- Keep the control-plane and app-server isolated from role-agent panes.
+- Keep `tt-control` and `tt-app-server` isolated from role-agent panes.
 - Use Codex app-server remote TUI for wake delivery.
 - Never use `tmux send-keys` for production wake.
 - For autonomous role-to-role messaging, launch role panes with a permissions profile or explicit `--role-yolo`.
-- Preserve user takeover: app-server, orchestrator, and role panes are visible tmux windows.
+- Preserve user takeover: `tt-app-server` and role panes are visible tmux windows.
 - If bootstrap fails after creating partial tmux windows, report the exact failed command and current session name.
 
 ## Team Shapes

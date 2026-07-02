@@ -1,6 +1,6 @@
 {
   "name": "tmux-team",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pane-visible Codex team orchestration with tmux, durable inboxes, and app-server wake delivery.",
   "author": {
     "name": "tmux-team contributors",

@@ -115,9 +115,9 @@ Equivalent direct command:
 tmux-team bootstrap --project-root . --goal "Run the smallest failing test, route implementation work to the implementer, and report the final test command and result. Keep changes inside this repo."
 ```
 
-If bootstrap is launched from inside tmux, it uses the current tmux session unless `--session` is provided. Otherwise it creates a named session from the project directory.
+If bootstrap is launched from inside tmux, it uses the current tmux session unless `--session` is provided. Otherwise it creates `tt-<project>` from the project directory name.
 
-Bootstrap names the launcher window `control-plane`, starts a visible `app-server` tmux window, opens remote Codex TUI panes in a tiled `agents` window with `codex --remote ...`, waits for each TUI to create a loaded app-server thread, writes those discovered thread IDs and pane targets to `.tmux-team/team.toml`, queues the initial goal to `orchestrator`, and wakes the orchestrator with app-server `turn/start`. It does not type into any tmux prompt.
+Bootstrap names the launcher window `tt-control`, starts a visible `tt-app-server` tmux window, opens remote Codex TUI panes in a tiled `tt-agents` window with `codex --remote ...`, waits for each TUI to create a loaded app-server thread, writes those discovered thread IDs and pane targets to `.tmux-team/team.toml`, queues the initial goal to `orchestrator`, and wakes the orchestrator with app-server `turn/start`. It does not type into any tmux prompt.
 
 Watch progress from the control pane:
 
@@ -181,7 +181,7 @@ Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the co
 - `messages/*.md` for message bodies;
 - `sleeps/*.toml` for operator-facing sleep/restart snapshots.
 
-`tmux-team sleep` snapshots role state, pane targets, tmux session/window/pane IDs, and Codex app-server thread bindings before tearing down managed role/app-server windows. It leaves `control-plane` alive by default and marks active/draining roles paused so stale bindings do not receive new work. Use `tmux-team sleep --dry-run` to inspect the plan first.
+`tmux-team sleep` snapshots role state, pane targets, tmux session/window/pane IDs, and Codex app-server thread bindings before tearing down managed role/app-server windows. It leaves `tt-control` alive by default and marks active/draining roles paused so stale bindings do not receive new work. Use `tmux-team sleep --dry-run` to inspect the plan first.
 
 Tmux notification uses `tmux display-message` by default. It does not type into the agent's prompt composer.
 

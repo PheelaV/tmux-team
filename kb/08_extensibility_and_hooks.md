@@ -30,8 +30,8 @@ Extensions must not weaken the product invariants:
 
 - Task bodies stay in the durable inbox, not wake prompts or pane text.
 - Production Codex wake delivery stays app-server `turn/start`, not `tmux send-keys`.
-- The control-plane pane is not a role target.
-- The app-server window remains infrastructure.
+- The `tt-control` pane is not a role target.
+- The `tt-app-server` window remains infrastructure.
 - `team.sqlite`, message bodies, and `events.jsonl` remain the source of truth.
 - Hooks are not transport. They observe, deny, or mutate brokered operations.
 

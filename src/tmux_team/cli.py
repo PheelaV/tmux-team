@@ -130,7 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--project-root", default=".", help="Project root for the team")
     bootstrap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Config path to create")
     bootstrap.add_argument("--runtime-dir", default=".tmux-team/runtime", help="Runtime directory for team state")
-    bootstrap.add_argument("--session", default=None, help="tmux session name; defaults to project directory name")
+    bootstrap.add_argument(
+        "--session",
+        default=None,
+        help="tmux session name; defaults to current tmux session or tt-<project>",
+    )
     bootstrap.add_argument(
         "--roles", default=None, help="Comma-separated roles; default: orchestrator,implementer,collector,trainer"
     )
@@ -230,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     sleep.add_argument(
         "--dry-run", action="store_true", help="Print snapshot/teardown plan without writing or killing panes"
     )
-    sleep.add_argument("--force", action="store_true", help="Allow managing an unexpected control-plane role window")
+    sleep.add_argument("--force", action="store_true", help="Allow managing an unexpected tt-control role window")
     sleep.add_argument(
         "--kill-session", action="store_true", help="Kill the whole tmux session instead of managed windows only"
     )

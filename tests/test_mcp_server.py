@@ -28,13 +28,13 @@ runtime_dir = "{runtime}"
 [roles.orchestrator]
 mode = "app_server_remote_tui"
 state = "active"
-pane = "tt:agents.0"
+pane = "tt:tt-agents.0"
 notify_method = "app-server-turn"
 
 [roles.implementer]
 mode = "app_server_remote_tui"
 state = "active"
-pane = "tt:agents.1"
+pane = "tt:tt-agents.1"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-impl"
@@ -42,7 +42,7 @@ codex_thread_id = "thread-impl"
 [roles.trainer]
 mode = "app_server_remote_tui"
 state = "paused"
-pane = "tt:agents.2"
+pane = "tt:tt-agents.2"
 notify_method = "app-server-turn"
 """,
             encoding="utf-8",

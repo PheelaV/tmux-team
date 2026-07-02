@@ -4,20 +4,20 @@ These are product constraints, not implementation suggestions.
 
 ## Control Plane
 
-The Codex session that starts `tmux-team bootstrap` is the control-plane.
+The Codex session that starts `tmux-team bootstrap` is the operator control session.
 
-- It is named `control-plane` in tmux.
+- Bootstrap names its tmux window `tt-control`.
 - It is not a managed role agent.
 - It is not a delivery target for `tmux-team send`.
 - It remains available for the human operator to inspect, intervene, resize the team, and run control commands.
 
-Do not route agent-to-agent work into the control-plane conversation. This prevents managed agents from interrupting the human prompt composer.
+Do not route agent-to-agent work into the `tt-control` conversation. This prevents managed agents from interrupting the human prompt composer.
 
 ## App Server
 
 Codex app-server is infrastructure and stays isolated.
 
-- It runs in its own tmux window named `app-server`.
+- It runs in its own tmux window named `tt-app-server`.
 - It is not grouped with role agents.
 - It is the wake transport for Codex roles through app-server `turn/start`.
 - If it exits, the pane stays open so the operator can inspect the failure.
@@ -46,25 +46,25 @@ Role agents must be able to run the `tmux-team` control CLI if they are expected
 - Use a narrow Codex role profile when available.
 - Use `tmux-team bootstrap --role-yolo` only when the role panes are already inside an external trust boundary you accept for this project.
 
-`--role-yolo` launches managed role Codex TUIs with Codex `--dangerously-bypass-approvals-and-sandbox`. It does not change the control-plane session or the app-server process.
+`--role-yolo` launches managed role Codex TUIs with Codex `--dangerously-bypass-approvals-and-sandbox`. It does not change the `tt-control` session or the app-server process.
 
 ## Layout
 
 The default layout is:
 
 ```text
-control-plane window
-app-server window
-agents window
+tt-control window
+tt-app-server window
+tt-agents window
   pane 0: orchestrator
   pane 1: implementer
   pane 2: collector
   pane 3: trainer
 ```
 
-The grouped `agents` window is tiled so the operator can oversee the role fleet at once.
+The grouped `tt-agents` window is tiled so the operator can oversee the role fleet at once.
 
-Other layouts may be supported by configuration, but they must preserve the control-plane and app-server isolation rules. The current alternate layout is `separate-windows`, which creates one tmux window per role.
+Other layouts may be supported by configuration, but they must preserve the `tt-control` and app-server isolation rules. The current alternate layout is `separate-windows`, which creates one tmux window per role.
 
 ## Delivery
 
@@ -103,7 +103,7 @@ If a role pane target changes, config must change with it.
 
 - It snapshots role state, pane targets, tmux session/window/pane IDs, and app-server thread bindings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
-- It tears down managed role/app-server windows by default and leaves `control-plane` alive.
+- It tears down managed role/app-server windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
 
 ## Resizing

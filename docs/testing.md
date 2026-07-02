@@ -45,7 +45,7 @@ make congestion-smoke-test
 - the basic fake-agent workflow;
 - the congestion/multiple-message workflow.
 
-`bootstrap-layout-smoke-test` verifies the real bootstrap tmux shape with a fake Codex binary: `control-plane`, isolated `app-server`, and one tiled `agents` window with the default role panes. It then runs `tmux-team sleep`, verifies a TOML sleep snapshot, and confirms only `control-plane` remains.
+`bootstrap-layout-smoke-test` verifies the real bootstrap tmux shape with a fake Codex binary: `tt-control`, isolated `tt-app-server`, and one tiled `tt-agents` window with the default role panes. It then runs `tmux-team sleep`, verifies a TOML sleep snapshot, and confirms only `tt-control` remains.
 
 Run in Docker:
 
