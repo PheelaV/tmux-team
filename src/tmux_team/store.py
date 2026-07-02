@@ -19,6 +19,7 @@ MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,9 @@ class Store:
         return conn
 
     def init_schema(self, conn: sqlite3.Connection) -> None:
+        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if current_version > SCHEMA_VERSION:
+            raise ValueError(f"Database schema version {current_version} is newer than supported {SCHEMA_VERSION}")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS roles (
@@ -134,6 +138,7 @@ class Store:
             );
             """
         )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
 
     def sync_roles(self, conn: sqlite3.Connection, roles: Iterable[RoleConfig]) -> None:

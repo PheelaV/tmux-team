@@ -116,7 +116,7 @@ The shell CLI is useful for humans and tests, but role agents should not need br
 
 Codex role panes still receive wake turns through app-server remote TUI. The role then uses MCP tools to claim and complete work instead of shelling out to `tmux-team`. This narrows Codex permissions from “can run local commands” to “can call these tmux-team tools,” while tmux-team enforces role policy centrally.
 
-The first MCP-shaped implementation is a thin wrapper over the same `Store` operations. It does not fork a second state model.
+The first MCP-shaped implementation is a thin wrapper over the same `TeamService` operations used by the CLI. It does not fork a second state model.
 
 ## Transport Hardening
 

@@ -11,6 +11,8 @@ from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
 
+from . import __version__
+
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -100,7 +102,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "tmux-team",
                     "title": "tmux-team",
-                    "version": "0.1.0",
+                    "version": __version__,
                 },
                 "capabilities": {
                     "experimentalApi": True,
@@ -134,32 +136,6 @@ class AppServerClient:
         if params is not None:
             payload["params"] = params
         self._send_json(payload)
-
-    def resume_thread(self, thread_id: str) -> dict[str, Any]:
-        return self.request("thread/resume", {"threadId": thread_id})
-
-    def start_thread(
-        self,
-        *,
-        cwd: str | None = None,
-        developer_instructions: str | None = None,
-        model: str | None = None,
-    ) -> str:
-        params: dict[str, Any] = {}
-        if cwd:
-            params["cwd"] = cwd
-        if developer_instructions:
-            params["developerInstructions"] = developer_instructions
-        if model:
-            params["model"] = model
-        result = self.request("thread/start", params)
-        thread = result.get("thread")
-        if not isinstance(thread, dict):
-            raise AppServerError("thread/start result did not include a thread object")
-        thread_id = str(thread.get("id") or "")
-        if not thread_id:
-            raise AppServerError("thread/start result did not include thread.id")
-        return thread_id
 
     def list_loaded_threads(self) -> list[str]:
         result = self.request("thread/loaded/list", {})

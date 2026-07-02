@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tmux_team.cli import main
-from tmux_team.config import TeamConfig
+from tmux_team.config import TeamConfig, load_config
 from tmux_team.store import Store
 
 
@@ -88,6 +88,28 @@ requires_stable_commit = true
         )
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
+
+    def test_init_writes_valid_toml_config(self) -> None:
+        config_path = self.root / "new-project" / ".tmux-team" / "team.toml"
+
+        code, out, err = self.run_main(
+            "init",
+            "--config",
+            str(config_path),
+            "--name",
+            "demo-team",
+            "--runtime-dir",
+            ".tmux-team/runtime",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"created {config_path}", out)
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["team"]["name"], "demo-team")
+        self.assertTrue(data["roles"]["implementer"]["can_edit"])
+        config = load_config(config_path)
+        self.assertEqual(config.name, "demo-team")
+        self.assertIn("orchestrator", config.roles)
 
     def test_authenticated_actor_defaults_send_sender_to_self(self) -> None:
         code, out, err = self.run_main(

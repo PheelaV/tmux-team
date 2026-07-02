@@ -1,16 +1,18 @@
 # tmux-team
 
-Design notes and prototype space for a lightweight tmux-backed agent-team control plane.
-Codex is the first target backend; other agent CLIs can be added later.
+Minimal tmux-backed control plane for pane-visible agent teams.
 
-## MVP
+Codex is the first target backend. Other agent CLIs can be added later without changing the core invariant: agents stay visible in tmux, while durable work moves through `tmux-team` state.
 
-The current MVP is a small Python CLI backed by SQLite.
+## Current Shape
+
+`tmux-team` is a small Python CLI backed by SQLite, TOML config, tmux windows, and Codex app-server remote TUI wake delivery.
 
 Install requires `uv` or `pipx`; `make install-dev` prefers `uv` and falls back to `pipx`.
 
-Read the operating invariants before changing bootstrap behavior:
+Read the human docs before changing bootstrap or delivery behavior:
 
+- [docs/index.md](docs/index.md)
 - [docs/invariants.md](docs/invariants.md)
 
 ```bash
@@ -76,7 +78,7 @@ Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the co
 
 - `team.sqlite` for durable state;
 - `events.jsonl` for append-only audit;
-- `messages/*.md` for message bodies.
+- `messages/*.md` for message bodies;
 - `sleeps/*.toml` for operator-facing sleep/restart snapshots.
 
 `tmux-team sleep` snapshots role state, pane targets, tmux session/window/pane IDs, and Codex app-server thread bindings before tearing down managed role/app-server windows. It leaves `control-plane` alive by default and marks active/draining roles paused so stale bindings do not receive new work. Use `tmux-team sleep --dry-run` to inspect the plan first.
@@ -94,7 +96,7 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 `app-server-turn` submits a real Codex turn to the role's thread. The pane stays the live Codex UI, but `tmux-team` never types into the pane.
 
-Project-local extensions live under `.tmux-team/extensions/<name>/extension.toml`. The first extension surface supports executable JSON hooks around message creation, claim, ack, completion, and notification operations. Hooks run through the shared service layer used by both the CLI and MCP facade.
+Project-local extensions live under `.tmux-team/extensions/<name>/extension.toml`. The first extension surface supports executable JSON hooks around message creation, claim, ack, completion, and notification operations. See [docs/extensions.md](docs/extensions.md).
 
 ## Tests
 
@@ -170,14 +172,4 @@ OPENAI_API_KEY="$OPENAI_API_KEY" make docker-codex-integration-test
 
 The Docker image installs Codex with `npm install -g @openai/codex`. Override with `CODEX_NPM_PACKAGE` if you need a pinned version. Docker Codex auth is persisted under `.tmux-team/codex-home`, which is ignored by git.
 
-Start with the knowledge base:
-
-- [kb/01_init.md](kb/01_init.md)
-- [kb/02_delivery_design.md](kb/02_delivery_design.md)
-- [kb/03_integration_options.md](kb/03_integration_options.md)
-- [kb/04_hardening_checklist.md](kb/04_hardening_checklist.md)
-- [kb/05_installable_extension.md](kb/05_installable_extension.md)
-- [kb/06_hermes_comparison.md](kb/06_hermes_comparison.md)
-- [kb/07_principles.md](kb/07_principles.md)
-- [kb/08_extensibility_and_hooks.md](kb/08_extensibility_and_hooks.md)
-- [docs/invariants.md](docs/invariants.md)
+Agent-facing design memory lives in [kb/00_index.md](kb/00_index.md).

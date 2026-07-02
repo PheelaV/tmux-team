@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
+from . import __version__
 from .config import ConfigError, load_config
 from .extensions.manifest import ExtensionError
 from .extensions.runner import HookDenied, HookError
@@ -14,7 +15,7 @@ from .store import CLAIMABLE_STATES, Store, normalize_notify_method, normalize_p
 
 JSONRPC_VERSION = "2.0"
 SERVER_NAME = "tmux-team"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = __version__
 
 
 class ToolCallError(ValueError):

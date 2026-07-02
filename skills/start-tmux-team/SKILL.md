@@ -82,7 +82,7 @@ tmux-team role resume trainer
 tmux-team sleep
 ```
 
-Use `tmux-team sleep` to snapshot role/app-server bindings and tear down managed role/app-server windows. It leaves `control-plane` alive by default.
+Use `tmux-team sleep` to snapshot role/app-server bindings and tear down managed role/app-server windows. It leaves `control-plane` alive by default and pauses active/draining roles unless `--no-pause-roles` is used.
 
 ## Safety Rules
 

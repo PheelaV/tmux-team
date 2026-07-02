@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import tomli_w
+
 from .policy import RolePolicy, TeamPolicy, parse_role_policy, parse_team_policy
 
 DEFAULT_CONFIG_PATH = Path(".tmux-team/team.toml")
@@ -16,7 +18,6 @@ DEFAULT_RUNTIME_DIR = Path(".tmux-team/runtime")
 class ExtensionSettings:
     enabled: bool = True
     project: bool = True
-    user: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,25 +144,26 @@ def write_default_config(path: Path, name: str, runtime_dir: str | None) -> None
     if path.exists():
         raise ConfigError(f"Config already exists: {path}")
     runtime = runtime_dir or ".tmux-team/runtime"
-    text = f"""[team]
-name = "{_toml_string(name)}"
-runtime_dir = "{_toml_string(runtime)}"
-
-[roles.orchestrator]
-mode = "human_visible"
-state = "active"
-pane = "session:0"
-can_edit = false
-can_launch_slurm = false
-
-[roles.implementer]
-mode = "human_visible"
-state = "active"
-pane = "session:1"
-can_edit = true
-can_launch_slurm = false
-"""
-    path.write_text(text, encoding="utf-8")
+    data = {
+        "team": {"name": name, "runtime_dir": runtime},
+        "roles": {
+            "orchestrator": {
+                "mode": "human_visible",
+                "state": "active",
+                "pane": "session:0",
+                "can_edit": False,
+                "can_launch_slurm": False,
+            },
+            "implementer": {
+                "mode": "human_visible",
+                "state": "active",
+                "pane": "session:1",
+                "can_edit": True,
+                "can_launch_slurm": False,
+            },
+        },
+    }
+    path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 
 def _optional_str(value: Any) -> str | None:
@@ -178,7 +180,6 @@ def parse_extension_settings(value: Any) -> ExtensionSettings:
     return ExtensionSettings(
         enabled=_optional_bool(value, "enabled", True),
         project=_optional_bool(value, "project", True),
-        user=_optional_bool(value, "user", False),
     )
 
 
@@ -187,7 +188,3 @@ def _optional_bool(data: dict[str, Any], key: str, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     raise ValueError(f"team.extensions.{key} must be a boolean")
-
-
-def _toml_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')

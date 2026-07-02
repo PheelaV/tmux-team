@@ -1,45 +1,41 @@
 # Hardening Checklist
 
-## Immediate
+Use this as agent-facing project memory. Human docs live in [../docs/index.md](../docs/index.md).
 
-- Move message body delivery out of tmux paste.
-- Add message IDs and statuses.
-- Add per-role `inbox next` and `ack`.
-- Make role execution policy explicit: default, named Codex profile, or role-only YOLO.
-- Add role heartbeat records.
-- Add `notification_pending` when a pane cannot be safely notified.
-- Keep every human/operator message in the ledger.
+## Implemented Baseline
 
-## Short Term
+- Durable message IDs, states, body files, and SQLite storage.
+- `inbox next`, `ack`, and `complete` state transitions.
+- Atomic claim with expired-claim reclaim.
+- Notification attempt records.
+- App-server remote TUI wake for Codex roles.
+- `send-keys` kept as unsafe/debug and deferred in tmux copy mode.
+- Role state: `active`, `paused`, `draining`, `retired`, `failed`.
+- Stable commits stored in SQLite with `approve/current/sync`.
+- `tmux-team sleep` TOML snapshots and managed-window teardown.
+- First-pass role policy with permissive breakglass.
+- Project-local executable hooks through `TeamService`.
+- Fake-agent, congestion, Docker, and opt-in real-Codex tests.
 
-- Replace `stable_commits.md` with `stable_commits.json` or a SQLite table.
-- Enforce collector/trainer sync through a helper command.
-- Add an active Slurm run registry.
-- Add role leases so two processes cannot process the same inbox item.
-- Add retry/backoff for notifications.
-- Add a simple `tmux-team tui` or `tmux-team status --watch`.
+## Remaining Priority Work
 
-## Medium Term
+1. Add a lifecycle lock for bootstrap/sleep/bind/notify/claim races.
+2. Make permissive policy mode visible in `status`.
+3. Add per-role runtime credentials before treating MCP as an auth boundary.
+4. Add restrictive runtime file permissions when credentials exist.
+5. Add `team_stable_current` to the MCP-shaped surface if roles need it.
+6. Prefer Unix socket app-server endpoints once Codex support is easy to wire.
 
-- Add MCP tools backed by the same service.
-- Add app-server remote TUI wake delivery for selected roles.
-- Record backend thread IDs per role.
-- Stream backend events into the ledger.
-- Track approval parked states.
-- Add subagent join ledgers for bounded fan-out inside a role.
+## Later, Only If Forced
 
-## Policy Decisions
-
-Define these explicitly:
-
-- Which roles may edit production code?
-- Which roles may launch paid collection?
-- Which roles may launch Slurm jobs?
-- Which roles may promote stable commits?
-- What happens when an agent hits an approval prompt?
-- Which roles are allowed to run with `--role-yolo`?
-- What messages are allowed to interrupt the orchestrator?
-- Which message classes require human approval?
+- Active Slurm run registry.
+- Role heartbeats.
+- Retry/backoff for notifications.
+- `tmux-team status --watch`.
+- Subagent join ledger.
+- Real MCP SDK dependency.
+- Custom notification providers.
+- Non-Codex agent backends.
 
 ## Success Criteria
 
@@ -51,4 +47,4 @@ The design is working when:
 - failed notification does not imply lost work;
 - a restarted agent can recover pending messages;
 - collector/trainer cannot accidentally sync unapproved commits;
-- the human can inspect the full message/run history without reading panes.
+- the human can inspect message history without reading panes.

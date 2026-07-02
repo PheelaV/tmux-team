@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tmux_team.config import RoleConfig, TeamConfig
-from tmux_team.store import Message, Store
+from tmux_team.store import SCHEMA_VERSION, Message, Store
 
 
 class StoreInboxTests(unittest.TestCase):
@@ -68,6 +68,22 @@ class StoreInboxTests(unittest.TestCase):
         stored = self.conn.execute("SELECT state, claimed_by FROM messages WHERE id = ?", (message.id,)).fetchone()
         self.assertEqual(stored["state"], "claimed")
         self.assertEqual(stored["claimed_by"], "worker")
+
+    def test_schema_sets_user_version(self) -> None:
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(version, SCHEMA_VERSION)
+
+    def test_schema_rejects_newer_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(TeamConfig(name="newer", runtime_dir=Path(temp), roles={}))
+            store.runtime_dir.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(store.db_path)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+            conn.close()
+
+            with self.assertRaisesRegex(ValueError, "newer than supported"):
+                store.connect()
 
     def test_claim_next_reclaims_expired_claimed_message(self) -> None:
         message = self.create_message()

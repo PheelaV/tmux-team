@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -716,7 +717,7 @@ def print_stable_row(row) -> None:
 
 
 def format_command(command: Sequence[str]) -> str:
-    return " ".join(command)
+    return shlex.join(command)
 
 
 if __name__ == "__main__":

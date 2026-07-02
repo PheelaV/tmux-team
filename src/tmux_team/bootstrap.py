@@ -10,6 +10,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+import tomli_w
+
 from .app_server import AppServerClient
 from .config import load_config
 from .store import Store
@@ -218,19 +220,6 @@ def ensure_control_plane_window(tmux_bin: str, session: str, project_root: Path,
         run(new_window_command(tmux_bin, session, control_window, project_root, command), check=True)
 
 
-def create_role_threads(endpoint: str, roles: tuple[str, ...], project_root: Path) -> dict[str, str]:
-    role_threads: dict[str, str] = {}
-    with AppServerClient(endpoint, timeout=10.0) as client:
-        client.initialize()
-        for role in roles:
-            thread_id = client.start_thread(
-                cwd=str(project_root),
-                developer_instructions=role_developer_instructions(role),
-            )
-            role_threads[role] = thread_id
-    return role_threads
-
-
 def start_role_panes_and_discover_threads(
     tmux_bin: str,
     codex_bin: str,
@@ -405,40 +394,22 @@ def render_team_config(
     role_yolo: bool = False,
     role_profile: str | None = None,
 ) -> str:
-    chunks = [
-        "[team]",
-        f'name = "{toml_string(team_name)}"',
-        f'runtime_dir = "{toml_string(runtime_dir)}"',
-        "",
-    ]
+    roles: dict[str, dict[str, str | bool]] = {}
     for role, binding in role_bindings.items():
-        chunks.extend(
-            [
-                f"[roles.{role}]",
-                'mode = "app_server_remote_tui"',
-                'state = "active"',
-                f'pane = "{toml_string(binding.pane)}"',
-                'notify_method = "app-server-turn"',
-                f'app_server_endpoint = "{toml_string(endpoint)}"',
-                f'codex_thread_id = "{toml_string(binding.thread_id)}"',
-            ]
-        )
+        role_data: dict[str, str | bool] = {
+            "mode": "app_server_remote_tui",
+            "state": "active",
+            "pane": binding.pane,
+            "notify_method": "app-server-turn",
+            "app_server_endpoint": endpoint,
+            "codex_thread_id": binding.thread_id,
+        }
         if role_yolo:
-            chunks.append("codex_yolo = true")
+            role_data["codex_yolo"] = True
         if role_profile:
-            chunks.append(f'codex_profile = "{toml_string(role_profile)}"')
-        chunks.append("")
-    return "\n".join(chunks)
-
-
-def role_developer_instructions(role: str) -> str:
-    return (
-        f"You are the `{role}` role in a tmux-team workspace.\n"
-        "You run inside a tmux pane, but work is delivered through Codex app-server turns, not tmux keystrokes.\n"
-        "When a tmux-team wake turn arrives, claim durable task content with `tmux-team inbox next --role "
-        f"{role}`. Acknowledge and complete the claimed message, then repeat `inbox next` until there are no "
-        "pending messages. Never treat the wake prompt itself as the task body.\n"
-    )
+            role_data["codex_profile"] = role_profile
+        roles[role] = role_data
+    return tomli_w.dumps({"team": {"name": team_name, "runtime_dir": runtime_dir}, "roles": roles})
 
 
 def wait_for_app_server(endpoint: str, timeout: float) -> None:
@@ -631,11 +602,7 @@ def run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
 
 
 def shell_join(command: list[str]) -> str:
-    return " ".join(shlex.quote(part) for part in command)
-
-
-def toml_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return shlex.join(command)
 
 
 def parse_roles(raw: str | None) -> tuple[str, ...]:

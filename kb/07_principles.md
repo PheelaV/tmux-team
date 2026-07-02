@@ -80,7 +80,6 @@ tmux-team send --to implementer --body task.md
 tmux-team inbox next --role orchestrator
 tmux-team role pause trainer
 tmux-team stable approve d6d77ab
-tmux-team runs list
 ```
 
 The system should be usable without remembering internal table names, queue mechanics, or tmux details.

@@ -169,9 +169,10 @@ tmux-team inbox next/ack/complete
 tmux-team status
 tmux-team role pause/resume/drain/retire
 tmux-team stable approve/current/sync
-tmux-team runs register/update/list
 tmux-team notify
 ```
+
+Active run tracking is intentionally later work, not part of the current minimal command set.
 
 Storage:
 

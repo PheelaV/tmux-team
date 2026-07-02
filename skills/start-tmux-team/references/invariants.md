@@ -40,6 +40,7 @@ Never use tmux stdin as the production wake path for Codex roles.
 - Do not use `tmux send-keys` for normal Codex wake.
 - Use app-server `turn/start`.
 - Durable task content must be claimed from the tmux-team inbox.
+- A role handles work as: `inbox next -> ack -> do work -> complete -> inbox next` until there is no pending work.
 
 ## Role Permissions
 
@@ -55,4 +56,4 @@ Autonomous role-to-role messaging requires role panes that can run the `tmux-tea
 
 ## Sleep
 
-Use `tmux-team sleep` to snapshot role state, pane targets, and app-server bindings before tearing down managed windows. Sleep must leave `control-plane` alive by default.
+Use `tmux-team sleep` to snapshot role state, pane targets, and app-server bindings before tearing down managed windows. Sleep must leave `control-plane` alive by default and pauses active/draining roles unless explicitly told not to.

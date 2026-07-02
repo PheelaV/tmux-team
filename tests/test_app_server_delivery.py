@@ -106,6 +106,19 @@ notify_method = "app-server-turn"
         with self.assertRaisesRegex(AppServerError, "loopback-only"):
             AppServerClient("ws://example.com:4500").connect()
 
+    def test_app_server_client_lists_loaded_threads(self) -> None:
+        with FakeAppServer() as server:
+            server.loaded_thread_ids = ["thread_a", "thread_b"]
+            with (
+                patch("socket.create_connection", server.create_connection),
+                AppServerClient(server.endpoint) as client,
+            ):
+                client.initialize()
+                threads = client.list_loaded_threads()
+
+        self.assertEqual(threads, ["thread_a", "thread_b"])
+        self.assertEqual(server.methods, ["initialize", "initialized", "thread/loaded/list"])
+
     def run_cli(self, *args: str) -> tuple[int, str, str]:
         stdout = StringIO()
         stderr = StringIO()
@@ -119,6 +132,7 @@ class FakeAppServer:
         self.methods: list[str] = []
         self.thread_resume_params: dict[str, Any] = {}
         self.turn_start_params: dict[str, Any] = {}
+        self.loaded_thread_ids: list[str] = []
 
     def __enter__(self) -> FakeAppServer:
         self.endpoint = "ws://127.0.0.1:1"
@@ -175,6 +189,8 @@ class FakeAppServer:
                 request_id = message["id"]
                 if method == "initialize":
                     send_ws_json(sock, {"id": request_id, "result": {"codexHome": "/tmp/fake-codex"}})
+                elif method == "thread/loaded/list":
+                    send_ws_json(sock, {"id": request_id, "result": {"data": self.loaded_thread_ids}})
                 elif method == "thread/resume":
                     self.thread_resume_params = message["params"]
                     send_ws_json(

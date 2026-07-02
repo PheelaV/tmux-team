@@ -143,6 +143,12 @@ class HookRunner:
 
         decision = str(hook_output.get("decision") or "allow").strip().lower()
         if decision == "deny":
+            if not can_deny(hook):
+                details = f"mode {hook.mode} cannot deny"
+                self.record_failure(store, conn, actor, invocation_id, manifest, event, hook, details)
+                if fail_closed(hook):
+                    raise HookError(f"extension {manifest.id} returned unsupported decision on {event}: {details}")
+                return HookResult(data=data)
             reason = str(hook_output.get("reason") or f"extension {manifest.id} denied {event}")
             store.record_event(
                 conn,
@@ -157,6 +163,12 @@ class HookRunner:
         patched = data
         patch = hook_output.get("patch")
         if patch is not None:
+            if not can_patch(hook):
+                details = f"mode {hook.mode} cannot patch"
+                self.record_failure(store, conn, actor, invocation_id, manifest, event, hook, details)
+                if fail_closed(hook):
+                    raise HookError(f"extension {manifest.id} returned unsupported patch on {event}: {details}")
+                return HookResult(data=data)
             if not isinstance(patch, dict):
                 self.record_failure(store, conn, actor, invocation_id, manifest, event, hook, "patch must be an object")
                 if fail_closed(hook):
@@ -247,7 +259,15 @@ def parse_hook_output(stdout: str) -> dict[str, Any]:
 
 
 def fail_closed(hook: HookSpec) -> bool:
-    return hook.mode in ("mutate", "decision", "provider") or hook.event.endswith(".before")
+    return hook.mode in ("mutate", "decision") or ".before" in hook.event
+
+
+def can_deny(hook: HookSpec) -> bool:
+    return hook.mode == "decision"
+
+
+def can_patch(hook: HookSpec) -> bool:
+    return hook.mode == "mutate"
 
 
 def merge_patch(target: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,18 @@
+# Agent Knowledge Base
+
+This directory is for agent memory: design history, decisions, and implementation notes. Human operating docs live in [../docs/index.md](../docs/index.md).
+
+Use this rule when reading KB files:
+
+- current behavior is in `README.md`, `docs/`, and tests;
+- KB files explain why the repo moved this way;
+- if KB text says "should", "future", or "plan", verify against `src/` before treating it as work to do.
+
+Current high-value agent notes:
+
+- Origin: this project started as a replacement for tmux `send-keys` agent messaging. The durable boundary is SQLite inbox state plus app-server wake turns; tmux remains only the visible control surface.
+- [04_hardening_checklist.md](04_hardening_checklist.md): implemented baseline and remaining hardening work.
+- [05_installable_extension.md](05_installable_extension.md): package/config/lifecycle status.
+- [06_hermes_comparison.md](06_hermes_comparison.md): what to borrow and what not to rebuild.
+- [07_principles.md](07_principles.md): product bias and non-goals.
+- [08_extensibility_and_hooks.md](08_extensibility_and_hooks.md): current extension authoring contract.

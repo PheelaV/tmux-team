@@ -111,6 +111,26 @@ version = "0.1.0"
         self.assertIn("extension errors:", err)
         self.assertIn("missing required field: id", err)
 
+    def test_provider_mode_is_not_supported(self) -> None:
+        self.write_extension(
+            "future-provider",
+            """
+[extension]
+id = "example.future-provider"
+
+[[hooks]]
+event = "message.before_create"
+command = "python3 hook.py"
+mode = "provider"
+""",
+            "",
+        )
+
+        inspection = inspect_extensions(load_config(self.config))
+
+        self.assertEqual(inspection.manifests, ())
+        self.assertIn("mode must be one of: observe, mutate, decision", inspection.errors[0].message)
+
     def test_message_before_create_hook_can_route_message(self) -> None:
         self.write_extension(
             "route",
@@ -190,6 +210,41 @@ print(json.dumps({"ok": True, "decision": "deny", "reason": "collector freeze"})
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("collector freeze", err)
+
+    def test_observe_hook_cannot_patch_before_create(self) -> None:
+        self.write_extension(
+            "bad-observer",
+            f"""
+[extension]
+id = "example.bad-observer"
+version = "0.1.0"
+
+[[hooks]]
+event = "message.before_create"
+command = "{shlex.quote(sys.executable)} hook.py"
+mode = "observe"
+""",
+            """
+import json
+
+print(json.dumps({"ok": True, "patch": {"message": {"recipient": "collector"}}}))
+""",
+        )
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--summary",
+            "task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("mode observe cannot patch", err)
 
     def test_invalid_log_level_is_rejected(self) -> None:
         code, out, err = self.run_cli("--log-level", "LOUD", "status")

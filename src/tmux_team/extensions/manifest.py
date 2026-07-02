@@ -7,7 +7,7 @@ from typing import Any
 
 from tmux_team.config import TeamConfig
 
-HOOK_MODES = ("observe", "mutate", "decision", "provider")
+HOOK_MODES = ("observe", "mutate", "decision")
 
 
 @dataclass(frozen=True)
@@ -84,8 +84,6 @@ def extension_roots(config: TeamConfig) -> list[tuple[Path, str]]:
     roots: list[tuple[Path, str]] = []
     if config.extensions.project and config.project_root is not None:
         roots.append((config.project_root / ".tmux-team" / "extensions", "project"))
-    if config.extensions.user:
-        roots.append((Path.home() / ".tmux-team" / "extensions", "user"))
     return roots
 
 
