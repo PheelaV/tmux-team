@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from . import __version__
 from .bootstrap import (
     AGENT_LAYOUTS,
     CONTROL_MODES,
@@ -155,6 +156,7 @@ def normalize_time_option_values(argv: Sequence[str]) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmux-team")
+    parser.add_argument("--version", action="version", version=f"tmux-team {__version__}")
     parser.add_argument("--config", help=f"Path to .tmux-team/team.toml; overrides ${CONFIG_PATH_ENV}")
     parser.add_argument("--runtime-dir", help="Override runtime directory")
     parser.add_argument("--actor", help=f"Authenticated role actor for policy enforcement; defaults to ${ROLE_ENV}")
