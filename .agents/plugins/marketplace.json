@@ -1,0 +1,21 @@
+{
+  "name": "tmux-team",
+  "interface": {
+    "displayName": "tmux-team"
+  },
+  "plugins": [
+    {
+      "name": "tmux-team",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/PheelaV/tmux-team.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

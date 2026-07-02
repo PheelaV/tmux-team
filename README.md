@@ -1,5 +1,7 @@
 # tmux-team
 
+![tmux-team banner](docs/assets/banner.png)
+
 Minimal tmux-backed control plane for pane-visible agent teams.
 
 Codex is the first target backend. Other agent CLIs can be added later without changing the core invariant: agents stay visible in tmux, while durable work moves through `tmux-team` state.
@@ -16,15 +18,24 @@ uv tool install git+https://github.com/PheelaV/tmux-team.git
 pipx install git+https://github.com/PheelaV/tmux-team.git
 ```
 
-Install the Codex skill from a checkout:
+Install the Codex plugin/skill from the public marketplace metadata:
+
+```bash
+codex plugin marketplace add PheelaV/tmux-team --ref main
+codex plugin add tmux-team@tmux-team
+```
+
+You can also add the marketplace from Codex and install through `/plugins install`.
+
+The plugin installs the `start-tmux-team` skill. The CLI is still installed separately with `uv` or `pipx`; the plugin does not mutate global Python tools.
+
+Checkout fallback for the skill:
 
 ```bash
 git clone https://github.com/PheelaV/tmux-team.git
 cd tmux-team
 make install-skill
 ```
-
-`tmux-team` is not packaged as a Codex plugin marketplace install yet; the skill is plain files copied into `$CODEX_HOME/skills`.
 
 For local development, use the checkout:
 
