@@ -219,7 +219,7 @@ Use `pane capture --summary` to ask `codex exec` for a compact structured summar
 
 Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 
-For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks.
+For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract version as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks. Ordinary app-server wakes should follow the loaded role loop and should not trigger full skill rereads unless the operator requests it or the contract version changed.
 
 Scratchpad memory is durable role state, not the queue. Use it for long-term goals, current task, blockers, boundaries, stable inputs, owned artifacts, and next action. Record only high-value durable updates near the top:
 

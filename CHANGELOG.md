@@ -4,6 +4,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Added a versioned tmux-team role contract marker to role startup/resume prompts and `codex session-context` to avoid full skill rereads on ordinary wakes.
 - Added `tmux-team watchdog` for durable-state supervision findings.
 - Added `tmux-team pane capture --summary` to summarize bounded pane output through `codex exec`.
 - Added `tmux-team pane list --all` to show managed role panes and unmanaged panes in managed windows.

@@ -1416,6 +1416,9 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("same operating contract as the initial role startup prompt", out)
+        self.assertIn("Role contract version:", out)
+        self.assertIn("Skill reload policy:", out)
+        self.assertIn("do not reread the full start-tmux-team skill on ordinary wakes", out)
         self.assertIn("not a new task", out)
         self.assertIn("Role: collector", out)
         self.assertIn("Pending inbox messages: 1", out)
@@ -1571,6 +1574,7 @@ can_notify = ["orchestrator"]
         prompt = role_startup_prompt("collector")
 
         self.assertIn("tmux-team memory show --role collector", prompt)
+        self.assertIn("tmux-team role contract version:", prompt)
         self.assertIn("tmux-team inbox next --role collector", prompt)
         self.assertIn("tmux-team inbox ack <message-id> --role collector", prompt)
         self.assertIn("tmux-team inbox complete <message-id> --role collector", prompt)

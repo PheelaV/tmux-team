@@ -80,13 +80,15 @@ tmux-team pane capture collector --lines 120 --offset 40
 
 Every Codex role spawned by bootstrap must have the `start-tmux-team` skill available in the active `CODEX_HOME`. The skill may not be loaded into the current turn context until triggered, so wake prompts still include a compact role wake signal.
 
+Do not reload the full skill on every ordinary app-server wake. Use the loaded tmux-team role contract version and role loop when present. Use `tmux-team codex session-context` after startup/resume/clear/compact recovery, explicit operator request, or contract/version mismatch.
+
 ## Role Memory
 
 Every managed role has a scratchpad memory file declared by config.
 
 - Bootstrap must create the scratchpad if it is missing.
 - A newly spawned role must be instructed to read this skill, read memory with an explicit `--role <role>` command, then claim inbox work or park.
-- Codex `SessionStart` hooks for `startup|resume|clear|compact` should inject `tmux-team codex session-context` output after resets. This restores the same role contract as startup; it is not a new task and does not replace the inbox.
+- Codex `SessionStart` hooks for `startup|resume|clear|compact` should inject `tmux-team codex session-context` output after resets. This restores the same role contract version as startup; it is not a new task and does not replace the inbox.
 - A role must run `tmux-team memory show --role <role>` before claiming pending inbox work unless role discovery is known to work.
 - Use memory for durable context: long-lived goals, constraints, decisions, blockers, handoff notes, current worktree/commit/dirty state, running jobs, owned artifacts, stable inputs, and next action.
 - Keep the latest and most important state at the top so it remains useful after context compression and for human oversight.

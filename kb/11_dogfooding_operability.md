@@ -117,3 +117,14 @@ tmux-team now has a native watchdog check surface.
 - `--interval-seconds` and `--max-iterations` provide a simple local repeat loop.
 
 Invariant: watchdog is a reporting command. It does not mutate state, wake agents, or record milestones by default.
+
+### TT-FEAT-011: Avoid Repeated Full Skill Rereads on Ordinary Wakes
+
+Role recovery now has an explicit versioned contract marker.
+
+- Role startup and resume prompts include the tmux-team role contract version.
+- `codex session-context` prints the same contract version and a skill reload policy.
+- Ordinary app-server wakes should follow the loaded role loop instead of causing full skill rereads.
+- Full skill rereads are reserved for startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
+
+Invariant: compact context recovery should be mechanical and repeatable. Wake prompts remain blunt notices; the skill and session context carry the operating framework.

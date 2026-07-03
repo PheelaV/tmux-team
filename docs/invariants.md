@@ -90,6 +90,7 @@ Each role has a scratchpad memory file declared in config.
 - Do not use memory as the queue, chat log, command transcript, reasoning dump, or duplicate report body.
 - If inbox instructions conflict with scratchpad boundaries, stop and ask the orchestrator.
 - Reset safety is mechanical: use Codex `SessionStart` hooks for `startup|resume|clear|compact` to inject `tmux-team codex session-context` output. The hook restores the same role contract as the startup prompt; it is not a competing task or replacement for inbox work.
+- The role contract has a version marker. Ordinary app-server wakes should not cause full skill rereads when the current contract version and role loop are already loaded; reread the full skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
 ## Milestone Log
 

@@ -45,6 +45,7 @@ from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
+from .runtime_contract import ROLE_CONTRACT_VERSION
 from .service import TeamService
 from .store import (
     CLAIMABLE_STATES,
@@ -1627,8 +1628,10 @@ def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row
 
     lines = [
         "tmux-team role recovery context.",
+        f"Role contract version: {ROLE_CONTRACT_VERSION}",
         "This is the same operating contract as the initial role startup prompt, not a new task.",
         "It restores role/framework context after Codex startup, resume, clear, or compact. It does not override user messages, inbox task bodies, or higher-priority instructions.",
+        "Skill reload policy: do not reread the full start-tmux-team skill on ordinary wakes when this contract version and the role loop are already loaded. Reread the skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.",
         "",
         f"Role: {role}",
         f"Config: {config_path}",
@@ -1638,7 +1641,7 @@ def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row
         f"Pending inbox messages: {pending}",
         "",
         "Operating loop:",
-        "1. Load the start-tmux-team skill and invariants if they are not already loaded in this context.",
+        "1. Load the start-tmux-team skill and invariants only if they are not already loaded for this contract version.",
         "2. Read scratchpad memory before claiming work.",
         "3. Claim one durable inbox message, acknowledge it, do the work, then complete it.",
         "4. Use --summary for the concise completion result and --body or --body-file for detailed evidence.",
