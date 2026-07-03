@@ -183,6 +183,7 @@ tmux-team inbox complete-replies --role orchestrator
 tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
 tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
 tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
+tmux-team pane list --all
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team ext list
 tmux-team ext doctor
@@ -207,6 +208,8 @@ Use `broadcast --notice` for durable announcements that should not create inbox 
 `broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
 
 `pane capture` reads tmux pane output for live supervision. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for the orchestrator or operator to inspect present progress that has not yet reached inbox completion or scratchpad memory. It must not be used as delivery confirmation; durable state still lives in SQLite messages, notifications, milestones, and memory.
+
+`pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
 
 Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 

@@ -760,6 +760,39 @@ exit 9
         self.assertIn("older line", out)
         self.assertIn("capture-pane -p -t test:collector.0 -S -25 -E -6", log_path.read_text(encoding="utf-8"))
 
+    def test_pane_list_all_marks_unmanaged_panes(self) -> None:
+        fake_dir = self.root / "pane-list-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "list-panes" ]; then
+  case "$3" in
+    test:collector)
+      printf '%%1\\ttest:collector.0\\tcodex\\t/tmp/collector\\n'
+      printf '%%2\\ttest:collector.1\\tzsh\\t/tmp/helper\\n'
+      ;;
+    test:orchestrator)
+      printf '%%3\\ttest:orchestrator.0\\tcodex\\t/tmp/orchestrator\\n'
+      ;;
+  esac
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli("pane", "list", "--all", "--tmux-bin", str(tmux))
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("managed panes:", out)
+        self.assertIn("role=collector managed=true pane=test:collector.0", out)
+        self.assertIn("all panes in managed windows:", out)
+        self.assertIn("role=collector managed=true pane=test:collector.0 pane_id=%1", out)
+        self.assertIn("role=- managed=false pane=test:collector.1 pane_id=%2 command=zsh path=/tmp/helper", out)
+
     def test_pane_capture_policy_allows_orchestrator_supervision(self) -> None:
         code, out, err = self.run_main(
             "--config",

@@ -158,6 +158,11 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
         _authorize_role_resource(actor, resource, "role", policy.can_capture_panes, action)
         return
 
+    if action == "pane.list":
+        if resource.get("all") == "true" and actor != "orchestrator":
+            raise PolicyError(f"actor {actor!r} is not authorized to list unmanaged panes")
+        return
+
     if action == "role.state.change":
         if not policy.can_change_role_state:
             raise PolicyError(f"actor {actor!r} is not authorized to change role state")

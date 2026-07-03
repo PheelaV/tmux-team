@@ -187,6 +187,16 @@ can_sleep = true
 
         authorize(config, PolicyContext(actor="implementer"), "pane.capture", role="collector")
 
+    def test_pane_list_all_is_operator_or_orchestrator_only(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "pane.list", all="true")
+        authorize(config, PolicyContext(actor="orchestrator"), "pane.list", all="true")
+        authorize(config, PolicyContext(actor="implementer"), "pane.list", all="false")
+
+        with self.assertRaisesRegex(PolicyError, "unmanaged panes"):
+            authorize(config, PolicyContext(actor="implementer"), "pane.list", all="true")
+
     def test_permissive_policy_mode_is_breakglass(self) -> None:
         config = self.config()
         context = PolicyContext(actor="implementer", mode="permissive")

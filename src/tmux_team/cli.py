@@ -511,6 +511,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pane = subparsers.add_parser("pane", help="Inspect managed role tmux panes")
     pane_sub = pane.add_subparsers(dest="pane_command", required=True)
+    pane_list = pane_sub.add_parser("list", help="List managed role panes")
+    pane_list.add_argument("--all", action="store_true", help="Include unmanaged panes in managed role windows")
+    pane_list.add_argument("--tmux-bin", default="tmux")
     pane_capture = pane_sub.add_parser("capture", help="Print recent stdout/history from a role pane")
     pane_capture.add_argument("role")
     pane_capture.add_argument(
@@ -912,6 +915,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
 
     if args.command == "pane" and args.pane_command == "capture":
         authorize(config, policy_context, "pane.capture", role=args.role)
+        return
+
+    if args.command == "pane" and args.pane_command == "list":
+        authorize(config, policy_context, "pane.list", all=str(args.all).lower())
         return
 
     if args.command == "notify":
@@ -1343,6 +1350,9 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
 
 
 def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.pane_command == "list":
+        return cmd_pane_list(args, store, conn)
+
     if args.pane_command != "capture":
         return 2
     if args.lines <= 0:
@@ -1373,6 +1383,42 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
     else:
         print(f"# pane {args.role} ({pane}) last {args.lines} lines")
     print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    return 0
+
+
+def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
+    roles = store.list_roles(conn)
+    managed_by_target = {role["pane"]: role for role in roles if role["pane"]}
+    print("managed panes:")
+    if not managed_by_target:
+        print("  none")
+    for role in roles:
+        pane = role["pane"] or "-"
+        print(
+            f"  role={role['name']} managed=true pane={pane} state={role['state']} worktree={role['worktree'] or '-'}"
+        )
+
+    if not args.all:
+        return 0
+
+    print("all panes in managed windows:")
+    windows = sorted({target for pane in managed_by_target if (target := pane_window_target(pane))})
+    if not windows:
+        print("  none")
+        return 0
+    seen = False
+    for window in windows:
+        for pane in list_tmux_window_panes(args.tmux_bin, window):
+            seen = True
+            role = managed_by_target.get(pane["target"])
+            role_name = role["name"] if role is not None else "-"
+            managed = "true" if role is not None else "false"
+            print(
+                f"  role={role_name} managed={managed} pane={pane['target']} pane_id={pane['id']} "
+                f"command={pane['command'] or '-'} path={pane['path'] or '-'}"
+            )
+    if not seen:
+        print("  none")
     return 0
 
 
@@ -1874,6 +1920,39 @@ def watch_next_update_at(value: str | None) -> str | None:
     if duration is None or duration.total_seconds() <= 0:
         raise ValueError("--next-update-in must be a positive duration such as 15m, 1h, or 2d")
     return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
+
+
+def pane_window_target(pane: str) -> str | None:
+    if pane.startswith("%"):
+        return None
+    if "." not in pane:
+        return pane or None
+    return pane.rsplit(".", 1)[0] or None
+
+
+def list_tmux_window_panes(tmux_bin: str, window: str) -> list[dict[str, str]]:
+    result = subprocess.run(
+        [
+            tmux_bin,
+            "list-panes",
+            "-t",
+            window,
+            "-F",
+            "#{pane_id}\t#{session_name}:#{window_name}.#{pane_index}\t#{pane_current_command}\t#{pane_current_path}",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{tmux_bin} exited {result.returncode}").strip()
+        raise ValueError(f"could not list panes for {window}: {details}")
+    panes: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        pane_id, target, command, path = (line.split("\t") + ["", "", "", ""])[:4]
+        panes.append({"id": pane_id, "target": target, "command": command, "path": path})
+    return panes
 
 
 def row_value(row, key: str, default=None):

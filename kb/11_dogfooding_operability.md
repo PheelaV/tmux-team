@@ -85,3 +85,13 @@ Broadcast now has a notice-only mode for durable announcements.
 - Recipient shaping still uses the existing `--only`/`--exclude` broadcast filters.
 
 Invariant: notices are for announcements, not assignments. Use normal `send`/`broadcast` when recipients need to act and report completion.
+
+### TT-FEAT-008: Managed-Window Pane Hygiene Warnings
+
+Pane hygiene now has an explicit inspection surface.
+
+- `pane list` lists configured managed role panes.
+- `pane list --all` inspects tmux panes in managed role windows and marks panes not bound to a role as `managed=false`.
+- `--all` is restricted to the operator or orchestrator because it exposes unmanaged shell panes and current paths.
+
+Invariant: unmanaged panes may exist, but tmux-team must not silently confuse them with managed role panes.
