@@ -58,6 +58,8 @@ from .store import (
 )
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+DEFAULT_PANE_SUMMARY_MAX_BYTES = 20_000
+DEFAULT_PANE_SUMMARY_TIMEOUT_SECONDS = 120.0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -528,6 +530,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip this many newest pane history lines before printing",
     )
     pane_capture.add_argument("--summary", action="store_true", help="Summarize captured pane output with codex exec")
+    pane_capture.add_argument(
+        "--summary-max-bytes",
+        type=int,
+        default=DEFAULT_PANE_SUMMARY_MAX_BYTES,
+        help="Maximum captured pane text bytes to send to codex exec in summary mode",
+    )
+    pane_capture.add_argument(
+        "--summary-timeout",
+        type=float,
+        default=DEFAULT_PANE_SUMMARY_TIMEOUT_SECONDS,
+        help="Maximum seconds to wait for codex exec in summary mode",
+    )
     pane_capture.add_argument("--tmux-bin", default="tmux")
 
     notify = subparsers.add_parser("notify", help="Notify a role about pending work")
@@ -1358,6 +1372,10 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
         raise ValueError("pane capture --lines must be greater than 0")
     if args.offset < 0:
         raise ValueError("pane capture --offset must be 0 or greater")
+    if args.summary and args.summary_max_bytes <= 0:
+        raise ValueError("pane capture --summary-max-bytes must be greater than 0")
+    if args.summary and args.summary_timeout <= 0:
+        raise ValueError("pane capture --summary-timeout must be greater than 0")
     role = store.get_role(conn, args.role)
     if role is None:
         raise KeyError(f"Unknown role: {args.role}")
@@ -1382,6 +1400,8 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
             role=args.role,
             pane=pane,
             text=result.stdout,
+            max_bytes=args.summary_max_bytes,
+            timeout_seconds=args.summary_timeout,
         )
         print(summary, end="" if summary.endswith("\n") else "\n")
         return 0
@@ -1409,7 +1429,7 @@ def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
         return 0
 
     print("all panes in managed windows:")
-    windows = sorted({target for pane in managed_by_target if (target := pane_window_target(pane))})
+    windows = sorted({target for pane in managed_by_target if (target := pane_window_target(args.tmux_bin, pane))})
     if not windows:
         print("  none")
         return 0
@@ -1417,7 +1437,7 @@ def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
     for window in windows:
         for pane in list_tmux_window_panes(args.tmux_bin, window):
             seen = True
-            role = managed_by_target.get(pane["target"])
+            role = managed_by_target.get(pane["target"]) or managed_by_target.get(pane["id"])
             role_name = role["name"] if role is not None else "-"
             managed = "true" if role is not None else "false"
             print(
@@ -2048,12 +2068,29 @@ def watch_next_update_at(value: str | None) -> str | None:
     return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
 
 
-def pane_window_target(pane: str) -> str | None:
+def pane_window_target(tmux_bin: str, pane: str) -> str | None:
     if pane.startswith("%"):
-        return None
+        return resolve_pane_window_target(tmux_bin, pane)
     if "." not in pane:
         return pane or None
     return pane.rsplit(".", 1)[0] or None
+
+
+def resolve_pane_window_target(tmux_bin: str, pane: str) -> str:
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", pane, "#{session_name}:#{window_name}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{tmux_bin} exited {result.returncode}").strip()
+        raise ValueError(f"could not resolve window for pane {pane}: {details}")
+    target = result.stdout.strip()
+    if not target:
+        raise ValueError(f"could not resolve window for pane {pane}: empty tmux response")
+    return target
 
 
 def list_tmux_window_panes(tmux_bin: str, window: str) -> list[dict[str, str]]:
@@ -2086,14 +2123,37 @@ def summarize_pane_capture(
     role: str,
     pane: str,
     text: str,
+    max_bytes: int,
+    timeout_seconds: float,
 ) -> str:
-    prompt = pane_summary_prompt(role=role, pane=pane, text=text)
-    command = [os.environ.get("TMUX_TEAM_CODEX_BIN", "codex"), "exec", prompt]
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    prompt = pane_summary_prompt(role=role, pane=pane, text=truncate_text_bytes(text, max_bytes))
+    command = [os.environ.get("TMUX_TEAM_CODEX_BIN", "codex"), "exec", "-"]
+    try:
+        result = subprocess.run(
+            command,
+            input=prompt,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"pane summary timed out after {timeout_seconds:g}s") from exc
+    except OSError as exc:
+        raise ValueError(f"could not run {command[0]} for pane summary: {exc}") from exc
     if result.returncode != 0:
         details = (result.stderr or result.stdout or f"{command[0]} exited {result.returncode}").strip()
         raise ValueError(f"pane summary failed: {details}")
     return result.stdout
+
+
+def truncate_text_bytes(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    trimmed = encoded[-max_bytes:].decode("utf-8", errors="ignore").lstrip("\n")
+    return f"[tmux-team: pane capture truncated to last {max_bytes} bytes for summary]\n{trimmed}"
 
 
 def pane_summary_prompt(*, role: str, pane: str, text: str) -> str:

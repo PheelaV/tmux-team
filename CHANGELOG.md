@@ -4,6 +4,12 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-03
+
+- Fixed `pane list --all` for managed roles stored as tmux `%pane_id` targets.
+- Fixed MCP `team_status` pending counts so stale claimed work remains visible as reclaimable pending work.
+- Hardened `pane capture --summary` by sending the prompt to `codex exec` through stdin, capping captured text bytes, and enforcing a summary timeout.
+
 ## 0.2.0 - 2026-07-03
 
 - Added a versioned tmux-team role contract marker to role startup/resume prompts and `codex session-context` to avoid full skill rereads on ordinary wakes.
