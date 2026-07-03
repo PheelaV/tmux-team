@@ -8,7 +8,6 @@ import os
 import shlex
 import subprocess
 import sys
-import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,6 +19,7 @@ from .bootstrap import (
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
     DEFAULT_CONTROL_WINDOW,
+    ROLE_CONTRACT_VERSION,
     ROLE_PANE_OPTION,
     BootstrapError,
     RoleLaunchOptions,
@@ -45,7 +45,6 @@ from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
-from .runtime_contract import ROLE_CONTRACT_VERSION
 from .service import TeamService
 from .store import (
     CLAIMABLE_STATES,
@@ -386,10 +385,6 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast.add_argument("--force", action="store_true", help="Queue even if a role is paused or draining")
     broadcast.add_argument("--no-notify", action="store_true", help="Do not notify target panes")
     broadcast.add_argument("--notice", action="store_true", help="Record a notice instead of inbox work")
-    broadcast.add_argument("--correlation-key", help="Stable key for related or duplicate work")
-    broadcast.add_argument("--related-to", help="Related message id")
-    broadcast.add_argument("--supersedes", help="Message id this message replaces")
-    broadcast.add_argument("--allow-duplicate", action="store_true", help="Do not warn about matching active work")
     broadcast.add_argument(
         "--notify-method",
         default="auto",
@@ -478,9 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_start = watch_sub.add_parser("start", help="Start a long-running supervision watch")
     watch_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
     watch_start.add_argument("--summary", required=True, help="Concise supervision summary")
-    watch_start.add_argument("--terminal-condition", help="Condition that ends the watch")
     watch_start.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
-    watch_start.add_argument("--ref", dest="ref_id", help="Related message, job, artifact, or external id")
 
     watch_update = watch_sub.add_parser("update", help="Record a watch heartbeat or blocker")
     watch_update.add_argument("watch_id")
@@ -535,10 +528,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip this many newest pane history lines before printing",
     )
     pane_capture.add_argument("--summary", action="store_true", help="Summarize captured pane output with codex exec")
-    pane_capture.add_argument("--summary-format", choices=("json", "markdown"), default="json")
-    pane_capture.add_argument("--summary-model", help="Optional model passed to codex exec with --model")
-    pane_capture.add_argument("--summary-lines", type=int, help="Capture this many lines before summarization")
-    pane_capture.add_argument("--codex-bin", default="codex")
     pane_capture.add_argument("--tmux-bin", default="tmux")
 
     notify = subparsers.add_parser("notify", help="Notify a role about pending work")
@@ -551,8 +540,6 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog.add_argument("--ack-warn-seconds", type=int, default=3600)
     watchdog.add_argument("--watch-grace-seconds", type=int, default=0)
     watchdog.add_argument("--json", action="store_true", help="Print findings as JSON")
-    watchdog.add_argument("--interval-seconds", type=int, default=0, help="Repeat checks with this interval")
-    watchdog.add_argument("--max-iterations", type=int, default=1, help="Maximum watchdog iterations")
 
     sleep = subparsers.add_parser("sleep", help="Snapshot current bindings and tear down managed tmux team windows")
     sleep.add_argument(
@@ -1128,9 +1115,7 @@ def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
             role=args.role,
             summary=args.summary,
             created_by=args.actor or "operator",
-            terminal_condition=args.terminal_condition,
             next_update_at=watch_next_update_at(args.next_update_in),
-            ref_id=args.ref_id,
         )
         print(watch_one_line(row))
         return 0
@@ -1241,10 +1226,6 @@ def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
                 force=args.force,
                 wake=not args.no_notify,
                 notify_method=args.notify_method,
-                correlation_key=args.correlation_key,
-                related_to=args.related_to,
-                supersedes=args.supersedes,
-                allow_duplicate=args.allow_duplicate,
                 actor=args.actor or args.sender,
             )
         message = result.message
@@ -1384,10 +1365,7 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
     if not pane:
         print(f"role {args.role} has no pane", file=sys.stderr)
         return 1
-    capture_lines = args.summary_lines if args.summary and args.summary_lines is not None else args.lines
-    if capture_lines <= 0:
-        raise ValueError("pane capture line count must be greater than 0")
-    command = [args.tmux_bin, "capture-pane", "-p", "-t", pane, "-S", f"-{capture_lines + args.offset}"]
+    command = [args.tmux_bin, "capture-pane", "-p", "-t", pane, "-S", f"-{args.lines + args.offset}"]
     if args.offset:
         command.extend(["-E", f"-{args.offset + 1}"])
     try:
@@ -1401,12 +1379,9 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
         return 1
     if args.summary:
         summary = summarize_pane_capture(
-            codex_bin=args.codex_bin,
             role=args.role,
             pane=pane,
             text=result.stdout,
-            output_format=args.summary_format,
-            model=args.summary_model,
         )
         print(summary, end="" if summary.endswith("\n") else "\n")
         return 0
@@ -1464,31 +1439,21 @@ def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
 
 
 def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
-    if args.max_iterations <= 0:
-        raise ValueError("watchdog --max-iterations must be greater than 0")
-    if args.interval_seconds < 0:
-        raise ValueError("watchdog --interval-seconds must be 0 or greater")
-
-    for iteration in range(args.max_iterations):
-        findings = watchdog_findings(
-            store,
-            conn,
-            role=args.role,
-            unacked_warn_seconds=args.unacked_warn_seconds,
-            ack_warn_seconds=args.ack_warn_seconds,
-            watch_grace_seconds=args.watch_grace_seconds,
-        )
-        if args.json:
-            print(json_dumps(findings))
-        elif not findings:
-            print("watchdog ok")
-        else:
-            for finding in findings:
-                print(format_watchdog_finding(finding))
-
-        if iteration + 1 >= args.max_iterations or args.interval_seconds == 0:
-            break
-        time.sleep(args.interval_seconds)
+    findings = watchdog_findings(
+        store,
+        conn,
+        role=args.role,
+        unacked_warn_seconds=args.unacked_warn_seconds,
+        ack_warn_seconds=args.ack_warn_seconds,
+        watch_grace_seconds=args.watch_grace_seconds,
+    )
+    if args.json:
+        print(json_dumps(findings))
+    elif not findings:
+        print("watchdog ok")
+    else:
+        for finding in findings:
+            print(format_watchdog_finding(finding))
     return 0
 
 
@@ -2040,8 +2005,6 @@ def watch_one_line(row) -> str:
     ]
     if row["next_update_at"]:
         parts.append(f"next_update_at={row['next_update_at']}")
-    if row["ref_id"]:
-        parts.append(f"ref={row['ref_id']}")
     parts.append(f"summary={row['current_summary']}")
     return " ".join(parts)
 
@@ -2120,36 +2083,24 @@ def list_tmux_window_panes(tmux_bin: str, window: str) -> list[dict[str, str]]:
 
 def summarize_pane_capture(
     *,
-    codex_bin: str,
     role: str,
     pane: str,
     text: str,
-    output_format: str,
-    model: str | None = None,
 ) -> str:
-    prompt = pane_summary_prompt(role=role, pane=pane, text=text, output_format=output_format)
-    command = [codex_bin, "exec"]
-    if model:
-        command.extend(["--model", model])
-    command.append(prompt)
+    prompt = pane_summary_prompt(role=role, pane=pane, text=text)
+    command = [os.environ.get("TMUX_TEAM_CODEX_BIN", "codex"), "exec", prompt]
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode != 0:
-        details = (result.stderr or result.stdout or f"{codex_bin} exited {result.returncode}").strip()
+        details = (result.stderr or result.stdout or f"{command[0]} exited {result.returncode}").strip()
         raise ValueError(f"pane summary failed: {details}")
     return result.stdout
 
 
-def pane_summary_prompt(*, role: str, pane: str, text: str, output_format: str) -> str:
-    if output_format == "json":
-        target = (
-            "Return only JSON with keys: role, pane, observed_at, current_state, active_task, "
-            "last_tool_action, visible_blockers, possible_tmux_team_issues, needs_operator_attention, confidence."
-        )
-    else:
-        target = (
-            "Return concise markdown with headings: State, Active Task, Last Tool Action, Blockers, "
-            "tmux-team Issues, Operator Attention, Confidence."
-        )
+def pane_summary_prompt(*, role: str, pane: str, text: str) -> str:
+    target = (
+        "Return only JSON with keys: role, pane, observed_at, current_state, active_task, "
+        "last_tool_action, visible_blockers, possible_tmux_team_issues, needs_operator_attention, confidence."
+    )
     return (
         "You are summarizing tmux pane output for supervision only.\n"
         "Pane capture is observation only and must not be treated as delivery, acknowledgement, or completion proof.\n"

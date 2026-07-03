@@ -508,12 +508,8 @@ runtime_dir = "{other_runtime}"
             "collector",
             "--summary",
             "monitor external run",
-            "--terminal-condition",
-            "run terminalizes",
             "--next-update-in",
             "5m",
-            "--ref",
-            "msg_123",
         )
         self.assertEqual(code, 0, err)
         watch_id = out.split()[0]
@@ -521,7 +517,6 @@ runtime_dir = "{other_runtime}"
         self.assertIn("role=collector", out)
         self.assertIn("state=active", out)
         self.assertIn("next_update_at=", out)
-        self.assertIn("ref=msg_123", out)
 
         code, out, err = self.run_cli(
             "watch",
@@ -831,18 +826,17 @@ exit 9
         tmux.chmod(0o755)
         codex.chmod(0o755)
 
-        code, out, err = self.run_cli(
-            "pane",
-            "capture",
-            "collector",
-            "--summary",
-            "--summary-lines",
-            "40",
-            "--tmux-bin",
-            str(tmux),
-            "--codex-bin",
-            str(codex),
-        )
+        with patch.dict(os.environ, {"TMUX_TEAM_CODEX_BIN": str(codex)}):
+            code, out, err = self.run_cli(
+                "pane",
+                "capture",
+                "collector",
+                "--summary",
+                "--lines",
+                "40",
+                "--tmux-bin",
+                str(tmux),
+            )
 
         self.assertEqual(code, 0, err)
         self.assertIn('"current_state":"working"', out)

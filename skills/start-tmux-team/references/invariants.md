@@ -58,6 +58,7 @@ Never use tmux stdin as the production wake path for Codex roles.
 - Completion can carry detail with `--body` or `--body-file`; keep `--summary` concise.
 - Role panes are bound to team config and role; do not put full config paths in normal wake instructions.
 - `--goal` and `--goal-file` seed only the initial operator message to orchestrator. They are not role startup prompts; the orchestrator decomposes the objective into role-specific inbox messages.
+- For one logical work thread, reuse one stable `--correlation-key` across retries, follow-ups, and verification. Different keys are treated as different work. Check `status --verbose` or `inbox list --verbose` before sending duplicate-looking follow-up work.
 - `tmux-team broadcast` creates one durable message per recipient. Each recipient must have independent claim, ack, completion, and reply state.
 - Broadcast recipient shaping must use either `--only` or `--exclude`, not both.
 

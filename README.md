@@ -185,7 +185,7 @@ tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --ne
 tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
 tmux-team pane list --all
 tmux-team pane capture collector --lines 120 --offset 40
-tmux-team pane capture collector --summary --summary-lines 120
+tmux-team pane capture collector --summary --lines 120
 tmux-team watchdog
 tmux-team ext list
 tmux-team ext doctor
@@ -201,9 +201,9 @@ Use `tmux-team status --verbose` when counts are not enough. It prints bounded a
 
 Use `tmux-team inbox next --auto-ack` when a role wants claim and acknowledgement to be one step before it starts work.
 
-Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until a terminal condition is reached.
+Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until the watch is completed, failed, or cancelled.
 
-Use `--correlation-key`, `--related-to`, or `--supersedes` on `send`/`broadcast` when work belongs to a known thread. `tmux-team` warns when new active work for the same role matches an existing correlation key or normalized summary. The warning does not block delivery; pass `--allow-duplicate` when duplicate work is intentional. Use `inbox list --verbose` to inspect relation metadata.
+Use `--correlation-key`, `--related-to`, or `--supersedes` on `send` when work belongs to a known thread. Reuse the same correlation key for retries, follow-ups, and verification of the same logical work. `tmux-team` warns when new active work for the same role matches an existing correlation key or normalized summary. The warning does not block delivery; pass `--allow-duplicate` when duplicate work is intentional. Use `status --verbose` and `inbox list --verbose` to inspect relation metadata before sending follow-up work.
 
 Use `broadcast --notice` for durable announcements that should not create inbox work for each recipient. Notices are recorded as completed `notice` messages and can wake roles with a notice-only prompt; recipients do not claim, ack, or complete them.
 
@@ -211,11 +211,11 @@ Use `broadcast --notice` for durable announcements that should not create inbox 
 
 `pane capture` reads tmux pane output for live supervision. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for the orchestrator or operator to inspect present progress that has not yet reached inbox completion or scratchpad memory. It must not be used as delivery confirmation; durable state still lives in SQLite messages, notifications, milestones, and memory.
 
-Use `pane capture --summary` to ask `codex exec` for a compact structured summary of bounded pane output instead of dumping raw scrollback into the caller's context. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
+Use `pane capture --summary` to ask `codex exec` for a compact JSON summary of bounded pane output instead of dumping raw scrollback into the caller's context. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
 
 `pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
 
-`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. It reports findings without waking or mutating agents. Use `--interval-seconds` and `--max-iterations` when you want a simple local loop.
+`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. It reports findings without waking or mutating agents. Run it from cron, tmux, or another scheduler if you want repeated checks.
 
 Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 
@@ -313,6 +313,18 @@ make docker-test
 make docker-smoke-test
 make docker-congestion-smoke-test
 ```
+
+Repeatable live Codex dogfood scenario:
+
+```bash
+make live-demo-setup
+make live-demo-bootstrap
+tmux attach -t tt-live-demo
+make live-demo-verify
+make live-demo-clean
+```
+
+The live demo clones a public snapshot, seeds a real failing test, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. Its verifier checks the final test result and durable coordination state, including correlation-key discipline, completion replies, notice broadcasts, watches, milestones, stable approval, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
 
 Opt-in real Codex integration:
 

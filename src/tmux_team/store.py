@@ -155,8 +155,6 @@ class Store:
               status TEXT NOT NULL,
               summary TEXT NOT NULL,
               current_summary TEXT NOT NULL,
-              terminal_condition TEXT,
-              ref_id TEXT,
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
@@ -473,9 +471,7 @@ class Store:
         role: str,
         summary: str,
         created_by: str,
-        terminal_condition: str | None = None,
         next_update_at: str | None = None,
-        ref_id: str | None = None,
     ) -> sqlite3.Row:
         if self.get_role(conn, role) is None:
             raise KeyError(f"Unknown role: {role}")
@@ -484,19 +480,19 @@ class Store:
         conn.execute(
             """
             INSERT INTO watches(
-              id, role, status, summary, current_summary, terminal_condition, ref_id,
+              id, role, status, summary, current_summary,
               created_by, created_at, updated_at, last_update_at, next_update_at
             )
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (watch_id, role, summary, summary, terminal_condition, ref_id, created_by, now, now, now, next_update_at),
+            (watch_id, role, summary, summary, created_by, now, now, now, next_update_at),
         )
         self.record_event(
             conn,
             "watch.started",
             created_by,
             watch_id,
-            {"role": role, "summary": summary, "next_update_at": next_update_at, "ref_id": ref_id},
+            {"role": role, "summary": summary, "next_update_at": next_update_at},
         )
         conn.commit()
         return self.get_watch(conn, watch_id)
@@ -773,35 +769,69 @@ class Store:
         conn.commit()
         return completed
 
-    def notify_role(self, conn: sqlite3.Connection, role: str, method: str = "auto") -> tuple[bool, str]:
+    def notify_role(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        method: str = "auto",
+        *,
+        notice_message_id: str | None = None,
+        notice_summary: str | None = None,
+    ) -> tuple[bool, str]:
         role_row = self.get_role(conn, role)
         if role_row is None:
             return False, f"unknown role: {role}"
         if method == "auto":
             method = role_notify_method(role_row)
         method = normalize_notify_method(method)
+        is_notice = notice_summary is not None
         pending = self.pending_count(conn, role)
-        if pending == 0:
+        if pending == 0 and not is_notice:
             return True, "no pending messages"
 
         if method == "app-server-turn":
+            if is_notice:
+                prompt = self.app_server_notice_prompt(role, str(notice_summary))
+                return self.notify_role_app_server_prompt(
+                    conn,
+                    role,
+                    role_row,
+                    prompt=prompt,
+                    message_id=notice_message_id,
+                    update_queued=False,
+                    event_type="role.notice_sent",
+                    event_payload={"message_id": notice_message_id},
+                    success_label="app-server notice",
+                    failure_label="app-server notice submission failed",
+                )
             return self.notify_role_app_server(conn, role, role_row, self.pending_wake_context(conn, role))
 
         pane = role_row["pane"]
         if not pane:
-            self.record_notification(conn, None, role, method, "notify_failed", "role has no pane")
+            self.record_notification(conn, notice_message_id, role, method, "notify_failed", "role has no pane")
             conn.commit()
             return False, "role has no pane"
 
-        text = f"[tmux-team] {pending} pending message(s). Run: tmux-team inbox next --role {role}"
+        text = (
+            f"[tmux-team notice] {notice_summary}"
+            if is_notice
+            else f"[tmux-team] {pending} pending message(s). Run: tmux-team inbox next --role {role}"
+        )
         if method not in ("display-message", "send-keys"):
-            self.record_notification(conn, None, role, method, "notify_failed", f"unsupported method: {method}")
+            self.record_notification(
+                conn, notice_message_id, role, method, "notify_failed", f"unsupported method: {method}"
+            )
             conn.commit()
             return False, f"unsupported method: {method}"
+        if is_notice and method == "send-keys":
+            details = "notice notification does not support method: send-keys"
+            self.record_notification(conn, notice_message_id, role, method, "notify_failed", details)
+            conn.commit()
+            return False, details
 
         tmux = shutil.which("tmux")
         if tmux is None:
-            self.record_notification(conn, None, role, method, "notify_failed", "tmux not found")
+            self.record_notification(conn, notice_message_id, role, method, "notify_failed", "tmux not found")
             conn.commit()
             return False, "tmux not found"
 
@@ -813,7 +843,7 @@ class Store:
                 state = "notify_failed"
                 if pane_details.startswith("notify_deferred:"):
                     state = "notify_deferred"
-                self.record_notification(conn, None, role, method, state, pane_details)
+                self.record_notification(conn, notice_message_id, role, method, state, pane_details)
                 event_type = "role.notification_deferred" if state == "notify_deferred" else "role.notification_failed"
                 self.record_event(conn, event_type, "tmux", role, {"method": method, "details": pane_details})
                 conn.commit()
@@ -827,117 +857,29 @@ class Store:
 
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode == 0:
-            now = utc_now()
-            conn.execute(
-                """
-                UPDATE messages
-                SET state = 'notified', attempts = attempts + 1, updated_at = ?
-                WHERE recipient = ? AND state = 'queued'
-                """,
-                (now, role),
-            )
             details = text if method == "display-message" else wake_prompt
-            self.record_notification(conn, None, role, method, "notified", details)
-            self.record_event(conn, "role.notified", "tmux", role, {"pending": pending, "method": method})
-            conn.commit()
-            return True, details
-
-        details = (result.stderr or result.stdout or f"tmux exited {result.returncode}").strip()
-        self.record_notification(conn, None, role, method, "notify_failed", details)
-        conn.commit()
-        return False, details
-
-    def notify_role_notice(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        role: str,
-        message_id: str,
-        summary: str,
-        method: str = "auto",
-    ) -> tuple[bool, str]:
-        role_row = self.get_role(conn, role)
-        if role_row is None:
-            return False, f"unknown role: {role}"
-        if method == "auto":
-            method = role_notify_method(role_row)
-        method = normalize_notify_method(method)
-        if method == "app-server-turn":
-            settings = self.resolve_role_app_server(conn, role, role_row)
-            if settings is None:
-                details = "role has no app-server endpoint/thread binding"
-                self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
+            if is_notice:
+                self.record_notification(conn, notice_message_id, role, method, "notified", details)
                 self.record_event(
-                    conn,
-                    "role.notification_failed",
-                    "app-server",
-                    role,
-                    {"method": "app-server-turn", "details": details, "message_id": message_id},
+                    conn, "role.notice_sent", "tmux", role, {"message_id": notice_message_id, "method": method}
                 )
-                conn.commit()
-                return False, details
-            endpoint, thread_id, timeout = settings
-            prompt = (
-                f"tmux-team notice for role `{role}`.\n"
-                f"Summary: {truncate_wake_line(summary)}\n"
-                "No inbox task was queued; no claim, ack, or completion is required.\n"
-            )
-            try:
-                turn = submit_app_server_wake(
-                    endpoint=endpoint,
-                    thread_id=thread_id,
-                    prompt=prompt,
-                    client_user_message_id=f"tmux-team-notice-{role}-{utc_now()}",
-                    timeout=timeout,
+            else:
+                now = utc_now()
+                conn.execute(
+                    """
+                    UPDATE messages
+                    SET state = 'notified', attempts = attempts + 1, updated_at = ?
+                    WHERE recipient = ? AND state = 'queued'
+                    """,
+                    (now, role),
                 )
-            except (AppServerError, OSError, TimeoutError) as exc:
-                details = f"app-server notice submission failed: {exc}"
-                self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
-                conn.commit()
-                return False, details
-            details = f"app-server notice submitted thread={turn.thread_id} turn={turn.turn_id}"
-            self.record_notification(conn, message_id, role, "app-server-turn", "submitted", details)
-            self.record_event(
-                conn,
-                "role.notice_sent",
-                "app-server",
-                role,
-                {"message_id": message_id, "thread_id": turn.thread_id, "turn_id": turn.turn_id},
-            )
+                self.record_notification(conn, None, role, method, "notified", details)
+                self.record_event(conn, "role.notified", "tmux", role, {"pending": pending, "method": method})
             conn.commit()
             return True, details
 
-        if method != "display-message":
-            details = f"notice notification does not support method: {method}"
-            self.record_notification(conn, message_id, role, method, "notify_failed", details)
-            conn.commit()
-            return False, details
-
-        tmux = shutil.which("tmux")
-        if tmux is None:
-            self.record_notification(conn, message_id, role, method, "notify_failed", "tmux not found")
-            conn.commit()
-            return False, "tmux not found"
-        pane = role_row["pane"]
-        if not pane:
-            self.record_notification(conn, message_id, role, method, "notify_failed", "role has no pane")
-            conn.commit()
-            return False, "role has no pane"
-        text = f"[tmux-team notice] {summary}"
-        result = subprocess.run(
-            [tmux, "display-message", "-t", pane, text],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode == 0:
-            self.record_notification(conn, message_id, role, method, "notified", text)
-            self.record_event(conn, "role.notice_sent", "tmux", role, {"message_id": message_id, "method": method})
-            conn.commit()
-            return True, text
         details = (result.stderr or result.stdout or f"tmux exited {result.returncode}").strip()
-        self.record_notification(conn, message_id, role, method, "notify_failed", details)
+        self.record_notification(conn, notice_message_id, role, method, "notify_failed", details)
         conn.commit()
         return False, details
 
@@ -948,17 +890,6 @@ class Store:
         role_row: sqlite3.Row,
         wake_context: dict[str, Any],
     ) -> tuple[bool, str]:
-        settings = self.resolve_role_app_server(conn, role, role_row)
-        if settings is None:
-            details = "role has no app-server endpoint/thread binding"
-            self.record_notification(conn, None, role, "app-server-turn", "notify_failed", details)
-            self.record_event(
-                conn, "role.notification_failed", "app-server", role, {"method": "app-server-turn", "details": details}
-            )
-            conn.commit()
-            return False, details
-
-        endpoint, thread_id, timeout = settings
         pending = int(wake_context["pending"])
         prompt = self.app_server_wake_prompt(
             role,
@@ -966,6 +897,46 @@ class Store:
             top_message=wake_context.get("top_message"),
             urgent_count=int(wake_context.get("urgent_count") or 0),
         )
+        return self.notify_role_app_server_prompt(
+            conn,
+            role,
+            role_row,
+            prompt=prompt,
+            update_queued=True,
+            event_payload={"pending": pending},
+            success_label="app-server turn",
+            failure_label="app-server turn submission failed",
+        )
+
+    def notify_role_app_server_prompt(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        role_row: sqlite3.Row,
+        *,
+        prompt: str,
+        message_id: str | None = None,
+        update_queued: bool,
+        event_type: str = "role.notified",
+        event_payload: dict[str, Any] | None = None,
+        success_label: str,
+        failure_label: str,
+    ) -> tuple[bool, str]:
+        settings = self.resolve_role_app_server(conn, role, role_row)
+        if settings is None:
+            details = "role has no app-server endpoint/thread binding"
+            self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
+            self.record_event(
+                conn,
+                "role.notification_failed",
+                "app-server",
+                role,
+                {"method": "app-server-turn", "details": details, "message_id": message_id},
+            )
+            conn.commit()
+            return False, details
+
+        endpoint, thread_id, timeout = settings
         try:
             turn = submit_app_server_wake(
                 endpoint=endpoint,
@@ -975,43 +946,49 @@ class Store:
                 timeout=timeout,
             )
         except (AppServerError, OSError, TimeoutError) as exc:
-            details = f"app-server turn submission failed: {exc}"
-            self.record_notification(conn, None, role, "app-server-turn", "notify_failed", details)
+            details = f"{failure_label}: {exc}"
+            self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
             self.record_event(
-                conn, "role.notification_failed", "app-server", role, {"method": "app-server-turn", "details": details}
+                conn,
+                "role.notification_failed",
+                "app-server",
+                role,
+                {"method": "app-server-turn", "details": details, "message_id": message_id},
             )
             conn.commit()
             return False, details
 
-        now = utc_now()
-        conn.execute(
-            """
-            UPDATE messages
-            SET state = 'notified', attempts = attempts + 1, updated_at = ?
-            WHERE recipient = ? AND state = 'queued'
-            """,
-            (now, role),
-        )
+        if update_queued:
+            now = utc_now()
+            conn.execute(
+                """
+                UPDATE messages
+                SET state = 'notified', attempts = attempts + 1, updated_at = ?
+                WHERE recipient = ? AND state = 'queued'
+                """,
+                (now, role),
+            )
+        payload = {
+            "method": "app-server-turn",
+            "thread_id": turn.thread_id,
+            "turn_id": turn.turn_id,
+        }
+        if event_payload:
+            payload.update(event_payload)
         details = json.dumps(
             {
                 "endpoint": endpoint,
                 "thread_id": turn.thread_id,
                 "turn_id": turn.turn_id,
                 "turn_status": turn.status,
-                "pending": pending,
+                **(event_payload or {}),
             },
             sort_keys=True,
         )
-        self.record_notification(conn, None, role, "app-server-turn", "submitted", details)
-        self.record_event(
-            conn,
-            "role.notified",
-            "app-server",
-            role,
-            {"pending": pending, "method": "app-server-turn", "thread_id": turn.thread_id, "turn_id": turn.turn_id},
-        )
+        self.record_notification(conn, message_id, role, "app-server-turn", "submitted", details)
+        self.record_event(conn, event_type, "app-server", role, payload)
         conn.commit()
-        return True, f"app-server turn submitted thread={turn.thread_id} turn={turn.turn_id}"
+        return True, f"{success_label} submitted thread={turn.thread_id} turn={turn.turn_id}"
 
     def resolve_role_app_server(
         self,
@@ -1080,6 +1057,13 @@ class Store:
             lines.append("Wake notice only. Claim durable inbox work now.")
             lines.append("Follow the loaded role loop and drain until empty.")
         return "\n".join(lines).rstrip() + "\n"
+
+    def app_server_notice_prompt(self, role: str, summary: str) -> str:
+        return (
+            f"tmux-team notice for role `{role}`.\n"
+            f"Summary: {truncate_wake_line(summary)}\n"
+            "No inbox task was queued; no claim, ack, or completion is required.\n"
+        )
 
     def cli_config_arg(self, role: str | None = None) -> str:
         if self.config.config_path is None:

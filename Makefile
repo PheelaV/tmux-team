@@ -1,8 +1,10 @@
 UV ?= uv
 UV_RUN = $(UV) run --with-editable .
 UV_RUN_DEV = $(UV) run --with-editable . --extra dev
+LIVE_DEMO_ROOT ?= /tmp/tmux-team-live-demo
+LIVE_DEMO_SESSION ?= tt-live-demo
 
-.PHONY: require-uv install-dev install-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test
+.PHONY: require-uv install-dev install-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-verify live-demo-clean
 
 require-uv:
 	@command -v "$(UV)" >/dev/null 2>&1 || (echo "tmux-team tests require uv. Install with: brew install uv" >&2; exit 2)
@@ -66,3 +68,15 @@ codex-integration-test: require-uv
 
 codex-docker-fs-integration-test: require-uv
 	$(UV_RUN) python scripts/codex_task_integration.py --root /tmp/tmux-team-codex-fs-itest --force --verify-in-docker
+
+live-demo-setup: require-uv
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) setup --force
+
+live-demo-bootstrap: require-uv
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) bootstrap --session $(LIVE_DEMO_SESSION) --role-yolo --force-config
+
+live-demo-verify: require-uv
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) verify
+
+live-demo-clean: require-uv
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) clean --session $(LIVE_DEMO_SESSION)

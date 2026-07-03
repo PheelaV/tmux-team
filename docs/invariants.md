@@ -110,7 +110,7 @@ The operator and orchestrator may inspect managed role panes.
 - Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
 - Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
-- Use `tmux-team pane capture <role> --summary` when raw scrollback would flood context; summaries must be generated from bounded capture and remain observational only.
+- Use `tmux-team pane capture <role> --summary` when raw scrollback would flood context; summaries must be generated from bounded capture, use a compact JSON shape, and remain observational only.
 - `--lines` or `--limit` controls how much history is printed. `--offset` skips the newest lines so the caller can page back.
 - Pane capture is for live progress inspection, stuck-turn diagnosis, and operator overview.
 - Pane capture is not a delivery, acknowledgement, or completion mechanism.
@@ -164,6 +164,7 @@ Message completion is durable state. Conversational completion replies are expli
 - `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
 - A dispatcher must keep the message id returned by `tmux-team send`.
 - After fan-out, the dispatcher checks `tmux-team status`, `inbox list`, or events for that message's state before routing follow-up work.
+- For one logical work thread, reuse one stable `--correlation-key` across retries, follow-ups, and verification. Different keys are treated as different work, so near-synonym keys create avoidable duplicate work. Use `--allow-duplicate` only when redundant independent work is deliberate.
 - Plain `complete` remains available for scripts and operator-originated tasks that should not generate reply traffic.
 
 ## Supervision Watches
@@ -171,7 +172,7 @@ Message completion is durable state. Conversational completion replies are expli
 Long-running monitoring work must not be hidden as an indefinitely acknowledged inbox task.
 
 - Use `tmux-team watch start/update/complete` for ongoing supervision with heartbeat-style updates.
-- Watches are durable role-owned state with a current summary, last update, optional next expected update, optional terminal condition, and terminal status.
+- Watches are durable role-owned state with a current summary, last update, optional next expected update, and terminal status.
 - Watches appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
 - Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 - A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
@@ -182,7 +183,7 @@ Watchdog checks are local supervision, not autonomous orchestration.
 
 - `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches.
 - Watchdog checks must not mutate message/watch state, wake roles, or write milestones by default.
-- Repeating watchdog mode is a local loop over the same checks; it is not a hidden background agent.
+- Watchdog is a single-shot report command. Use cron, tmux, or an explicit scheduler outside tmux-team for repeated checks.
 
 ## State
 

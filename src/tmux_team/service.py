@@ -187,12 +187,12 @@ class TeamService:
 
         notification = None
         if state == "completed" and wake:
-            ok, details = self.store.notify_role_notice(
+            ok, details = self.store.notify_role(
                 conn,
-                role=recipient,
-                message_id=message.id,
-                summary=summary,
-                method=notify_method,
+                recipient,
+                notify_method,
+                notice_message_id=message.id,
+                notice_summary=summary,
             )
             notification = NotificationResult(ok=ok, details=details, method=notify_method)
         return SendMessageResult(message=message, blocked=blocked, notification=notification)

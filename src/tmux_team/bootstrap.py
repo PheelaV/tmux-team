@@ -15,9 +15,9 @@ import tomli_w
 
 from .app_server import AppServerClient
 from .config import CONFIG_PATH_ENV, ENV_FILE_PATH, ROLE_ENV, load_config, role_scratchpad_path
-from .runtime_contract import ROLE_CONTRACT_VERSION
 from .store import Store
 
+ROLE_CONTRACT_VERSION = "2026-07-03.1"
 DEFAULT_ROLES = ("orchestrator", "implementer", "collector", "trainer")
 DEFAULT_AGENT_LAYOUT = "grouped"
 DEFAULT_CONTROL_WINDOW = "tt-control"
