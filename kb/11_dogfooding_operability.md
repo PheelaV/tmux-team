@@ -74,3 +74,14 @@ Claim/ack discrepancies are now visible in the operator status surface.
 - The threshold is controlled by `--unacked-warn-seconds` and defaults to 300 seconds.
 
 Invariant: this is observability over existing message state. The warning does not mutate the message or prove the role is stuck.
+
+### TT-FEAT-007: Notice-Only Broadcast Mode
+
+Broadcast now has a notice-only mode for durable announcements.
+
+- `broadcast --notice` records one completed `message_kind='notice'` message per recipient.
+- Notices do not appear as pending inbox work and do not require claim, ack, or completion.
+- Notification, when enabled, uses notice-only wording rather than an inbox wake contract.
+- Recipient shaping still uses the existing `--only`/`--exclude` broadcast filters.
+
+Invariant: notices are for announcements, not assignments. Use normal `send`/`broadcast` when recipients need to act and report completion.

@@ -847,6 +847,100 @@ class Store:
         conn.commit()
         return False, details
 
+    def notify_role_notice(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        message_id: str,
+        summary: str,
+        method: str = "auto",
+    ) -> tuple[bool, str]:
+        role_row = self.get_role(conn, role)
+        if role_row is None:
+            return False, f"unknown role: {role}"
+        if method == "auto":
+            method = role_notify_method(role_row)
+        method = normalize_notify_method(method)
+        if method == "app-server-turn":
+            settings = self.resolve_role_app_server(conn, role, role_row)
+            if settings is None:
+                details = "role has no app-server endpoint/thread binding"
+                self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
+                self.record_event(
+                    conn,
+                    "role.notification_failed",
+                    "app-server",
+                    role,
+                    {"method": "app-server-turn", "details": details, "message_id": message_id},
+                )
+                conn.commit()
+                return False, details
+            endpoint, thread_id, timeout = settings
+            prompt = (
+                f"tmux-team notice for role `{role}`.\n"
+                f"Summary: {truncate_wake_line(summary)}\n"
+                "No inbox task was queued; no claim, ack, or completion is required.\n"
+            )
+            try:
+                turn = submit_app_server_wake(
+                    endpoint=endpoint,
+                    thread_id=thread_id,
+                    prompt=prompt,
+                    client_user_message_id=f"tmux-team-notice-{role}-{utc_now()}",
+                    timeout=timeout,
+                )
+            except (AppServerError, OSError, TimeoutError) as exc:
+                details = f"app-server notice submission failed: {exc}"
+                self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
+                conn.commit()
+                return False, details
+            details = f"app-server notice submitted thread={turn.thread_id} turn={turn.turn_id}"
+            self.record_notification(conn, message_id, role, "app-server-turn", "submitted", details)
+            self.record_event(
+                conn,
+                "role.notice_sent",
+                "app-server",
+                role,
+                {"message_id": message_id, "thread_id": turn.thread_id, "turn_id": turn.turn_id},
+            )
+            conn.commit()
+            return True, details
+
+        if method != "display-message":
+            details = f"notice notification does not support method: {method}"
+            self.record_notification(conn, message_id, role, method, "notify_failed", details)
+            conn.commit()
+            return False, details
+
+        tmux = shutil.which("tmux")
+        if tmux is None:
+            self.record_notification(conn, message_id, role, method, "notify_failed", "tmux not found")
+            conn.commit()
+            return False, "tmux not found"
+        pane = role_row["pane"]
+        if not pane:
+            self.record_notification(conn, message_id, role, method, "notify_failed", "role has no pane")
+            conn.commit()
+            return False, "role has no pane"
+        text = f"[tmux-team notice] {summary}"
+        result = subprocess.run(
+            [tmux, "display-message", "-t", pane, text],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            self.record_notification(conn, message_id, role, method, "notified", text)
+            self.record_event(conn, "role.notice_sent", "tmux", role, {"message_id": message_id, "method": method})
+            conn.commit()
+            return True, text
+        details = (result.stderr or result.stdout or f"tmux exited {result.returncode}").strip()
+        self.record_notification(conn, message_id, role, method, "notify_failed", details)
+        conn.commit()
+        return False, details
+
     def notify_role_app_server(
         self,
         conn: sqlite3.Connection,
@@ -1340,7 +1434,7 @@ def normalize_summary(summary: str) -> str:
 
 def normalize_message_kind(value: str) -> str:
     normalized = value.strip().lower().replace("-", "_")
-    if normalized not in ("task", "completion_notice"):
+    if normalized not in ("task", "completion_notice", "notice"):
         raise ValueError(f"Invalid message kind: {value}")
     return normalized
 

@@ -144,6 +144,59 @@ class TeamService:
             notification = self.notify_role(conn, recipient, notify_method, actor=actor or sender)
         return SendMessageResult(message=message, blocked=blocked, notification=notification, duplicates=duplicates)
 
+    def send_notice(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        sender: str,
+        recipient: str,
+        summary: str,
+        body: str,
+        force: bool = False,
+        wake: bool = True,
+        notify_method: str = "auto",
+        actor: str | None = None,
+    ) -> SendMessageResult:
+        role = self.store.get_role(conn, recipient)
+        if role is None:
+            raise KeyError(f"Unknown recipient role: {recipient}")
+
+        state = "completed"
+        blocked = None
+        if role["state"] != "active" and not force:
+            state = f"blocked_by_role_{role['state']}"
+            blocked = {"role": recipient, "state": role["state"]}
+
+        message = self.store.create_message(
+            conn,
+            sender=sender,
+            recipient=recipient,
+            priority="low",
+            summary=summary,
+            body=body,
+            state=state,
+            message_kind="notice",
+        )
+        self.hook_runner.run(
+            self.store,
+            conn,
+            "message.created",
+            {"message": message_to_dict(message), "blocked": blocked, "notice": True},
+            actor=actor or sender,
+        )
+
+        notification = None
+        if state == "completed" and wake:
+            ok, details = self.store.notify_role_notice(
+                conn,
+                role=recipient,
+                message_id=message.id,
+                summary=summary,
+                method=notify_method,
+            )
+            notification = NotificationResult(ok=ok, details=details, method=notify_method)
+        return SendMessageResult(message=message, blocked=blocked, notification=notification)
+
     def claim_next(
         self,
         conn: sqlite3.Connection,

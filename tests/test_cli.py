@@ -610,6 +610,39 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("summary=checkpoint", out)
 
+    def test_broadcast_notice_does_not_create_pending_inbox_work(self) -> None:
+        code, out, err = self.run_cli(
+            "broadcast",
+            "--notice",
+            "--only",
+            "orchestrator,collector",
+            "--from",
+            "operator",
+            "--summary",
+            "policy updated",
+            "--body",
+            "Read the current operating notes before lifecycle work.",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("broadcast: 2 recipient(s)", out)
+        self.assertEqual(out.count(" completed to="), 2)
+
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("collector:", out)
+        self.assertIn("pending=0", out)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 1)
+        self.assertIn("no pending messages for collector", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector", "--state", "completed", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=policy updated", out)
+        self.assertIn("kind=notice", out)
+
     def test_broadcast_rejects_only_and_exclude_together(self) -> None:
         code, out, err = self.run_cli(
             "broadcast",

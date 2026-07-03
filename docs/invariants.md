@@ -141,6 +141,8 @@ Initial bootstrap goals are orchestrator inputs only. `--goal` and `--goal-file`
 
 `tmux-team broadcast` is a convenience wrapper around durable send. It must create separate messages per recipient so every role has independent claim, ack, completion, and reply state. It must not create a shared message that multiple roles compete to claim. Recipient shaping must use either `--only` or `--exclude`, not both.
 
+`tmux-team broadcast --notice` is the exception for announcements. It must record one durable `message_kind='notice'` row per recipient, keep those rows out of pending inbox work, and wake roles with notice-only wording when notification is requested.
+
 ## Completion Tracking
 
 Message completion is durable state. Conversational completion replies are explicit but one-command.

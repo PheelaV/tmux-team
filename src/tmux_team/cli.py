@@ -381,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast_body.add_argument("--body-file", help="Path to markdown body")
     broadcast.add_argument("--force", action="store_true", help="Queue even if a role is paused or draining")
     broadcast.add_argument("--no-notify", action="store_true", help="Do not notify target panes")
+    broadcast.add_argument("--notice", action="store_true", help="Record a notice instead of inbox work")
     broadcast.add_argument("--correlation-key", help="Stable key for related or duplicate work")
     broadcast.add_argument("--related-to", help="Related message id")
     broadcast.add_argument("--supersedes", help="Message id this message replaces")
@@ -1192,22 +1193,35 @@ def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
     print(f"broadcast: {len(recipients)} recipient(s)")
     blocked = False
     for recipient in recipients:
-        result = service.send_message(
-            conn,
-            sender=args.sender,
-            recipient=recipient,
-            priority=args.priority,
-            summary=args.summary,
-            body=body,
-            force=args.force,
-            wake=not args.no_notify,
-            notify_method=args.notify_method,
-            correlation_key=args.correlation_key,
-            related_to=args.related_to,
-            supersedes=args.supersedes,
-            allow_duplicate=args.allow_duplicate,
-            actor=args.actor or args.sender,
-        )
+        if args.notice:
+            result = service.send_notice(
+                conn,
+                sender=args.sender,
+                recipient=recipient,
+                summary=args.summary,
+                body=body,
+                force=args.force,
+                wake=not args.no_notify,
+                notify_method=args.notify_method,
+                actor=args.actor or args.sender,
+            )
+        else:
+            result = service.send_message(
+                conn,
+                sender=args.sender,
+                recipient=recipient,
+                priority=args.priority,
+                summary=args.summary,
+                body=body,
+                force=args.force,
+                wake=not args.no_notify,
+                notify_method=args.notify_method,
+                correlation_key=args.correlation_key,
+                related_to=args.related_to,
+                supersedes=args.supersedes,
+                allow_duplicate=args.allow_duplicate,
+                actor=args.actor or args.sender,
+            )
         message = result.message
         print(f"{message.id} {message.state} to={message.recipient} priority={message.priority}")
         print(f"body: {message.body_path}")
