@@ -201,6 +201,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Show roles and queue counts")
     status.add_argument("--verbose", action="store_true", help="Show active message summaries per role")
     status.add_argument("--active-limit", type=int, default=3, help="Maximum active messages to show per role")
+    status.add_argument(
+        "--unacked-warn-seconds",
+        type=int,
+        default=300,
+        help="Warn in verbose output when claimed work is not acknowledged after this many seconds",
+    )
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
@@ -390,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_next = inbox_sub.add_parser("next", help="Claim and print the next message")
     inbox_next.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_next.add_argument("--claim-seconds", type=int, default=3600)
+    inbox_next.add_argument("--auto-ack", action="store_true", help="Acknowledge the claimed message immediately")
     inbox_list = inbox_sub.add_parser("list", help="List inbox messages")
     inbox_list.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_list.add_argument("--state", action="append", help="Filter state; repeatable")
@@ -975,7 +982,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             else:
                 print("    active:")
                 for row in rows:
-                    print(f"      {active_message_line(row)}")
+                    print(f"      {active_message_line(row, args.unacked_warn_seconds)}")
             watches = store.list_watches(conn, role=role["name"], states=WATCH_ACTIVE_STATES, limit=args.active_limit)
             if watches:
                 print("    watches:")
@@ -1222,6 +1229,8 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
         if row is None:
             print(f"no pending messages for {args.role}")
             return 1
+        if args.auto_ack:
+            row = service.ack_message(conn, args.role, row["id"], actor=args.actor)
         print_message(row, include_body=True)
         return 0
 
@@ -1781,7 +1790,7 @@ def print_duplicate_warnings(rows) -> None:
         )
 
 
-def active_message_line(row) -> str:
+def active_message_line(row, unacked_warn_seconds: int | None = None) -> str:
     state = row_value(row, "display_state", row["state"])
     parts = [
         row["id"],
@@ -1792,6 +1801,8 @@ def active_message_line(row) -> str:
     ]
     if row["claim_expires_at"]:
         parts.append(f"claim_expires_at={row['claim_expires_at']}")
+    if claimed_unacked_warning(row, unacked_warn_seconds):
+        parts.append(f"warning=claimed_unacked claim_age={format_age(row['updated_at'])}")
     parts.append(f"summary={row['summary']}")
     return " ".join(parts)
 
@@ -1824,6 +1835,17 @@ def format_age(created_at: str) -> str:
     if hours < 48:
         return f"{hours}h"
     return f"{hours // 24}d"
+
+
+def claimed_unacked_warning(row, threshold_seconds: int | None) -> bool:
+    if threshold_seconds is None:
+        return False
+    if row_value(row, "display_state", row["state"]) != "claimed":
+        return False
+    if row["acknowledged_at"]:
+        return False
+    age = datetime.now(UTC) - parse_utc_datetime(row["updated_at"])
+    return int(age.total_seconds()) >= threshold_seconds
 
 
 def watch_next_update_at(value: str | None) -> str | None:

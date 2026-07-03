@@ -414,6 +414,51 @@ runtime_dir = "{other_runtime}"
         self.assertIn("summary=collect active evidence", out)
         self.assertIn("claim_expires_at=", out)
 
+    def test_claimed_unacked_warning_and_auto_ack(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "unacked task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        first_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {first_id}", out)
+
+        code, out, err = self.run_cli("status", "--verbose", "--unacked-warn-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{first_id} state=claimed", out)
+        self.assertIn("warning=claimed_unacked", out)
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "auto ack task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        second_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator", "--auto-ack")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {second_id}", out)
+        self.assertIn("state: acknowledged", out)
+
     def test_watch_lifecycle_and_status_verbose(self) -> None:
         code, out, err = self.run_cli(
             "watch",

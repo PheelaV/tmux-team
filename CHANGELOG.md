@@ -4,6 +4,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Added `tmux-team inbox next --auto-ack` and verbose status warnings for claimed-but-not-acknowledged messages.
 - Added `completion_notice` message kind for completion replies and `tmux-team inbox complete-replies` for closing acknowledged completion notices.
 - Added optional message correlation metadata (`--correlation-key`, `--related-to`, `--supersedes`) with warning-only active duplicate detection.
 - Added `tmux-team watch start/list/update/complete` for long-running supervision tasks with heartbeat-style status.

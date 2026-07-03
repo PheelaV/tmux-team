@@ -174,7 +174,7 @@ tmux-team send --to orchestrator --summary "test failed" --body-file report.md
 tmux-team send --to collector --summary "Collect evidence" --body-file task.md --correlation-key issue-123
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
 tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
-tmux-team inbox next --role orchestrator
+tmux-team inbox next --role orchestrator --auto-ack
 tmux-team inbox reclaimable --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
@@ -193,7 +193,9 @@ tmux-team resume
 
 Completion replies are stored as `completion_notice` messages. After reading and acknowledging them, use `tmux-team inbox complete-replies --role ROLE` to close notice bookkeeping without writing a bespoke completion for each one.
 
-Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary.
+Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary. Claimed work that has not been acknowledged after the warning threshold appears with `warning=claimed_unacked`; tune that threshold with `--unacked-warn-seconds`.
+
+Use `tmux-team inbox next --auto-ack` when a role wants claim and acknowledgement to be one step before it starts work.
 
 Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until a terminal condition is reached.
 

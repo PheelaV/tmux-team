@@ -64,3 +64,13 @@ Completion replies are now distinguishable from ordinary tasks.
 - The SQLite schema moved to version 4 with an additive `message_kind` column.
 
 Invariant: completion notices are informational closure traffic. They should be easy to close after review, but they should not disappear before a role has claimed or acknowledged them.
+
+### TT-FEAT-006: Claimed-But-Not-Acknowledged Warnings
+
+Claim/ack discrepancies are now visible in the operator status surface.
+
+- `inbox next --auto-ack` claims and immediately acknowledges a message.
+- `status --verbose` adds `warning=claimed_unacked` for claimed messages with no `acknowledged_at` older than the configured threshold.
+- The threshold is controlled by `--unacked-warn-seconds` and defaults to 300 seconds.
+
+Invariant: this is observability over existing message state. The warning does not mutate the message or prove the role is stuck.
