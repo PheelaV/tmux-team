@@ -185,7 +185,7 @@ tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --ne
 tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
 tmux-team pane list --all
 tmux-team pane capture collector --lines 120 --offset 40
-tmux-team pane capture collector --summary --lines 120
+tmux-team pane capture collector --summary --lines 120 --summary-timeout 60 --summary-max-bytes 20000
 tmux-team watchdog
 tmux-team ext list
 tmux-team ext doctor
@@ -211,7 +211,7 @@ Use `broadcast --notice` for durable announcements that should not create inbox 
 
 `pane capture` reads tmux pane output for live supervision. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for the orchestrator or operator to inspect present progress that has not yet reached inbox completion or scratchpad memory. It must not be used as delivery confirmation; durable state still lives in SQLite messages, notifications, milestones, and memory.
 
-Use `pane capture --summary` to ask `codex exec` for a compact JSON summary of bounded pane output instead of dumping raw scrollback into the caller's context. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
+Use `pane capture --summary` to ask `codex exec` for a compact JSON summary of bounded pane output instead of dumping raw scrollback into the caller's context. Summary mode sends the prompt through stdin, caps captured pane text with `--summary-max-bytes`, and bounds the model call with `--summary-timeout`. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
 
 `pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
 

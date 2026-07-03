@@ -815,7 +815,8 @@ exit 9
         codex.write_text(
             f"""#!/bin/sh
 printf '%s\\n' "$*" > {codex_log}
-if [ "$1" = "exec" ]; then
+cat >> {codex_log}
+if [ "$1" = "exec" ] && [ "$2" = "-" ]; then
   printf '{{"role":"collector","pane":"test:collector.0","current_state":"working","needs_operator_attention":false}}\\n'
   exit 0
 fi
@@ -840,7 +841,97 @@ exit 9
 
         self.assertEqual(code, 0, err)
         self.assertIn('"current_state":"working"', out)
-        self.assertIn("exec", codex_log.read_text(encoding="utf-8"))
+        codex_input = codex_log.read_text(encoding="utf-8")
+        self.assertIn("exec -", codex_input)
+        self.assertIn("working on tests", codex_input)
+
+    def test_pane_capture_summary_caps_prompt_text(self) -> None:
+        fake_dir = self.root / "pane-summary-cap-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        codex = fake_dir / "codex"
+        codex_input = self.root / "codex-summary-input.log"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "capture-pane" ]; then
+  printf 'start marker\\n'
+  i=0
+  while [ "$i" -lt 200 ]; do printf A; i=$((i + 1)); done
+  printf '\\ntail marker\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        codex.write_text(
+            f"""#!/bin/sh
+cat > {codex_input}
+printf '{{"current_state":"summarized"}}\\n'
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        codex.chmod(0o755)
+
+        with patch.dict(os.environ, {"TMUX_TEAM_CODEX_BIN": str(codex)}):
+            code, out, err = self.run_cli(
+                "pane",
+                "capture",
+                "collector",
+                "--summary",
+                "--summary-max-bytes",
+                "40",
+                "--tmux-bin",
+                str(tmux),
+            )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn('"current_state":"summarized"', out)
+        prompt = codex_input.read_text(encoding="utf-8")
+        self.assertIn("truncated to last 40 bytes", prompt)
+        self.assertIn("tail marker", prompt)
+        self.assertNotIn("start marker", prompt)
+
+    def test_pane_capture_summary_timeout_reports_error(self) -> None:
+        fake_dir = self.root / "pane-summary-timeout-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        codex = fake_dir / "codex"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "capture-pane" ]; then
+  printf 'working\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        codex.write_text(
+            """#!/bin/sh
+sleep 2
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        codex.chmod(0o755)
+
+        with patch.dict(os.environ, {"TMUX_TEAM_CODEX_BIN": str(codex)}):
+            code, out, err = self.run_cli(
+                "pane",
+                "capture",
+                "collector",
+                "--summary",
+                "--summary-timeout",
+                "0.1",
+                "--tmux-bin",
+                str(tmux),
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("pane summary timed out", err)
 
     def test_pane_list_all_marks_unmanaged_panes(self) -> None:
         fake_dir = self.root / "pane-list-bin"
@@ -874,6 +965,48 @@ exit 9
         self.assertIn("all panes in managed windows:", out)
         self.assertIn("role=collector managed=true pane=test:collector.0 pane_id=%1", out)
         self.assertIn("role=- managed=false pane=test:collector.1 pane_id=%2 command=zsh path=/tmp/helper", out)
+
+    def test_pane_list_all_resolves_managed_percent_panes(self) -> None:
+        self.config.write_text(
+            self.config.read_text(encoding="utf-8")
+            .replace('pane = "test:orchestrator.0"', 'pane = "%1"')
+            .replace('pane = "test:collector.0"', 'pane = "%2"'),
+            encoding="utf-8",
+        )
+        fake_dir = self.root / "pane-list-percent-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "display-message" ]; then
+  case "$4" in
+    %1|%2) printf 'test:agents\\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = "list-panes" ]; then
+  case "$3" in
+    test:agents)
+      printf '%%1\\ttest:agents.0\\tcodex\\t/tmp/orchestrator\\n'
+      printf '%%2\\ttest:agents.1\\tcodex\\t/tmp/collector\\n'
+      printf '%%3\\ttest:agents.2\\tzsh\\t/tmp/helper\\n'
+      ;;
+  esac
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli("pane", "list", "--all", "--tmux-bin", str(tmux))
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("role=orchestrator managed=true pane=%1", out)
+        self.assertIn("role=collector managed=true pane=%2", out)
+        self.assertIn("role=orchestrator managed=true pane=test:agents.0 pane_id=%1", out)
+        self.assertIn("role=collector managed=true pane=test:agents.1 pane_id=%2", out)
+        self.assertIn("role=- managed=false pane=test:agents.2 pane_id=%3 command=zsh path=/tmp/helper", out)
 
     def test_pane_capture_policy_allows_orchestrator_supervision(self) -> None:
         code, out, err = self.run_main(

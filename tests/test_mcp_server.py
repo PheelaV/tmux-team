@@ -89,6 +89,32 @@ notify_method = "app-server-turn"
             roles = {role["name"]: role for role in status["roles"]}
             self.assertEqual(roles["orchestrator"]["counts"]["completed"], 1)
 
+    def test_team_status_counts_stale_claimed_as_pending(self) -> None:
+        store = self.store()
+        with store.connect() as conn:
+            sent = call_tool(
+                store,
+                conn,
+                "team_send",
+                {
+                    "to": "orchestrator",
+                    "from": "collector",
+                    "summary": "stalled task",
+                    "body": "Evidence goes here.",
+                    "wake": False,
+                },
+            )
+            call_tool(store, conn, "team_inbox_next", {"role": "orchestrator", "claim_seconds": 0})
+
+            status = call_tool(store, conn, "team_status", {})
+
+            roles = {role["name"]: role for role in status["roles"]}
+            counts = roles["orchestrator"]["counts"]
+            self.assertEqual(sent["message"]["state"], "queued")
+            self.assertEqual(counts["pending"], 1)
+            self.assertEqual(counts["stale_claimed"], 1)
+            self.assertEqual(counts["claimed"], 0)
+
     def test_team_complete_can_reply_to_sender(self) -> None:
         store = self.store()
         with store.connect() as conn:
