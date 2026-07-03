@@ -173,6 +173,7 @@ tmux-team send --to orchestrator --summary "test failed" --body-file report.md
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
 tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
 tmux-team inbox next --role orchestrator
+tmux-team inbox reclaimable --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
 tmux-team pane capture collector --lines 120 --offset 40
@@ -182,7 +183,7 @@ tmux-team sleep
 tmux-team resume
 ```
 
-`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
 
 `broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
 

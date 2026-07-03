@@ -45,7 +45,7 @@ from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
-from .store import CLAIMABLE_STATES, ROLE_STATES, Store, normalize_priority
+from .store import CLAIMABLE_STATES, ROLE_STATES, STALE_CLAIMED_STATE, Store, normalize_priority
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -373,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_list.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_list.add_argument("--state", action="append", help="Filter state; repeatable")
     inbox_list.add_argument("--limit", type=int, default=50)
+    inbox_reclaimable = inbox_sub.add_parser(
+        "reclaimable", help="List expired claimed messages that inbox next can reclaim"
+    )
+    inbox_reclaimable.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
+    inbox_reclaimable.add_argument("--limit", type=int, default=50)
     inbox_ack = inbox_sub.add_parser("ack", help="Acknowledge a message")
     inbox_ack.add_argument("message_id")
     inbox_ack.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
@@ -887,7 +892,8 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
     print("roles:")
     for role in store.list_roles(conn):
         role_counts = counts.get(role["name"], {})
-        pending = sum(role_counts.get(state, 0) for state in CLAIMABLE_STATES)
+        stale_claimed = role_counts.get(STALE_CLAIMED_STATE, 0)
+        pending = sum(role_counts.get(state, 0) for state in CLAIMABLE_STATES) + stale_claimed
         claimed = role_counts.get("claimed", 0)
         acknowledged = role_counts.get("acknowledged", 0)
         completed = role_counts.get("completed", 0)
@@ -895,7 +901,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
         worktree = role["worktree"] or "-"
         print(
             f"  {role['name']}: state={role['state']} mode={role['mode']} pane={pane} worktree={worktree} "
-            f"pending={pending} claimed={claimed} ack={acknowledged} done={completed}"
+            f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
     return 0
 
@@ -1085,6 +1091,16 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
             return 0
         for row in rows:
             print(message_one_line(row))
+        return 0
+
+    if args.inbox_command == "reclaimable":
+        rows = service.store.list_reclaimable_messages(conn, role=args.role, limit=args.limit)
+        if not rows:
+            print(f"no reclaimable messages for {args.role}")
+            return 0
+        for row in rows:
+            print(message_one_line(row))
+            print(f"  claimed_by={row['claimed_by'] or '-'} claim_expires_at={row['claim_expires_at'] or '-'}")
         return 0
 
     if args.inbox_command == "ack":
@@ -1582,10 +1598,18 @@ def print_message(row, include_body: bool = False) -> None:
 
 
 def message_one_line(row) -> str:
+    state = row_value(row, "display_state", row["state"])
     return (
-        f"{row['id']} state={row['state']} from={row['sender']} to={row['recipient']} "
+        f"{row['id']} state={state} from={row['sender']} to={row['recipient']} "
         f"priority={row['priority']} summary={row['summary']}"
     )
+
+
+def row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
 
 
 def print_stable_row(row) -> None:

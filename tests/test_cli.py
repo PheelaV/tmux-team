@@ -347,6 +347,40 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
 
+    def test_expired_claim_is_visible_and_reclaimable(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "stalled task",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator", "--claim-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_id}", out)
+
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("orchestrator:", out)
+        self.assertIn("pending=1 stale_claimed=1", out)
+
+        code, out, err = self.run_cli("inbox", "reclaimable", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{message_id} state=stale_claimed", out)
+        self.assertIn("claim_expires_at=", out)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_id}", out)
+
     def test_broadcast_creates_one_message_per_recipient(self) -> None:
         code, out, err = self.run_cli(
             "broadcast",

@@ -18,3 +18,4 @@ Current high-value agent notes:
 - [08_extensibility_and_hooks.md](08_extensibility_and_hooks.md): current extension authoring contract.
 - [09_omnigraph_memory_extension.md](09_omnigraph_memory_extension.md): plan for optional structured/RAG memory without moving coordination into Omnigraph.
 - [10_scratchpad_memory.md](10_scratchpad_memory.md): contract for top-loaded role memory that survives context compression and supports oversight.
+- [11_dogfooding_operability.md](11_dogfooding_operability.md): implementation ledger for dogfooding-driven operator visibility and congestion fixes.

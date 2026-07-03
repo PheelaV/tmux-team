@@ -16,6 +16,7 @@ from .app_server import AppServerError, submit_app_server_wake
 from .config import RoleConfig, TeamConfig
 
 MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
+STALE_CLAIMED_STATE = "stale_claimed"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
@@ -273,6 +274,40 @@ class Store:
                     WHEN 'normal' THEN 2
                     ELSE 3
                   END,
+                  created_at
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+        )
+
+    def list_reclaimable_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        clauses = ["state = 'claimed'", "claim_expires_at IS NOT NULL", "claim_expires_at <= ?"]
+        params: list[Any] = [utc_now()]
+        if role:
+            clauses.append("recipient = ?")
+            params.append(role)
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT *, '{STALE_CLAIMED_STATE}' AS display_state
+                FROM messages
+                WHERE {" AND ".join(clauses)}
+                ORDER BY
+                  CASE priority
+                    WHEN 'urgent' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    ELSE 3
+                  END,
+                  claim_expires_at,
                   created_at
                 LIMIT ?
                 """,
@@ -565,6 +600,7 @@ class Store:
         lines = [f"Inbox wake: {pending} pending message(s) for role `{role}`."]
         if top_message is not None:
             priority = str(top_message["priority"]).upper()
+            display_state = str(_row_value(top_message, "display_state", top_message["state"]))
             header = (
                 "URGENT tmux-team inbox message pending" if priority == "URGENT" else "tmux-team inbox message pending"
             )
@@ -577,6 +613,10 @@ class Store:
                     f"Pending: {pending} total, {urgent_count} urgent",
                 ]
             )
+            if display_state == STALE_CLAIMED_STATE:
+                lines.append(
+                    "State: stale claimed message; reclaim it with `tmux-team inbox next` if the previous turn did not finish."
+                )
             if priority == "URGENT":
                 lines.append(
                     "Action: stop at the current safe point, claim this urgent message before continuing other work, then drain by priority."
@@ -623,27 +663,58 @@ class Store:
     def pending_count(self, conn: sqlite3.Connection, role: str) -> int:
         return int(
             conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying')",
-                (role,),
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE recipient = ?
+                  AND (
+                    state IN ('queued', 'notified', 'retrying')
+                    OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+                  )
+                """,
+                (role, utc_now()),
             ).fetchone()[0]
         )
 
     def pending_wake_context(self, conn: sqlite3.Connection, role: str) -> dict[str, Any]:
+        now = utc_now()
         pending = self.pending_count(conn, role)
         urgent_count = int(
             conn.execute(
                 """
                 SELECT COUNT(*) FROM messages
-                WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying') AND priority = 'urgent'
+                WHERE recipient = ?
+                  AND priority = 'urgent'
+                  AND (
+                    state IN ('queued', 'notified', 'retrying')
+                    OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+                  )
                 """,
-                (role,),
+                (role, now),
             ).fetchone()[0]
         )
         top_message = conn.execute(
             """
-            SELECT id, sender, recipient, priority, summary, state, created_at
+            SELECT
+              id,
+              sender,
+              recipient,
+              priority,
+              summary,
+              state,
+              CASE
+                WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                THEN 'stale_claimed'
+                ELSE state
+              END AS display_state,
+              created_at,
+              claim_expires_at,
+              claimed_by
             FROM messages
-            WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying')
+            WHERE recipient = ?
+              AND (
+                state IN ('queued', 'notified', 'retrying')
+                OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+              )
             ORDER BY
               CASE priority
                 WHEN 'urgent' THEN 0
@@ -654,21 +725,30 @@ class Store:
               created_at
             LIMIT 1
             """,
-            (role,),
+            (now, role, now),
         ).fetchone()
         return {"pending": pending, "urgent_count": urgent_count, "top_message": top_message}
 
     def active_counts(self, conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+        now = utc_now()
         rows = conn.execute(
             """
-            SELECT recipient, state, COUNT(*) AS count
+            SELECT
+              recipient,
+              CASE
+                WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                THEN 'stale_claimed'
+                ELSE state
+              END AS display_state,
+              COUNT(*) AS count
             FROM messages
-            GROUP BY recipient, state
-            """
+            GROUP BY recipient, display_state
+            """,
+            (now,),
         ).fetchall()
         counts: dict[str, dict[str, int]] = {}
         for row in rows:
-            counts.setdefault(row["recipient"], {})[row["state"]] = int(row["count"])
+            counts.setdefault(row["recipient"], {})[row["display_state"]] = int(row["count"])
         return counts
 
     def approve_stable_commit(
@@ -850,6 +930,13 @@ def parse_utc_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
 
 
 def new_message_id() -> str:

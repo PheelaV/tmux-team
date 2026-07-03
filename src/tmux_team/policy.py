@@ -116,7 +116,7 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             raise PolicyError(f"actor {actor!r} is not authorized to use tmux send-keys notification")
         return
 
-    if action in ("inbox.next", "inbox.list"):
+    if action in ("inbox.next", "inbox.list", "inbox.reclaimable"):
         _authorize_role_resource(actor, resource, "role", policy.can_claim, action)
         return
 
