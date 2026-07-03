@@ -459,6 +459,47 @@ runtime_dir = "{other_runtime}"
         self.assertIn(f"id: {second_id}", out)
         self.assertIn("state: acknowledged", out)
 
+    def test_watchdog_reports_urgent_and_unacked_work(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--priority",
+            "urgent",
+            "--summary",
+            "urgent blocker",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        urgent_id = out.split()[0]
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "needs ack",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        unacked_id = out.split()[0]
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("watchdog", "--unacked-warn-seconds", "0")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=urgent_pending role=orchestrator ref={urgent_id}", out)
+        self.assertIn(f"kind=claimed_unacked role=collector ref={unacked_id}", out)
+
     def test_watch_lifecycle_and_status_verbose(self) -> None:
         code, out, err = self.run_cli(
             "watch",

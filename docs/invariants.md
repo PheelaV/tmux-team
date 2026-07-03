@@ -175,6 +175,14 @@ Long-running monitoring work must not be hidden as an indefinitely acknowledged 
 - Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 - A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
 
+## Watchdog
+
+Watchdog checks are local supervision, not autonomous orchestration.
+
+- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches.
+- Watchdog checks must not mutate message/watch state, wake roles, or write milestones by default.
+- Repeating watchdog mode is a local loop over the same checks; it is not a hidden background agent.
+
 ## State
 
 The config and runtime store are the source of truth.

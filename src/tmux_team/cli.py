@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -115,6 +116,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_pane(args, store, conn)
             if args.command == "notify":
                 return cmd_notify(args, service, conn)
+            if args.command == "watchdog":
+                return cmd_watchdog(args, store, conn)
             if args.command == "sleep":
                 return cmd_sleep(args, store, conn, config)
             if args.command == "resume":
@@ -540,6 +543,15 @@ def build_parser() -> argparse.ArgumentParser:
     notify = subparsers.add_parser("notify", help="Notify a role about pending work")
     notify.add_argument("role")
     notify.add_argument("--method", default="auto")
+
+    watchdog = subparsers.add_parser("watchdog", help="Check for stale or stuck team state")
+    watchdog.add_argument("--role", help="Limit checks to one role")
+    watchdog.add_argument("--unacked-warn-seconds", type=int, default=300)
+    watchdog.add_argument("--ack-warn-seconds", type=int, default=3600)
+    watchdog.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog.add_argument("--json", action="store_true", help="Print findings as JSON")
+    watchdog.add_argument("--interval-seconds", type=int, default=0, help="Repeat checks with this interval")
+    watchdog.add_argument("--max-iterations", type=int, default=1, help="Maximum watchdog iterations")
 
     sleep = subparsers.add_parser("sleep", help="Snapshot current bindings and tear down managed tmux team windows")
     sleep.add_argument(
@@ -1450,6 +1462,35 @@ def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
     return 1
 
 
+def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.max_iterations <= 0:
+        raise ValueError("watchdog --max-iterations must be greater than 0")
+    if args.interval_seconds < 0:
+        raise ValueError("watchdog --interval-seconds must be 0 or greater")
+
+    for iteration in range(args.max_iterations):
+        findings = watchdog_findings(
+            store,
+            conn,
+            role=args.role,
+            unacked_warn_seconds=args.unacked_warn_seconds,
+            ack_warn_seconds=args.ack_warn_seconds,
+            watch_grace_seconds=args.watch_grace_seconds,
+        )
+        if args.json:
+            print(json_dumps(findings))
+        elif not findings:
+            print("watchdog ok")
+        else:
+            for finding in findings:
+                print(format_watchdog_finding(finding))
+
+        if iteration + 1 >= args.max_iterations or args.interval_seconds == 0:
+            break
+        time.sleep(args.interval_seconds)
+    return 0
+
+
 def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
     result = sleep_team(
         config,
@@ -1828,6 +1869,106 @@ def format_milestone(row: dict) -> str:
         first_line = body.splitlines()[0]
         line += f"\n  {first_line}"
     return line
+
+
+def watchdog_findings(
+    store: Store,
+    conn,
+    *,
+    role: str | None,
+    unacked_warn_seconds: int,
+    ack_warn_seconds: int,
+    watch_grace_seconds: int,
+) -> list[dict[str, str]]:
+    roles = [role] if role else [row["name"] for row in store.list_roles(conn)]
+    findings: list[dict[str, str]] = []
+    now = datetime.now(UTC).replace(microsecond=0)
+    unacked_cutoff = (now - timedelta(seconds=unacked_warn_seconds)).isoformat()
+    ack_cutoff = (now - timedelta(seconds=ack_warn_seconds)).isoformat()
+    watch_cutoff = (now - timedelta(seconds=watch_grace_seconds)).isoformat()
+
+    for role_name in roles:
+        if store.get_role(conn, role_name) is None:
+            raise KeyError(f"Unknown role: {role_name}")
+        for row in conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE recipient = ?
+              AND priority = 'urgent'
+              AND state IN ('queued', 'notified', 'retrying')
+            ORDER BY created_at
+            """,
+            (role_name,),
+        ):
+            findings.append(watchdog_message_finding("urgent_pending", "urgent", row))
+
+        for row in store.list_reclaimable_messages(conn, role=role_name, limit=50):
+            findings.append(watchdog_message_finding("stale_claimed", "warning", row))
+
+        for row in conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE recipient = ?
+              AND state = 'claimed'
+              AND acknowledged_at IS NULL
+              AND updated_at <= ?
+            ORDER BY updated_at
+            """,
+            (role_name, unacked_cutoff),
+        ):
+            findings.append(watchdog_message_finding("claimed_unacked", "warning", row))
+
+        for row in conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE recipient = ?
+              AND state = 'acknowledged'
+              AND message_kind = 'task'
+              AND updated_at <= ?
+            ORDER BY updated_at
+            """,
+            (role_name, ack_cutoff),
+        ):
+            findings.append(watchdog_message_finding("old_acknowledged", "warning", row))
+
+        for row in conn.execute(
+            """
+            SELECT * FROM watches
+            WHERE role = ?
+              AND status IN ('active', 'blocked')
+              AND next_update_at IS NOT NULL
+              AND next_update_at <= ?
+            ORDER BY next_update_at
+            """,
+            (role_name, watch_cutoff),
+        ):
+            findings.append(
+                {
+                    "severity": "warning",
+                    "kind": "watch_overdue",
+                    "role": row["role"],
+                    "ref": row["id"],
+                    "summary": row["current_summary"],
+                }
+            )
+    return findings
+
+
+def watchdog_message_finding(kind: str, severity: str, row) -> dict[str, str]:
+    return {
+        "severity": severity,
+        "kind": kind,
+        "role": row["recipient"],
+        "ref": row["id"],
+        "summary": row["summary"],
+    }
+
+
+def format_watchdog_finding(finding: dict[str, str]) -> str:
+    return (
+        f"severity={finding['severity']} kind={finding['kind']} role={finding['role']} "
+        f"ref={finding['ref']} summary={finding['summary']}"
+    )
 
 
 def print_message(row, include_body: bool = False) -> None:

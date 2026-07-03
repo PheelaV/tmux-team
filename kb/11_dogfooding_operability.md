@@ -106,3 +106,14 @@ Pane capture now has an optional summary mode.
 - `--summary-model` may pass a model through to `codex exec`.
 
 Invariant: pane summaries are for operator context control. They are observation only and must not be treated as delivery, acknowledgement, completion, or durable state.
+
+### TT-FEAT-010: Native Watchdog Supervision
+
+tmux-team now has a native watchdog check surface.
+
+- `watchdog` reports durable-state findings for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches.
+- `--role` limits checks to one role.
+- `--json` prints machine-readable findings.
+- `--interval-seconds` and `--max-iterations` provide a simple local repeat loop.
+
+Invariant: watchdog is a reporting command. It does not mutate state, wake agents, or record milestones by default.

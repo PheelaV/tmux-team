@@ -186,6 +186,7 @@ tmux-team watch complete <watch-id> --role collector --summary "Run terminalized
 tmux-team pane list --all
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team pane capture collector --summary --summary-lines 120
+tmux-team watchdog
 tmux-team ext list
 tmux-team ext doctor
 tmux-team sleep
@@ -213,6 +214,8 @@ Use `broadcast --notice` for durable announcements that should not create inbox 
 Use `pane capture --summary` to ask `codex exec` for a compact structured summary of bounded pane output instead of dumping raw scrollback into the caller's context. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
 
 `pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
+
+`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. It reports findings without waking or mutating agents. Use `--interval-seconds` and `--max-iterations` when you want a simple local loop.
 
 Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 
