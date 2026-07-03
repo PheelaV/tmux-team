@@ -4,6 +4,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Added `completion_notice` message kind for completion replies and `tmux-team inbox complete-replies` for closing acknowledged completion notices.
 - Added optional message correlation metadata (`--correlation-key`, `--related-to`, `--supersedes`) with warning-only active duplicate detection.
 - Added `tmux-team watch start/list/update/complete` for long-running supervision tasks with heartbeat-style status.
 - Added `tmux-team status --verbose` with bounded active message summaries per role.
@@ -11,7 +12,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 Migration notes:
 
-- Existing `team.sqlite` stores migrate additively to schema version 3 when opened; the new `watches` table and message correlation columns are created automatically.
+- Existing `team.sqlite` stores migrate additively to schema version 4 when opened; the new `watches` table, message correlation columns, and message kind column are created automatically.
 
 ## 0.1.3 - 2026-07-03
 

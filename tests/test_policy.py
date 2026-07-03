@@ -86,8 +86,9 @@ can_sleep = true
         authorize(config, PolicyContext(actor="implementer"), "inbox.reclaimable", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.ack", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.complete", role="implementer")
+        authorize(config, PolicyContext(actor="implementer"), "inbox.complete-replies", role="implementer")
 
-        for action in ("inbox.next", "inbox.reclaimable", "inbox.ack", "inbox.complete"):
+        for action in ("inbox.next", "inbox.reclaimable", "inbox.ack", "inbox.complete", "inbox.complete-replies"):
             with self.subTest(action=action), self.assertRaises(PolicyError):
                 authorize(config, PolicyContext(actor="implementer"), action, role="orchestrator")
 

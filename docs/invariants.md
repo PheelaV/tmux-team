@@ -153,6 +153,8 @@ Message completion is durable state. Conversational completion replies are expli
 - Use `--summary` for the concise result and optional `--body` or `--body-file` for evidence, test output, or handoff detail.
 - Roles should use `--reply-to-sender` when completing delegated work from another managed role.
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.
+- Completion replies must be stored as `message_kind='completion_notice'`.
+- `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
 - A dispatcher must keep the message id returned by `tmux-team send`.
 - After fan-out, the dispatcher checks `tmux-team status`, `inbox list`, or events for that message's state before routing follow-up work.
 - Plain `complete` remains available for scripts and operator-originated tasks that should not generate reply traffic.

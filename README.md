@@ -178,6 +178,7 @@ tmux-team inbox next --role orchestrator
 tmux-team inbox reclaimable --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
+tmux-team inbox complete-replies --role orchestrator
 tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
 tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
 tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
@@ -189,6 +190,8 @@ tmux-team resume
 ```
 
 `inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+
+Completion replies are stored as `completion_notice` messages. After reading and acknowledging them, use `tmux-team inbox complete-replies --role ROLE` to close notice bookkeeping without writing a bespoke completion for each one.
 
 Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary.
 

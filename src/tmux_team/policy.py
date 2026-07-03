@@ -124,7 +124,7 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
         _authorize_role_resource(actor, resource, "role", policy.can_ack, action)
         return
 
-    if action == "inbox.complete":
+    if action in ("inbox.complete", "inbox.complete-replies"):
         _authorize_role_resource(actor, resource, "role", policy.can_complete, action)
         return
 

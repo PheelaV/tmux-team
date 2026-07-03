@@ -51,3 +51,16 @@ Messages now carry optional relation metadata and warning-only duplicate detecti
 - The SQLite schema moved to version 3 with additive message metadata columns.
 
 Invariant: correlation is advisory routing context. It must not block message delivery unless a future explicit policy adds that behavior.
+
+### TT-FEAT-005: Completion-Reply Handling
+
+Completion replies are now distinguishable from ordinary tasks.
+
+- `--reply-to-sender` creates messages with `message_kind='completion_notice'`.
+- Completion notices retain normal durable delivery, claim, ack, and wake behavior.
+- `inbox complete-replies --role ROLE` bulk-completes claimed or acknowledged completion notices after the recipient has read them.
+- Unread queued/notified completion notices are intentionally not auto-closed.
+- `inbox list --verbose` shows `kind=completion_notice` and relation metadata.
+- The SQLite schema moved to version 4 with an additive `message_kind` column.
+
+Invariant: completion notices are informational closure traffic. They should be easy to close after review, but they should not disappear before a role has claimed or acknowledged them.

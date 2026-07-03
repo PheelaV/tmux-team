@@ -756,6 +756,60 @@ exit 9
         self.assertIn("from=orchestrator", out)
         self.assertIn("orchestrator completed: test failed", out)
 
+    def test_completion_replies_can_be_bulk_completed_after_ack(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "test failed",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        original_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", original_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            original_id,
+            "--role",
+            "orchestrator",
+            "--summary",
+            "routed",
+            "--reply-to-sender",
+            "--reply-no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        reply_id = ""
+        for line in out.splitlines():
+            if line.startswith("id: "):
+                reply_id = line.removeprefix("id: ")
+        self.assertTrue(reply_id.startswith("msg_"))
+
+        code, out, err = self.run_cli("inbox", "ack", reply_id, "--role", "collector")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kind=completion_notice", out)
+        self.assertIn(f"related_to={original_id}", out)
+
+        code, out, err = self.run_cli("inbox", "complete-replies", "--role", "collector")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("completed 1 completion notice(s)", out)
+        self.assertIn(f"{reply_id} state=completed", out)
+
     def test_complete_accepts_body_detail(self) -> None:
         code, out, err = self.run_cli(
             "send",

@@ -22,7 +22,7 @@ ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 WATCH_ACTIVE_STATES = ("active", "blocked")
 WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class Message:
     correlation_key: str | None = None
     related_to: str | None = None
     supersedes: str | None = None
+    message_kind: str = "task"
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,8 @@ class Store:
               result_summary TEXT,
               correlation_key TEXT,
               related_to TEXT,
-              supersedes TEXT
+              supersedes TEXT,
+              message_kind TEXT NOT NULL DEFAULT 'task'
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_recipient_state_created
@@ -170,6 +172,7 @@ class Store:
         self._ensure_column(conn, "messages", "correlation_key", "TEXT")
         self._ensure_column(conn, "messages", "related_to", "TEXT")
         self._ensure_column(conn, "messages", "supersedes", "TEXT")
+        self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
 
@@ -211,6 +214,7 @@ class Store:
         correlation_key: str | None = None,
         related_to: str | None = None,
         supersedes: str | None = None,
+        message_kind: str = "task",
     ) -> Message:
         now = utc_now()
         message_id = new_message_id()
@@ -220,9 +224,9 @@ class Store:
             """
             INSERT INTO messages(
               id, sender, recipient, priority, summary, body_path, state, created_at, updated_at,
-              correlation_key, related_to, supersedes
+              correlation_key, related_to, supersedes, message_kind
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -237,6 +241,7 @@ class Store:
                 empty_to_none(correlation_key),
                 empty_to_none(related_to),
                 empty_to_none(supersedes),
+                normalize_message_kind(message_kind),
             ),
         )
         self.record_event(
@@ -252,6 +257,7 @@ class Store:
                 "correlation_key": empty_to_none(correlation_key),
                 "related_to": empty_to_none(related_to),
                 "supersedes": empty_to_none(supersedes),
+                "message_kind": normalize_message_kind(message_kind),
             },
         )
         conn.commit()
@@ -268,6 +274,7 @@ class Store:
             empty_to_none(correlation_key),
             empty_to_none(related_to),
             empty_to_none(supersedes),
+            normalize_message_kind(message_kind),
         )
 
     def get_role(self, conn: sqlite3.Connection, role: str) -> sqlite3.Row | None:
@@ -432,6 +439,7 @@ class Store:
         normalized_summary = normalize_summary(summary)
         clauses = [
             "recipient = ?",
+            "message_kind = 'task'",
             "state IN ('queued', 'notified', 'retrying', 'claimed', 'acknowledged')",
         ]
         params: list[Any] = [recipient]
@@ -713,6 +721,57 @@ class Store:
         )
         conn.commit()
         return updated
+
+    def complete_completion_notices(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        result_status: str = "done",
+        result_summary: str = "completion notice recorded",
+        limit: int = 50,
+        actor: str = "operator",
+    ) -> list[sqlite3.Row]:
+        now = utc_now()
+        rows = list(
+            conn.execute(
+                """
+                SELECT * FROM messages
+                WHERE recipient = ?
+                  AND message_kind = 'completion_notice'
+                  AND state IN ('claimed', 'acknowledged')
+                ORDER BY updated_at
+                LIMIT ?
+                """,
+                (role, limit),
+            )
+        )
+        completed: list[sqlite3.Row] = []
+        for row in rows:
+            updated = conn.execute(
+                """
+                UPDATE messages
+                SET state = 'completed',
+                    completed_at = ?,
+                    result_status = ?,
+                    result_summary = ?,
+                    updated_at = ?
+                WHERE id = ? AND recipient = ? AND state IN ('claimed', 'acknowledged')
+                RETURNING *
+                """,
+                (now, result_status, result_summary, now, row["id"], role),
+            ).fetchone()
+            if updated is not None:
+                completed.append(updated)
+                self.record_event(
+                    conn,
+                    "message.completed",
+                    actor,
+                    row["id"],
+                    {"status": result_status, "summary": result_summary, "previous_state": row["state"]},
+                )
+        conn.commit()
+        return completed
 
     def notify_role(self, conn: sqlite3.Connection, role: str, method: str = "auto") -> tuple[bool, str]:
         role_row = self.get_role(conn, role)
@@ -1277,6 +1336,13 @@ def normalize_priority(priority: str) -> str:
 
 def normalize_summary(summary: str) -> str:
     return " ".join(summary.strip().lower().split())
+
+
+def normalize_message_kind(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized not in ("task", "completion_notice"):
+        raise ValueError(f"Invalid message kind: {value}")
+    return normalized
 
 
 def empty_to_none(value: str | None) -> str | None:

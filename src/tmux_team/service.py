@@ -51,6 +51,7 @@ class TeamService:
         correlation_key: str | None = None,
         related_to: str | None = None,
         supersedes: str | None = None,
+        message_kind: str = "task",
         allow_duplicate: bool = False,
         actor: str | None = None,
     ) -> SendMessageResult:
@@ -66,6 +67,7 @@ class TeamService:
             "correlation_key": correlation_key,
             "related_to": related_to,
             "supersedes": supersedes,
+            "message_kind": message_kind,
             "allow_duplicate": allow_duplicate,
         }
         hooked = self.hook_runner.run(
@@ -88,6 +90,7 @@ class TeamService:
         correlation_key = optional_str(message_data.get("correlation_key"))
         related_to = optional_str(message_data.get("related_to"))
         supersedes = optional_str(message_data.get("supersedes"))
+        message_kind = str(message_data.get("message_kind") or message_kind)
         allow_duplicate = bool(message_data.get("allow_duplicate", allow_duplicate))
 
         role = self.store.get_role(conn, recipient)
@@ -122,6 +125,7 @@ class TeamService:
             correlation_key=correlation_key,
             related_to=related_to,
             supersedes=supersedes,
+            message_kind=message_kind,
         )
         self.hook_runner.run(
             self.store,
@@ -260,6 +264,7 @@ class TeamService:
             wake=reply_wake,
             notify_method="app-server-turn",
             related_to=row["id"],
+            message_kind="completion_notice",
             actor=actor or role,
         )
         return CompleteMessageResult(message=row, reply=reply)
@@ -308,6 +313,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
         "correlation_key": message.correlation_key,
         "related_to": message.related_to,
         "supersedes": message.supersedes,
+        "message_kind": message.message_kind,
     }
 
 
@@ -330,6 +336,11 @@ def optional_str(value: Any) -> str | None:
 
 
 def is_completion_reply(row: sqlite3.Row) -> bool:
+    try:
+        if row["message_kind"] == "completion_notice":
+            return True
+    except (IndexError, KeyError):
+        pass
     try:
         body = Path(str(row["body_path"])).read_text(encoding="utf-8")
     except OSError:

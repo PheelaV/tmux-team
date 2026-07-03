@@ -417,6 +417,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Queue a completion reply to the original sender and wake it when it is a managed role",
     )
     inbox_complete.add_argument("--reply-no-notify", action="store_true", help="Queue the reply without waking sender")
+    inbox_complete_replies = inbox_sub.add_parser(
+        "complete-replies", help="Complete claimed or acknowledged completion notices"
+    )
+    inbox_complete_replies.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
+    inbox_complete_replies.add_argument("--limit", type=int, default=50)
+    inbox_complete_replies.add_argument("--status", default="done")
+    inbox_complete_replies.add_argument("--summary", default="completion notice recorded")
 
     memory = subparsers.add_parser("memory", help="Inspect or update role scratchpad memory")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)
@@ -1272,6 +1279,20 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
             print(f"reply_skipped: {result.reply_skipped}", file=sys.stderr)
         return 0
 
+    if args.inbox_command == "complete-replies":
+        rows = service.store.complete_completion_notices(
+            conn,
+            role=args.role,
+            result_status=args.status,
+            result_summary=args.summary,
+            limit=args.limit,
+            actor=args.actor or args.role,
+        )
+        print(f"completed {len(rows)} completion notice(s) for {args.role}")
+        for row in rows:
+            print(message_one_line(row))
+        return 0
+
     return 2
 
 
@@ -1744,6 +1765,7 @@ def message_one_line(row) -> str:
 
 def message_metadata_line(row) -> str:
     return (
+        f"kind={row_value(row, 'message_kind', 'task') or 'task'} "
         f"correlation_key={row_value(row, 'correlation_key', None) or '-'} "
         f"related_to={row_value(row, 'related_to', None) or '-'} "
         f"supersedes={row_value(row, 'supersedes', None) or '-'}"
