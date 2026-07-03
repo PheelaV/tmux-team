@@ -414,6 +414,67 @@ runtime_dir = "{other_runtime}"
         self.assertIn("summary=collect active evidence", out)
         self.assertIn("claim_expires_at=", out)
 
+    def test_watch_lifecycle_and_status_verbose(self) -> None:
+        code, out, err = self.run_cli(
+            "watch",
+            "start",
+            "--role",
+            "collector",
+            "--summary",
+            "monitor external run",
+            "--terminal-condition",
+            "run terminalizes",
+            "--next-update-in",
+            "5m",
+            "--ref",
+            "msg_123",
+        )
+        self.assertEqual(code, 0, err)
+        watch_id = out.split()[0]
+        self.assertTrue(watch_id.startswith("watch_"))
+        self.assertIn("role=collector", out)
+        self.assertIn("state=active", out)
+        self.assertIn("next_update_at=", out)
+        self.assertIn("ref=msg_123", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "update",
+            watch_id,
+            "--role",
+            "collector",
+            "--summary",
+            "heartbeat ok",
+            "--next-update-in",
+            "10m",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=heartbeat ok", out)
+
+        code, out, err = self.run_cli("status", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("watches:", out)
+        self.assertIn(f"{watch_id} role=collector state=active", out)
+        self.assertIn("summary=heartbeat ok", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "complete",
+            watch_id,
+            "--role",
+            "collector",
+            "--status",
+            "done",
+            "--summary",
+            "run terminalized",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=done", out)
+
+        code, out, err = self.run_cli("watch", "list", "--role", "collector", "--state", "done")
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=run terminalized", out)
+
     def test_broadcast_creates_one_message_per_recipient(self) -> None:
         code, out, err = self.run_cli(
             "broadcast",

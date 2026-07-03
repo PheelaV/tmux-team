@@ -45,7 +45,16 @@ from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
-from .store import CLAIMABLE_STATES, ROLE_STATES, STALE_CLAIMED_STATE, Store, normalize_priority, parse_utc_datetime
+from .store import (
+    CLAIMABLE_STATES,
+    ROLE_STATES,
+    STALE_CLAIMED_STATE,
+    WATCH_ACTIVE_STATES,
+    WATCH_STATES,
+    Store,
+    normalize_priority,
+    parse_utc_datetime,
+)
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -98,6 +107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_memory(args, config)
             if args.command == "milestone":
                 return cmd_milestone(args, store, conn)
+            if args.command == "watch":
+                return cmd_watch(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
             if args.command == "pane":
@@ -434,6 +445,33 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_list.add_argument("--limit", type=int, default=50)
     milestone_list.add_argument("--json", action="store_true", help="Print JSON array instead of human output")
 
+    watch = subparsers.add_parser("watch", help="Track long-running role supervision work")
+    watch_sub = watch.add_subparsers(dest="watch_command", required=True)
+    watch_start = watch_sub.add_parser("start", help="Start a long-running supervision watch")
+    watch_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_start.add_argument("--summary", required=True, help="Concise supervision summary")
+    watch_start.add_argument("--terminal-condition", help="Condition that ends the watch")
+    watch_start.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+    watch_start.add_argument("--ref", dest="ref_id", help="Related message, job, artifact, or external id")
+
+    watch_update = watch_sub.add_parser("update", help="Record a watch heartbeat or blocker")
+    watch_update.add_argument("watch_id")
+    watch_update.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_update.add_argument("--summary", required=True, help="Current watch state")
+    watch_update.add_argument("--state", default="active", choices=WATCH_ACTIVE_STATES)
+    watch_update.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+
+    watch_complete = watch_sub.add_parser("complete", help="Complete a supervision watch")
+    watch_complete.add_argument("watch_id")
+    watch_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_complete.add_argument("--status", default="done", choices=("done", "failed", "cancelled"))
+    watch_complete.add_argument("--summary", required=True, help="Terminal watch summary")
+
+    watch_list = watch_sub.add_parser("list", help="List supervision watches")
+    watch_list.add_argument("--role", help="Owning role; defaults to --actor or all roles for operator")
+    watch_list.add_argument("--state", action="append", choices=WATCH_STATES, help="Filter state; repeatable")
+    watch_list.add_argument("--limit", type=int, default=50)
+
     role = subparsers.add_parser("role", help="Inspect or change role state")
     role_sub = role.add_subparsers(dest="role_command", required=True)
     role_sub.add_parser("list", help="List roles")
@@ -751,6 +789,11 @@ def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext
             args.role = policy_context.actor
         if args.actor is None:
             args.actor = policy_context.actor or "operator"
+    if args.command == "watch":
+        if getattr(args, "role", None) is None and policy_context.actor is not None:
+            args.role = policy_context.actor
+        if args.watch_command != "list" and args.role is None:
+            raise ValueError(f"watch {args.watch_command} --role is required unless --actor or ${ROLE_ENV} is set")
     if args.command == "codex" and args.codex_command == "session-context" and args.role is None:
         args.role = policy_context.actor
         if args.role is None:
@@ -835,6 +878,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
             authorize(config, policy_context, "milestone.list", role=args.role or "")
         return
 
+    if args.command == "watch":
+        authorize(config, policy_context, f"watch.{args.watch_command}", role=args.role or "")
+        return
+
     if args.command == "role" and args.role_command != "list":
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
@@ -913,6 +960,11 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
                 print("    active:")
                 for row in rows:
                     print(f"      {active_message_line(row)}")
+            watches = store.list_watches(conn, role=role["name"], states=WATCH_ACTIVE_STATES, limit=args.active_limit)
+            if watches:
+                print("    watches:")
+                for watch in watches:
+                    print(f"      {watch_one_line(watch)}")
     return 0
 
 
@@ -1015,6 +1067,59 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
             return 0
         for row in rows:
             print(format_milestone(row))
+        return 0
+
+    return 2
+
+
+def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.watch_command == "start":
+        row = store.start_watch(
+            conn,
+            role=args.role,
+            summary=args.summary,
+            created_by=args.actor or "operator",
+            terminal_condition=args.terminal_condition,
+            next_update_at=watch_next_update_at(args.next_update_in),
+            ref_id=args.ref_id,
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "update":
+        row = store.update_watch(
+            conn,
+            role=args.role,
+            watch_id=args.watch_id,
+            summary=args.summary,
+            status=args.state,
+            next_update_at=watch_next_update_at(args.next_update_in),
+            actor=args.actor or "operator",
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "complete":
+        row = store.complete_watch(
+            conn,
+            role=args.role,
+            watch_id=args.watch_id,
+            status=args.status,
+            summary=args.summary,
+            actor=args.actor or "operator",
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "list":
+        states = tuple(args.state) if args.state else WATCH_ACTIVE_STATES
+        rows = store.list_watches(conn, role=args.role, states=states, limit=args.limit)
+        if not rows:
+            role = args.role or "all roles"
+            print(f"no watches for {role}")
+            return 0
+        for row in rows:
+            print(watch_one_line(row))
         return 0
 
     return 2
@@ -1630,6 +1735,22 @@ def active_message_line(row) -> str:
     return " ".join(parts)
 
 
+def watch_one_line(row) -> str:
+    parts = [
+        row["id"],
+        f"role={row['role']}",
+        f"state={row['status']}",
+        f"age={format_age(row['created_at'])}",
+        f"updated={row['updated_at']}",
+    ]
+    if row["next_update_at"]:
+        parts.append(f"next_update_at={row['next_update_at']}")
+    if row["ref_id"]:
+        parts.append(f"ref={row['ref_id']}")
+    parts.append(f"summary={row['current_summary']}")
+    return " ".join(parts)
+
+
 def format_age(created_at: str) -> str:
     age = datetime.now(UTC) - parse_utc_datetime(created_at)
     seconds = max(0, int(age.total_seconds()))
@@ -1642,6 +1763,20 @@ def format_age(created_at: str) -> str:
     if hours < 48:
         return f"{hours}h"
     return f"{hours // 24}d"
+
+
+def watch_next_update_at(value: str | None) -> str | None:
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw[0] not in ("-", "+"):
+        raw = f"+{raw}"
+    duration = parse_duration(raw)
+    if duration is None or duration.total_seconds() <= 0:
+        raise ValueError("--next-update-in must be a positive duration such as 15m, 1h, or 2d")
+    return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
 
 
 def row_value(row, key: str, default=None):

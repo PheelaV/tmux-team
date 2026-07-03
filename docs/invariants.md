@@ -155,13 +155,23 @@ Message completion is durable state. Conversational completion replies are expli
 - After fan-out, the dispatcher checks `tmux-team status`, `inbox list`, or events for that message's state before routing follow-up work.
 - Plain `complete` remains available for scripts and operator-originated tasks that should not generate reply traffic.
 
+## Supervision Watches
+
+Long-running monitoring work must not be hidden as an indefinitely acknowledged inbox task.
+
+- Use `tmux-team watch start/update/complete` for ongoing supervision with heartbeat-style updates.
+- Watches are durable role-owned state with a current summary, last update, optional next expected update, optional terminal condition, and terminal status.
+- Watches appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
+- Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+- A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
+
 ## State
 
 The config and runtime store are the source of truth.
 
 - `.tmux-team/team.toml` records role names, pane targets, app-server endpoint, and Codex thread IDs.
 - Operator-facing team, role, and lifecycle configuration is TOML.
-- `team.sqlite` records messages, notifications, role state, events, and stable commits.
+- `team.sqlite` records messages, notifications, role state, watches, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
 - `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE` are pane-local process bindings for ergonomics only.
 - Bootstrap startup prompts must include explicit `--role <role>` commands because Codex tool shells may not inherit pane-local env.

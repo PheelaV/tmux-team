@@ -154,6 +154,23 @@ can_sleep = true
         with self.assertRaisesRegex(PolicyError, "send evidence to orchestrator"):
             authorize(config, PolicyContext(actor="collector"), "milestone.add", role="collector")
 
+    def test_watch_management_is_self_or_orchestrator(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "watch.start", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.start", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.update", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.complete", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.list", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "watch.start", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "watch.list", role="")
+
+        with self.assertRaisesRegex(PolicyError, "not authorized"):
+            authorize(config, PolicyContext(actor="implementer"), "watch.start", role="collector")
+
+        with self.assertRaisesRegex(PolicyError, "not authorized"):
+            authorize(config, PolicyContext(actor="implementer"), "watch.list", role="collector")
+
     def test_pane_capture_is_self_or_orchestrator_by_default(self) -> None:
         config = self.config()
 

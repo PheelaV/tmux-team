@@ -25,3 +25,16 @@ Invariant: reclaiming still happens through `tmux-team inbox next`; `inbox recla
 - Each row includes message id, display state, priority, sender, age, claim expiry when present, and summary.
 
 Invariant: verbose status is for supervision and triage. It does not imply delivery, acknowledgement, or completion beyond the durable message state it prints.
+
+### TT-FEAT-003: First-Class Long-Running Supervision Tasks
+
+Long-running supervision now has a durable `watch` primitive instead of requiring roles to keep ordinary inbox messages acknowledged indefinitely.
+
+- `watch start` creates an active role-owned watch with summary, optional terminal condition, optional next expected update, and optional reference id.
+- `watch update` records heartbeat or blocker state as `active` or `blocked`.
+- `watch complete` terminalizes the watch as `done`, `failed`, or `cancelled`.
+- `watch list` defaults to active/blocked watches so operational views stay focused.
+- `status --verbose` shows active watches under each role alongside active inbox messages.
+- The SQLite schema moved to version 2 with an additive `watches` table.
+
+Invariant: watches represent ongoing supervision state. They do not replace inbox assignment, handoff, evidence, or completion messaging.

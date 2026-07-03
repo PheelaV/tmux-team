@@ -140,6 +140,18 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
     if action == "milestone.list":
         return
 
+    if action == "watch.list":
+        role = resource.get("role")
+        if not role or actor == "orchestrator" or role == actor:
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to list watches for role {role!r}")
+
+    if action in ("watch.start", "watch.update", "watch.complete"):
+        role = _required_resource(action, resource, "role")
+        if actor == "orchestrator" or role == actor:
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to run {action} for role {role!r}")
+
     if action == "pane.capture":
         if actor == "orchestrator":
             return

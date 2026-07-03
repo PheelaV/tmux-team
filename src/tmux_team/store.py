@@ -19,8 +19,10 @@ MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
 STALE_CLAIMED_STATE = "stale_claimed"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
+WATCH_ACTIVE_STATES = ("active", "blocked")
+WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,25 @@ class Store:
               ref_id TEXT,
               payload_json TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS watches (
+              id TEXT PRIMARY KEY,
+              role TEXT NOT NULL,
+              status TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              current_summary TEXT NOT NULL,
+              terminal_condition TEXT,
+              ref_id TEXT,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_update_at TEXT NOT NULL,
+              next_update_at TEXT,
+              completed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_watches_role_status_updated
+              ON watches(role, status, updated_at);
             """
         )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -347,6 +368,163 @@ class Store:
                 LIMIT ?
                 """,
                 (now, role, limit),
+            )
+        )
+
+    def start_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        summary: str,
+        created_by: str,
+        terminal_condition: str | None = None,
+        next_update_at: str | None = None,
+        ref_id: str | None = None,
+    ) -> sqlite3.Row:
+        if self.get_role(conn, role) is None:
+            raise KeyError(f"Unknown role: {role}")
+        now = utc_now()
+        watch_id = new_watch_id()
+        conn.execute(
+            """
+            INSERT INTO watches(
+              id, role, status, summary, current_summary, terminal_condition, ref_id,
+              created_by, created_at, updated_at, last_update_at, next_update_at
+            )
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (watch_id, role, summary, summary, terminal_condition, ref_id, created_by, now, now, now, next_update_at),
+        )
+        self.record_event(
+            conn,
+            "watch.started",
+            created_by,
+            watch_id,
+            {"role": role, "summary": summary, "next_update_at": next_update_at, "ref_id": ref_id},
+        )
+        conn.commit()
+        return self.get_watch(conn, watch_id)
+
+    def update_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        watch_id: str,
+        summary: str,
+        status: str = "active",
+        next_update_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        if status not in WATCH_ACTIVE_STATES:
+            raise ValueError(f"Invalid active watch status: {status}")
+        row = self._watch_for_role(conn, role, watch_id)
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watches
+            SET status = ?,
+                current_summary = ?,
+                updated_at = ?,
+                last_update_at = ?,
+                next_update_at = ?
+            WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
+            RETURNING *
+            """,
+            (status, summary, now, now, next_update_at, watch_id, role),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot update watch {watch_id} in state {row['status']}")
+        self.record_event(
+            conn,
+            "watch.updated",
+            actor,
+            watch_id,
+            {"role": role, "status": status, "summary": summary, "next_update_at": next_update_at},
+        )
+        conn.commit()
+        return updated
+
+    def complete_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        watch_id: str,
+        status: str,
+        summary: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        if status not in ("done", "failed", "cancelled"):
+            raise ValueError(f"Invalid terminal watch status: {status}")
+        row = self._watch_for_role(conn, role, watch_id)
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watches
+            SET status = ?,
+                current_summary = ?,
+                updated_at = ?,
+                last_update_at = ?,
+                completed_at = ?,
+                next_update_at = NULL
+            WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
+            RETURNING *
+            """,
+            (status, summary, now, now, now, watch_id, role),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot complete watch {watch_id} in state {row['status']}")
+        self.record_event(
+            conn,
+            "watch.completed",
+            actor,
+            watch_id,
+            {"role": role, "status": status, "summary": summary},
+        )
+        conn.commit()
+        return updated
+
+    def list_watches(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str | None = None,
+        states: tuple[str, ...] | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if role:
+            clauses.append("role = ?")
+            params.append(role)
+        if states:
+            invalid = tuple(state for state in states if state not in WATCH_STATES)
+            if invalid:
+                raise ValueError(f"Invalid watch state: {invalid[0]}")
+            placeholders = ", ".join("?" for _ in states)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(states)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT * FROM watches
+                {where}
+                ORDER BY
+                  CASE status
+                    WHEN 'blocked' THEN 0
+                    WHEN 'active' THEN 1
+                    WHEN 'failed' THEN 2
+                    WHEN 'done' THEN 3
+                    ELSE 4
+                  END,
+                  updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
             )
         )
 
@@ -953,6 +1131,18 @@ class Store:
             allowed = ", ".join(allowed_states)
             raise ValueError(f"Cannot {action} message {row['id']} in state {row['state']}; expected one of: {allowed}")
 
+    def get_watch(self, conn: sqlite3.Connection, watch_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown watch: {watch_id}")
+        return row
+
+    def _watch_for_role(self, conn: sqlite3.Connection, role: str, watch_id: str) -> sqlite3.Row:
+        row = self.get_watch(conn, watch_id)
+        if row["role"] != role:
+            raise PermissionError(f"Watch {watch_id} belongs to {row['role']}, not {role}")
+        return row
+
 
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
@@ -978,6 +1168,12 @@ def new_message_id() -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
     return f"msg_{stamp}_{suffix}"
+
+
+def new_watch_id() -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    suffix = secrets.token_hex(3)
+    return f"watch_{stamp}_{suffix}"
 
 
 def normalize_priority(priority: str) -> str:

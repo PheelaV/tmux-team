@@ -4,8 +4,13 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Added `tmux-team watch start/list/update/complete` for long-running supervision tasks with heartbeat-style status.
 - Added `tmux-team status --verbose` with bounded active message summaries per role.
 - Added `tmux-team inbox reclaimable` and `stale_claimed` status visibility so expired claimed messages are surfaced as recoverable work.
+
+Migration notes:
+
+- Existing `team.sqlite` stores migrate additively from schema version 1 to 2 when opened; the new `watches` table is created automatically.
 
 ## 0.1.3 - 2026-07-03
 

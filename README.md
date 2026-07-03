@@ -177,6 +177,9 @@ tmux-team inbox next --role orchestrator
 tmux-team inbox reclaimable --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
+tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
+tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
+tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team ext list
 tmux-team ext doctor
@@ -187,6 +190,8 @@ tmux-team resume
 `inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
 
 Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary.
+
+Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until a terminal condition is reached.
 
 `broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
 
