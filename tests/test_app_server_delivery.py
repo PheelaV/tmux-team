@@ -79,11 +79,13 @@ notify_method = "app-server-turn"
         self.assertEqual(server.turn_start_params["threadId"], "thread_123")
         wake_text = server.turn_start_params["input"][0]["text"]
         self.assertIn("Inbox wake: 1 pending message", wake_text)
-        self.assertIn("Wake notice only", wake_text)
+        self.assertIn("tmux-team inbox message pending", wake_text)
+        self.assertIn("From: orchestrator", wake_text)
+        self.assertIn("Priority: NORMAL", wake_text)
+        self.assertIn("Summary: fix calculator regression", wake_text)
+        self.assertIn("Pending: 1 total, 0 urgent", wake_text)
         self.assertIn("loaded role loop", wake_text)
-        self.assertIn("drain until empty", wake_text)
         self.assertNotIn("tmux-team inbox next", wake_text)
-        self.assertNotIn("tmux-team", wake_text)
         self.assertNotIn("tmux-team memory show", wake_text)
         self.assertNotIn("tmux-team memory append", wake_text)
         self.assertNotIn("--config", wake_text)
@@ -104,6 +106,48 @@ notify_method = "app-server-turn"
         self.assertEqual(notification["method"], "app-server-turn")
         self.assertEqual(notification["state"], "submitted")
         self.assertIn("turn_fake", notification["details"])
+
+    def test_urgent_app_server_wake_includes_preemption_subject(self) -> None:
+        with FakeAppServer() as server:
+            code, _out, err = self.run_cli(
+                "codex",
+                "bind",
+                "implementer",
+                "--endpoint",
+                server.endpoint,
+                "--thread-id",
+                "thread_123",
+            )
+            self.assertEqual(code, 0, err)
+
+            with patch("socket.create_connection", server.create_connection):
+                code, out, err = self.run_cli(
+                    "send",
+                    "--to",
+                    "implementer",
+                    "--from",
+                    "orchestrator",
+                    "--priority",
+                    "urgent",
+                    "--summary",
+                    "RESTART FREEZE: checkpoint current implementation state and park",
+                    "--body",
+                    "FREEZE BODY SHOULD STAY IN SQLITE",
+                    "--notify-method",
+                    "app-server-turn",
+                )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("notify: app-server turn submitted", out)
+        wake_text = server.turn_start_params["input"][0]["text"]
+        self.assertIn("URGENT tmux-team inbox message pending", wake_text)
+        self.assertIn("From: orchestrator", wake_text)
+        self.assertIn("Priority: URGENT", wake_text)
+        self.assertIn("Summary: RESTART FREEZE: checkpoint current implementation state and park", wake_text)
+        self.assertIn("Pending: 1 total, 1 urgent", wake_text)
+        self.assertIn("stop at the current safe point", wake_text)
+        self.assertIn("before continuing other work", wake_text)
+        self.assertNotIn("FREEZE BODY SHOULD STAY IN SQLITE", wake_text)
 
     def test_app_server_endpoint_must_be_loopback(self) -> None:
         self.assertTrue(is_loopback_host("localhost"))

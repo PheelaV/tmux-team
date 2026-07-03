@@ -530,10 +530,17 @@ def write_team_config(
 
 
 def write_role_env_files(config_path: Path, role_bindings: dict[str, RoleBinding]) -> None:
-    for binding in role_bindings.values():
+    roles_by_worktree: dict[Path, list[str]] = {}
+    for role, binding in role_bindings.items():
+        roles_by_worktree.setdefault(binding.worktree.resolve(), []).append(role)
+
+    for role, binding in role_bindings.items():
         path = binding.worktree / ENV_FILE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{CONFIG_PATH_ENV}={config_path}\n", encoding="utf-8")
+        lines = [f"{CONFIG_PATH_ENV}={config_path}"]
+        if len(roles_by_worktree[binding.worktree.resolve()]) == 1:
+            lines.append(f"{ROLE_ENV}={role}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_role_scratchpads(config_path: Path, *, initial_goal: str | None) -> None:
@@ -829,17 +836,62 @@ def role_shell_command(
     return keep_open_command(command, "role TUI")
 
 
+def role_resume_shell_command(
+    codex_bin: str,
+    endpoint: str,
+    project_root: Path,
+    config_path: Path,
+    role: str,
+    thread_id: str,
+    *,
+    role_yolo: bool = False,
+    role_profile: str | None = None,
+    role_launch_options: RoleLaunchOptions | None = None,
+) -> str:
+    role_launch_options = role_launch_options or RoleLaunchOptions()
+    profile = role_launch_options.profile or role_profile
+    codex_args = [codex_bin, "resume"]
+    if profile:
+        codex_args.extend(["--profile", profile])
+    if role_yolo:
+        codex_args.append("--dangerously-bypass-approvals-and-sandbox")
+    if role_launch_options.model:
+        codex_args.extend(["--model", role_launch_options.model])
+    if role_launch_options.reasoning_effort:
+        codex_args.extend(["-c", f"model_reasoning_effort={json.dumps(role_launch_options.reasoning_effort)}"])
+    for override in role_launch_options.config_overrides:
+        codex_args.extend(["-c", override])
+    codex_args.extend(["--cd", str(project_root)])
+    codex_args.extend(["--remote", endpoint])
+    codex_args.append(thread_id)
+    codex_args.append(role_resume_prompt(role))
+    env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *codex_args]
+    command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
+    return keep_open_command(command, "role TUI")
+
+
 def role_startup_prompt(role: str) -> str:
     return (
         f"You are the `{role}` role in a tmux-team managed Codex team.\n"
         "Use the start-tmux-team skill now. Read its invariants before acting.\n"
+        "Use the explicit role commands below. Short commands may work when role discovery succeeds, but Codex tool shells do not always inherit TMUX_TEAM_ROLE and shared worktrees are ambiguous.\n"
         "Startup loop:\n"
-        "1. Run `tmux-team memory show` to load durable role state.\n"
+        f"1. Run `tmux-team memory show --role {role}` to load durable role state.\n"
         "2. Append memory only for high-value durable changes: new active task, changed boundary, blocker, long-running work, final result, or next action. Do not append routine startup/parking/status chatter.\n"
-        "3. Run `tmux-team inbox next`.\n"
+        f"3. Run `tmux-team inbox next --role {role}`.\n"
         "4. If there is no pending message, park and wait for app-server wake. Do not invent work.\n"
         "5. If a message exists, ack it, compare it against scratchpad boundaries, do the work, update scratchpad only if durable state changed materially, then complete it concisely.\n"
+        f"Use `tmux-team inbox ack <message-id> --role {role}` and `tmux-team inbox complete <message-id> --role {role} ...` for the claimed message.\n"
         "Use `--reply-to-sender` for delegated work results, but not for pure acknowledgement loops.\n"
+    )
+
+
+def role_resume_prompt(role: str) -> str:
+    return (
+        f"You are resuming the `{role}` role in a tmux-team managed Codex team after sleep.\n"
+        "Use the start-tmux-team skill if the operating framework is not already loaded in this context.\n"
+        f"Run `tmux-team memory show --role {role}` to reload durable role state, then `tmux-team inbox next --role {role}`.\n"
+        "If there is no pending message, park and wait for app-server wake. Do not invent work.\n"
     )
 
 
@@ -865,7 +917,8 @@ def keep_open_command(command: str, label: str) -> str:
         f"printf '\\n[tmux-team] {label} exited with status %s. Shell left open for inspection.\\n' \"$status\"\n"
         'exec "${SHELL:-/bin/sh}"\n'
     )
-    return f"sh -lc {shlex.quote(script)}"
+    shell = "bash" if shutil.which("bash") else "sh"
+    return f"{shell} -lc {shlex.quote(script)}"
 
 
 def role_spawn_command(
@@ -891,6 +944,44 @@ def role_spawn_command(
         project_root,
         config_path,
         role,
+        role_yolo=role_yolo,
+        role_profile=role_profile,
+        role_launch_options=role_launch_options,
+    )
+    if agent_layout == "grouped":
+        if index == 0:
+            return new_window_command(tmux_bin, session, agents_window, project_root, command, print_pane=print_pane)
+        return split_window_command(
+            tmux_bin, f"{session}:{agents_window}", project_root, command, print_pane=print_pane
+        )
+    return new_window_command(tmux_bin, session, tt_name(role), project_root, command, print_pane=print_pane)
+
+
+def role_resume_spawn_command(
+    tmux_bin: str,
+    codex_bin: str,
+    session: str,
+    endpoint: str,
+    project_root: Path,
+    config_path: Path,
+    role: str,
+    thread_id: str,
+    index: int,
+    agent_layout: str,
+    agents_window: str,
+    role_yolo: bool,
+    role_profile: str | None,
+    role_launch_options: RoleLaunchOptions,
+    *,
+    print_pane: bool = False,
+) -> list[str]:
+    command = role_resume_shell_command(
+        codex_bin,
+        endpoint,
+        project_root,
+        config_path,
+        role,
+        thread_id,
         role_yolo=role_yolo,
         role_profile=role_profile,
         role_launch_options=role_launch_options,

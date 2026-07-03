@@ -2,6 +2,16 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## 0.1.3 - 2026-07-03
+
+- Added `tmux-team pane capture <role>` for read-only live supervision of managed role pane output, with `--lines`/`--limit` and `--offset` for paging history.
+- Added `tmux-team broadcast` to queue one durable message per recipient while preserving individual ack/completion state; recipient shaping now uses mutually exclusive `--only` or `--exclude` filters.
+- Added priority/sender/summary context to app-server wake prompts, with explicit preemption wording for urgent messages.
+- Added `tmux-team resume` to restore managed role panes from sleep snapshots using `codex resume <saved-session>`.
+- Fixed role startup prompts to use explicit `--role <role>` commands so Codex tool shells that do not inherit `TMUX_TEAM_ROLE` still follow the documented loop.
+- Wrote `TMUX_TEAM_ROLE` into `.tmux-team/team.env` only for unique role worktrees; shared worktrees remain config-only to avoid ambiguous role discovery.
+- Preferred `bash -lc` for managed tmux wrapper commands when bash is available, reducing shell-profile noise on environments that expect bash features.
+
 ## 0.1.2 - 2026-07-02
 
 - Added append-only milestones via `tmux-team milestone add/list` and `.tmux-team/runtime/milestones.jsonl`.

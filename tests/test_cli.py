@@ -11,7 +11,14 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from tmux_team.bootstrap import BootstrapError, default_session_name, prepare_role_worktrees, role_startup_prompt
+from tmux_team.bootstrap import (
+    BootstrapError,
+    RoleBinding,
+    default_session_name,
+    prepare_role_worktrees,
+    role_startup_prompt,
+    write_role_env_files,
+)
 from tmux_team.cli import infer_role_from_tmux_pane, main
 from tmux_team.config import RoleConfig, TeamConfig, load_config
 from tmux_team.store import Store
@@ -43,6 +50,7 @@ state = "paused"
 [roles.collector]
 mode = "human_visible"
 state = "active"
+pane = "test:collector.0"
 worktree = "{worktree}"
 requires_stable_commit = true
 """,
@@ -248,6 +256,40 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn(f"id: {message_id}", out)
 
+    def test_role_env_file_records_role_only_for_unique_worktree(self) -> None:
+        collector = self.root / "collector"
+        trainer = self.root / "trainer"
+        collector.mkdir(exist_ok=True)
+        trainer.mkdir()
+        write_role_env_files(
+            self.config,
+            {
+                "collector": RoleBinding(thread_id="thread-collector", pane="%1", worktree=collector),
+                "trainer": RoleBinding(thread_id="thread-trainer", pane="%2", worktree=trainer),
+            },
+        )
+
+        collector_env = (collector / ".tmux-team" / "team.env").read_text(encoding="utf-8")
+        trainer_env = (trainer / ".tmux-team" / "team.env").read_text(encoding="utf-8")
+        self.assertIn(f"TMUX_TEAM_CONFIG={self.config}", collector_env)
+        self.assertIn("TMUX_TEAM_ROLE=collector", collector_env)
+        self.assertIn("TMUX_TEAM_ROLE=trainer", trainer_env)
+
+    def test_role_env_file_omits_role_for_shared_worktree(self) -> None:
+        shared = self.root / "shared"
+        shared.mkdir()
+        write_role_env_files(
+            self.config,
+            {
+                "orchestrator": RoleBinding(thread_id="thread-orch", pane="%1", worktree=shared),
+                "implementer": RoleBinding(thread_id="thread-impl", pane="%2", worktree=shared),
+            },
+        )
+
+        env_text = (shared / ".tmux-team" / "team.env").read_text(encoding="utf-8")
+        self.assertIn(f"TMUX_TEAM_CONFIG={self.config}", env_text)
+        self.assertNotIn("TMUX_TEAM_ROLE=", env_text)
+
     def test_tmux_pane_option_infers_role_when_worktree_is_shared(self) -> None:
         config = TeamConfig(
             name="test",
@@ -304,6 +346,180 @@ runtime_dir = "{other_runtime}"
         )
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
+
+    def test_broadcast_creates_one_message_per_recipient(self) -> None:
+        code, out, err = self.run_cli(
+            "broadcast",
+            "--only",
+            "orchestrator,collector",
+            "--from",
+            "operator",
+            "--summary",
+            "checkpoint",
+            "--body",
+            "Report current status.",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("broadcast: 2 recipient(s)", out)
+        self.assertEqual(out.count(" queued to="), 2)
+        self.assertIn("to=orchestrator", out)
+        self.assertIn("to=collector", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=checkpoint", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=checkpoint", out)
+
+    def test_broadcast_rejects_only_and_exclude_together(self) -> None:
+        code, out, err = self.run_cli(
+            "broadcast",
+            "--only",
+            "collector",
+            "--exclude",
+            "trainer",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "checkpoint",
+            "--body",
+            "Report current status.",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not allowed with argument", err)
+
+    def test_broadcast_rejects_unknown_excluded_role(self) -> None:
+        code, out, err = self.run_cli(
+            "broadcast",
+            "--exclude",
+            "collectro",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "checkpoint",
+            "--body",
+            "Report current status.",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Unknown excluded role: collectro", err)
+
+    def test_broadcast_defaults_to_all_roles_except_sender(self) -> None:
+        code, out, err = self.run_cli(
+            "broadcast",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "checkpoint",
+            "--body",
+            "Report current status.",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("to=collector", out)
+        self.assertIn("to=trainer", out)
+        self.assertNotIn("to=orchestrator", out)
+        self.assertIn("blocked: role trainer is paused", err)
+
+    def test_pane_capture_reads_configured_role_pane(self) -> None:
+        fake_dir = self.root / "pane-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "pane-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "capture-pane" ]; then
+  printf 'line one\\nline two\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli("pane", "capture", "collector", "--lines", "20", "--tmux-bin", str(tmux))
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("# pane collector", out)
+        self.assertIn("line one\nline two", out)
+        self.assertIn("capture-pane -p -t", log_path.read_text(encoding="utf-8"))
+
+    def test_pane_capture_supports_offset(self) -> None:
+        fake_dir = self.root / "pane-offset-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "pane-offset-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "capture-pane" ]; then
+  printf 'older line\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "pane",
+            "capture",
+            "collector",
+            "--limit",
+            "20",
+            "--offset",
+            "5",
+            "--tmux-bin",
+            str(tmux),
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("# pane collector", out)
+        self.assertIn("20 lines offset 5", out)
+        self.assertIn("older line", out)
+        self.assertIn("capture-pane -p -t test:collector.0 -S -25 -E -6", log_path.read_text(encoding="utf-8"))
+
+    def test_pane_capture_policy_allows_orchestrator_supervision(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "pane",
+            "capture",
+            "orchestrator",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to run pane.capture", err)
+
+        completed = subprocess.CompletedProcess(["tmux"], 0, stdout="orchestrator pane\n", stderr="")
+        with patch("tmux_team.cli.subprocess.run", return_value=completed):
+            code, out, err = self.run_main(
+                "--config",
+                str(self.config),
+                "--actor",
+                "orchestrator",
+                "pane",
+                "capture",
+                "collector",
+            )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("orchestrator pane", out)
 
     def test_complete_can_reply_to_sender(self) -> None:
         code, out, err = self.run_cli(
@@ -710,6 +926,7 @@ can_notify = ["orchestrator"]
             ),
             (("stable", "approve", "abc123"), "not authorized to approve stable commits"),
             (("sleep", "--dry-run"), "not authorized to sleep the team"),
+            (("resume", "--dry-run"), "not authorized to resume the team"),
         )
         for command, expected_error in cases:
             with self.subTest(command=command):
@@ -910,6 +1127,11 @@ can_notify = ["orchestrator"]
     def test_role_startup_prompt_discourages_memory_spam(self) -> None:
         prompt = role_startup_prompt("collector")
 
+        self.assertIn("tmux-team memory show --role collector", prompt)
+        self.assertIn("tmux-team inbox next --role collector", prompt)
+        self.assertIn("tmux-team inbox ack <message-id> --role collector", prompt)
+        self.assertIn("tmux-team inbox complete <message-id> --role collector", prompt)
+        self.assertIn("shared worktrees are ambiguous", prompt)
         self.assertIn("Append memory only for high-value durable changes", prompt)
         self.assertIn("Do not append routine startup/parking/status chatter", prompt)
         self.assertNotIn("missing or stale", prompt)
@@ -950,7 +1172,8 @@ can_notify = ["orchestrator"]
         self.assertIn("codex app-server --listen ws://127.0.0.1:4500", out)
         self.assertIn(f"codex --cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
         self.assertIn("You are the `orchestrator` role in a tmux-team managed Codex team.", out)
-        self.assertIn("tmux-team memory show", out)
+        self.assertIn("tmux-team memory show --role orchestrator", out)
+        self.assertIn("tmux-team inbox next --role orchestrator", out)
         self.assertIn(f"TMUX_TEAM_CONFIG={generated_config}", out)
         self.assertIn("TMUX_TEAM_ROLE=orchestrator", out)
         self.assertIn("[roles.orchestrator]", out)
@@ -1290,6 +1513,26 @@ can_notify = ["orchestrator"]
         self.assertIn("orchestrator: state=paused", out)
         self.assertIn("implementer: state=paused", out)
 
+    def test_resume_dry_run_plans_codex_resume_from_sleep_snapshot(self) -> None:
+        self.write_remote_tui_config()
+        snapshot = self.write_sleep_snapshot()
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"snapshot: {snapshot.resolve()}", out)
+        self.assertIn("session: tt", out)
+        self.assertIn("endpoint: ws://127.0.0.1:4500", out)
+        self.assertIn("roles: 2", out)
+        self.assertIn("orchestrator: thread_id=thread-orch", out)
+        self.assertIn("implementer: thread_id=thread-impl", out)
+        self.assertIn("codex resume", out)
+        self.assertIn("--remote ws://127.0.0.1:4500 thread-orch", out)
+        self.assertIn("--remote ws://127.0.0.1:4500 thread-impl", out)
+        self.assertIn("tmux new-window -t tt -n tt-agents", out)
+        self.assertIn("tmux split-window -t tt:tt-agents", out)
+        self.assertIn("dry-run: no tmux panes created", out)
+
     def test_app_server_wake_prompt_tells_role_to_drain_multiple_messages(self) -> None:
         store = Store(TeamConfig(name="test", runtime_dir=self.root / "runtime", roles={}))
 
@@ -1382,6 +1625,10 @@ exit 0
 
     def write_remote_tui_config(self) -> None:
         runtime = self.root / "runtime"
+        orchestrator = self.root / "orchestrator"
+        implementer = self.root / "implementer"
+        orchestrator.mkdir(exist_ok=True)
+        implementer.mkdir(exist_ok=True)
         self.config.write_text(
             f"""[team]
 name = "test-team"
@@ -1391,6 +1638,7 @@ runtime_dir = "{runtime}"
 mode = "app_server_remote_tui"
 state = "active"
 pane = "tt:tt-agents.0"
+worktree = "{orchestrator}"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-orch"
@@ -1399,12 +1647,90 @@ codex_thread_id = "thread-orch"
 mode = "app_server_remote_tui"
 state = "active"
 pane = "tt:tt-agents.1"
+worktree = "{implementer}"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-impl"
 """,
             encoding="utf-8",
         )
+
+    def write_sleep_snapshot(self) -> Path:
+        sleep_dir = self.root / "runtime" / "sleeps"
+        sleep_dir.mkdir(parents=True)
+        orchestrator = self.root / "orchestrator"
+        implementer = self.root / "implementer"
+        snapshot = sleep_dir / "latest.toml"
+        snapshot.write_text(
+            f"""schema_version = 1
+sleep_id = "sleep_test"
+created_at = "2026-07-03T00:00:00+00:00"
+dry_run = false
+pause_roles = true
+
+[team]
+name = "test-team"
+project_root = "{self.root}"
+config_path = "{self.config}"
+runtime_dir = "{self.root / "runtime"}"
+
+[tmux]
+session = "tt"
+kill_session = false
+
+[roles.orchestrator]
+mode = "app_server_remote_tui"
+state = "active"
+pane = "tt:tt-agents.0"
+worktree = "{orchestrator}"
+
+[roles.orchestrator.capabilities]
+notify_method = "app-server-turn"
+
+[roles.orchestrator.app_server]
+endpoint = "ws://127.0.0.1:4500"
+thread_id = "thread-orch"
+timeout = 10.0
+
+[roles.orchestrator.tmux]
+target = "tt:tt-agents.0"
+session = "tt"
+window_id = "@3"
+window_name = "tt-agents"
+pane_id = "%10"
+pane_title = "tt-orchestrator"
+pane_dead = false
+current_command = "codex"
+live = true
+
+[roles.implementer]
+mode = "app_server_remote_tui"
+state = "active"
+pane = "tt:tt-agents.1"
+worktree = "{implementer}"
+
+[roles.implementer.capabilities]
+notify_method = "app-server-turn"
+
+[roles.implementer.app_server]
+endpoint = "ws://127.0.0.1:4500"
+thread_id = "thread-impl"
+timeout = 10.0
+
+[roles.implementer.tmux]
+target = "tt:tt-agents.1"
+session = "tt"
+window_id = "@3"
+window_name = "tt-agents"
+pane_id = "%11"
+pane_title = "tt-implementer"
+pane_dead = false
+current_command = "codex"
+live = true
+""",
+            encoding="utf-8",
+        )
+        return snapshot
 
     def write_fake_lifecycle_tmux(self) -> tuple[Path, Path]:
         fake_dir = self.root / "lifecycle-bin"
