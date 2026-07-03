@@ -15,9 +15,9 @@ It is not the queue. The SQLite inbox remains authoritative for task delivery, c
 Every newly spawned role should receive a startup prompt that says:
 
 1. load the `start-tmux-team` skill and invariants;
-2. run `tmux-team memory show`;
+2. run `tmux-team memory show --role <role>` unless role discovery is known to work;
 3. create or update memory if missing/stale;
-4. run `tmux-team inbox next`;
+4. run `tmux-team inbox next --role <role>` unless role discovery is known to work;
 5. if no message exists, park;
 6. if a message exists, ack, compare against boundaries, work, update memory, and complete.
 

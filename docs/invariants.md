@@ -102,6 +102,17 @@ The milestone log is the operator-facing timeline.
 - Only the operator/control plane and orchestrator record milestones by default. Other roles report evidence or blockers through inbox completion; the orchestrator decides whether the result is milestone-worthy.
 - Query from the control plane with `tmux-team milestone list --today` or `tmux-team milestone list --since -4h`.
 
+## Supervision
+
+The operator and orchestrator may inspect managed role panes.
+
+- Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
+- `--lines` or `--limit` controls how much history is printed. `--offset` skips the newest lines so the caller can page back.
+- Pane capture is for live progress inspection, stuck-turn diagnosis, and operator overview.
+- Pane capture is not a delivery, acknowledgement, or completion mechanism.
+- Do not scrape pane output into scratchpad memory or milestones unless it represents a durable result that still belongs there.
+- By default, roles can inspect themselves, the orchestrator can inspect all roles, and other cross-role inspection requires explicit policy.
+
 ## Delivery
 
 Never use tmux stdin as the production wake path for Codex roles.
@@ -111,6 +122,8 @@ Never use tmux stdin as the production wake path for Codex roles.
 - Do not rely on pane capture to prove delivery.
 - Copy mode, active composers, approval prompts, and SSH disconnects must not corrupt messages.
 - Wake prompts are blunt interrupts, not operating manuals. They should say there is pending work and point at `tmux-team inbox next`; the role skill, scratchpad, and team config carry the protocol.
+- App-server wake prompts may include compact metadata for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. They must not include the task body.
+- If an urgent message is pending, the app-server wake must clearly tell the role to stop at the current safe point and claim the urgent message before continuing other work.
 
 Production Codex wake delivery is:
 
@@ -124,6 +137,8 @@ SQLite inbox message
 `send-keys` is a debug/unsafe path only and must fail closed when tmux reports copy mode.
 
 Initial bootstrap goals are orchestrator inputs only. `--goal` and `--goal-file` create the initial operator-to-orchestrator message; they are not role startup prompts. Keep them to objective, boundaries, and success criteria, then let the orchestrator send scoped role messages.
+
+`tmux-team broadcast` is a convenience wrapper around durable send. It must create separate messages per recipient so every role has independent claim, ack, completion, and reply state. It must not create a shared message that multiple roles compete to claim. Recipient shaping must use either `--only` or `--exclude`, not both.
 
 ## Completion Tracking
 
@@ -146,8 +161,10 @@ The config and runtime store are the source of truth.
 - `team.sqlite` records messages, notifications, role state, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
 - `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE` are pane-local process bindings for ergonomics only.
+- Bootstrap startup prompts must include explicit `--role <role>` commands because Codex tool shells may not inherit pane-local env.
 - Role worktrees also get a `.tmux-team/team.env` pointer back to the current team config, so commands from Codex tool shells can rediscover the team even when process env is not inherited.
-- Tmux pane option `@tmux-team-role` is the pane-local role fallback, especially when roles share one worktree.
+- `.tmux-team/team.env` may include `TMUX_TEAM_ROLE` only when exactly one role owns that worktree. Shared worktrees must stay config-only because a single role value would be ambiguous.
+- Tmux pane option `@tmux-team-role` is the pane-local role fallback when `TMUX_PANE` is available.
 - Explicit CLI flags override env, pointer-file discovery, and pane/cwd inference.
 - Spawned or respawned role panes must receive fresh process env, pointer files, pane labels, and pane options from the current config; do not use tmux session-global role env.
 - Skill availability is not enough for reset safety. A role that has lost context must recover the role contract from the startup prompt, skill/invariants files, scratchpad memory, and bound config before claiming new work.
@@ -156,12 +173,15 @@ If a role pane target changes, config must change with it.
 
 ## Sleep
 
-`tmux-team sleep` is the lifecycle boundary for tearing down a visible team.
+`tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
 
 - It snapshots role state, pane targets, tmux session/window/pane IDs, and app-server thread bindings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
 - It tears down managed role/app-server windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
+- Resume reads the latest or specified sleep snapshot, recreates the app-server/role panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids.
+- Resume must update config/runtime pane and app-server bindings after recreating panes.
+- Resume reactivates roles by default; use `--no-reactivate-roles` when the operator wants to inspect before accepting work.
 
 ## Resizing
 

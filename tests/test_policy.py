@@ -27,6 +27,7 @@ notify_method = "display-message"
 [roles.orchestrator.policy]
 can_send_to = ["implementer"]
 can_notify = ["implementer"]
+can_capture_panes = ["collector"]
 can_use_send_keys = true
 can_change_role_state = true
 can_bind_app_server = true
@@ -44,6 +45,7 @@ can_sleep = true
         self.assertNotIn("policy", role.capabilities)
         self.assertEqual(role.policy.can_send_to, ("implementer",))
         self.assertEqual(role.policy.can_notify, ("implementer",))
+        self.assertEqual(role.policy.can_capture_panes, ("collector",))
         self.assertTrue(role.policy.can_use_send_keys)
         self.assertTrue(role.policy.can_change_role_state)
         self.assertTrue(role.policy.can_bind_app_server)
@@ -140,6 +142,7 @@ can_sleep = true
         authorize(config, context, "codex.bind", role="orchestrator")
         authorize(config, context, "stable.approve", role="global")
         authorize(config, context, "team.sleep")
+        authorize(config, context, "team.resume")
 
     def test_milestones_are_operator_or_orchestrator_only(self) -> None:
         config = self.config()
@@ -149,6 +152,21 @@ can_sleep = true
 
         with self.assertRaisesRegex(PolicyError, "send evidence to orchestrator"):
             authorize(config, PolicyContext(actor="collector"), "milestone.add", role="collector")
+
+    def test_pane_capture_is_self_or_orchestrator_by_default(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "pane.capture", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "pane.capture", role="collector")
+        authorize(config, PolicyContext(actor="implementer"), "pane.capture", role="implementer")
+
+        with self.assertRaisesRegex(PolicyError, "not authorized to run pane.capture"):
+            authorize(config, PolicyContext(actor="implementer"), "pane.capture", role="collector")
+
+    def test_role_policy_can_allow_pane_capture(self) -> None:
+        config = self.config(RolePolicy(can_capture_panes=("collector",)))
+
+        authorize(config, PolicyContext(actor="implementer"), "pane.capture", role="collector")
 
     def test_permissive_policy_mode_is_breakglass(self) -> None:
         config = self.config()

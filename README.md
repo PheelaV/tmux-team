@@ -83,6 +83,7 @@ Watch progress from the control pane:
 tmux-team status
 tmux-team inbox list --role orchestrator
 tmux-team inbox list --role implementer
+tmux-team pane capture implementer --lines 80 --offset 0
 tmux-team milestone list --today
 ```
 
@@ -90,6 +91,7 @@ Stop the managed team without killing your control pane:
 
 ```bash
 tmux-team sleep
+tmux-team resume
 ```
 
 ## How It Works
@@ -168,17 +170,25 @@ Manual CLI operations are still available:
 tmux-team init --name example-team --runtime-dir /tmp/tmux-team-example
 tmux-team status
 tmux-team send --to orchestrator --summary "test failed" --body-file report.md
+tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
+tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
 tmux-team inbox next --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
+tmux-team pane capture collector --lines 120 --offset 40
 tmux-team ext list
 tmux-team ext doctor
 tmux-team sleep
+tmux-team resume
 ```
 
 `inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
 
-Role panes spawned by bootstrap are bound to team config and role. Inside a role pane, agents can use short commands such as `tmux-team memory show`, `tmux-team inbox next`, and `tmux-team inbox complete <id> --reply-to-sender`; explicit `--config` and `--role` flags remain overrides for operator scripts and ad-hoc control commands. The binding uses pane-local env when available, plus a `.tmux-team/team.env` worktree pointer and tmux pane role metadata for Codex tool shells.
+`broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
+
+`pane capture` reads tmux pane output for live supervision. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for the orchestrator or operator to inspect present progress that has not yet reached inbox completion or scratchpad memory. It must not be used as delivery confirmation; durable state still lives in SQLite messages, notifications, milestones, and memory.
+
+Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 
 For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks.
 
@@ -214,6 +224,8 @@ Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the co
 Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime-dir`, `TMUX_TEAM_HOME`, or `[team].runtime_dir` in `.tmux-team/team.toml`; that is also the precedence order.
 
 `tmux-team sleep` snapshots role state, pane targets, tmux session/window/pane IDs, and Codex app-server thread bindings before tearing down managed role/app-server windows. It leaves `tt-control` alive by default and marks active/draining roles paused so stale bindings do not receive new work. Use `tmux-team sleep --dry-run` to inspect the plan first.
+
+`tmux-team resume` reads `.tmux-team/runtime/sleeps/latest.toml` by default, restarts the app-server when needed, recreates managed role panes, and launches each role with `codex resume <saved-session>` so the live Codex conversation is resumed instead of replaced by a fresh startup session. Use `tmux-team resume --dry-run` to inspect the planned tmux commands, `--snapshot PATH` for an older snapshot, and `--no-reactivate-roles` when resumed roles should stay paused.
 
 Tmux notification uses `tmux display-message` by default. It does not type into the agent's prompt composer.
 

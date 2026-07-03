@@ -7,8 +7,8 @@ Start here for operator-facing tmux-team docs. The `kb/` directory is agent-faci
 1. Install the CLI: `uv tool install git+https://github.com/PheelaV/tmux-team.git`, then install the plugin with `codex plugin marketplace add PheelaV/tmux-team --ref main` and `codex plugin add tmux-team@tmux-team`.
 2. Start from a tmux control pane: `tmux new-session -s tt-<project> -c <project-root>`, then launch Codex.
 3. Bootstrap the team through the `start-tmux-team` skill, or run `tmux-team bootstrap --project-root . --goal "..."`
-4. Operate with `tmux-team status`, `send`, `inbox next`, `inbox ack`, `inbox complete`, `milestone list`, `role pause/resume/drain/retire`, and `stable approve/current/sync`.
-5. Stop managed panes with `tmux-team sleep`; it snapshots state, leaves `tt-control` alive, and pauses active/draining roles by default.
+4. Operate with `tmux-team status`, `send`, `broadcast`, `pane capture`, `inbox next`, `inbox ack`, `inbox complete`, `milestone list`, `role pause/resume/drain/retire`, and `stable approve/current/sync`.
+5. Stop managed panes with `tmux-team sleep`; restore them with `tmux-team resume`.
 6. Test locally with `make integration-test`; use Docker and real-Codex tests only when needed.
 
 ## Core Docs

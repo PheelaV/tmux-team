@@ -391,7 +391,7 @@ class Store:
             return True, "no pending messages"
 
         if method == "app-server-turn":
-            return self.notify_role_app_server(conn, role, role_row, pending)
+            return self.notify_role_app_server(conn, role, role_row, self.pending_wake_context(conn, role))
 
         pane = role_row["pane"]
         if not pane:
@@ -458,7 +458,7 @@ class Store:
         conn: sqlite3.Connection,
         role: str,
         role_row: sqlite3.Row,
-        pending: int,
+        wake_context: dict[str, Any],
     ) -> tuple[bool, str]:
         settings = self.resolve_role_app_server(conn, role, role_row)
         if settings is None:
@@ -471,7 +471,13 @@ class Store:
             return False, details
 
         endpoint, thread_id, timeout = settings
-        prompt = self.app_server_wake_prompt(role, pending)
+        pending = int(wake_context["pending"])
+        prompt = self.app_server_wake_prompt(
+            role,
+            pending,
+            top_message=wake_context.get("top_message"),
+            urgent_count=int(wake_context.get("urgent_count") or 0),
+        )
         try:
             turn = submit_app_server_wake(
                 endpoint=endpoint,
@@ -548,12 +554,39 @@ class Store:
             return None
         return endpoint, thread_id, timeout
 
-    def app_server_wake_prompt(self, role: str, pending: int) -> str:
-        return (
-            f"Inbox wake: {pending} pending message(s) for role `{role}`.\n"
-            "Wake notice only. Claim durable inbox work now.\n"
-            "Follow the loaded role loop and drain until empty.\n"
-        )
+    def app_server_wake_prompt(
+        self,
+        role: str,
+        pending: int,
+        *,
+        top_message: Any | None = None,
+        urgent_count: int = 0,
+    ) -> str:
+        lines = [f"Inbox wake: {pending} pending message(s) for role `{role}`."]
+        if top_message is not None:
+            priority = str(top_message["priority"]).upper()
+            header = (
+                "URGENT tmux-team inbox message pending" if priority == "URGENT" else "tmux-team inbox message pending"
+            )
+            lines.extend(
+                [
+                    header,
+                    f"From: {top_message['sender']}",
+                    f"Priority: {priority}",
+                    f"Summary: {truncate_wake_line(str(top_message['summary']))}",
+                    f"Pending: {pending} total, {urgent_count} urgent",
+                ]
+            )
+            if priority == "URGENT":
+                lines.append(
+                    "Action: stop at the current safe point, claim this urgent message before continuing other work, then drain by priority."
+                )
+            else:
+                lines.append("Action: claim durable inbox work now and follow the loaded role loop.")
+        else:
+            lines.append("Wake notice only. Claim durable inbox work now.")
+            lines.append("Follow the loaded role loop and drain until empty.")
+        return "\n".join(lines).rstrip() + "\n"
 
     def cli_config_arg(self, role: str | None = None) -> str:
         if self.config.config_path is None:
@@ -594,6 +627,36 @@ class Store:
                 (role,),
             ).fetchone()[0]
         )
+
+    def pending_wake_context(self, conn: sqlite3.Connection, role: str) -> dict[str, Any]:
+        pending = self.pending_count(conn, role)
+        urgent_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying') AND priority = 'urgent'
+                """,
+                (role,),
+            ).fetchone()[0]
+        )
+        top_message = conn.execute(
+            """
+            SELECT id, sender, recipient, priority, summary, state, created_at
+            FROM messages
+            WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying')
+            ORDER BY
+              CASE priority
+                WHEN 'urgent' THEN 0
+                WHEN 'high' THEN 1
+                WHEN 'normal' THEN 2
+                ELSE 3
+              END,
+              created_at
+            LIMIT 1
+            """,
+            (role,),
+        ).fetchone()
+        return {"pending": pending, "urgent_count": urgent_count, "top_message": top_message}
 
     def active_counts(self, conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
         rows = conn.execute(
@@ -809,6 +872,13 @@ def normalize_notify_method(method: str) -> str:
     if value in ("app-server", "appserver", "codex", "codex-app-server"):
         return "app-server-turn"
     return value
+
+
+def truncate_wake_line(value: str, limit: int = 200) -> str:
+    single_line = " ".join(value.split())
+    if len(single_line) <= limit:
+        return single_line
+    return single_line[: limit - 3].rstrip() + "..."
 
 
 def role_notify_method(role_row: sqlite3.Row) -> str:

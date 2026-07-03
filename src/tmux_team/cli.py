@@ -42,7 +42,7 @@ from .config import (
 )
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
-from .lifecycle import LifecycleError, sleep_team
+from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
 from .store import CLAIMABLE_STATES, ROLE_STATES, Store, normalize_priority
@@ -53,7 +53,10 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    args = parser.parse_args(normalize_time_option_values(raw_argv))
+    try:
+        args = parser.parse_args(normalize_time_option_values(raw_argv))
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
     try:
         configure_logging(args.log_level, args.log_file)
     except ValueError as exc:
@@ -70,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy_context = build_policy_context(args, config)
         apply_actor_defaults(args, policy_context)
         authorize_cli_command(args, config, policy_context)
-    except (BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError) as exc:
+    except (BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError, KeyError) as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
@@ -87,6 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             service = TeamService(store)
             if args.command == "send":
                 return cmd_send(args, service, conn)
+            if args.command == "broadcast":
+                return cmd_broadcast(args, service, conn)
             if args.command == "inbox":
                 return cmd_inbox(args, service, conn)
             if args.command == "memory":
@@ -95,10 +100,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_milestone(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
+            if args.command == "pane":
+                return cmd_pane(args, store, conn)
             if args.command == "notify":
                 return cmd_notify(args, service, conn)
             if args.command == "sleep":
                 return cmd_sleep(args, store, conn, config)
+            if args.command == "resume":
+                return cmd_resume(args, store, conn, config)
             if args.command == "codex":
                 return cmd_codex(args, store, service, conn)
             if args.command == "stable":
@@ -326,6 +335,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Notification method: auto, display-message, send-keys, or app-server-turn",
     )
 
+    broadcast = subparsers.add_parser("broadcast", help="Queue one message per recipient role")
+    broadcast_scope = broadcast.add_mutually_exclusive_group()
+    broadcast_scope.add_argument(
+        "--only",
+        "--to",
+        action="append",
+        dest="only",
+        help="Only address these roles, comma-separated or repeatable; 'all' means all roles except sender",
+    )
+    broadcast_scope.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Exclude these roles from the default all-roles target set; comma-separated or repeatable",
+    )
+    broadcast.add_argument("--from", default=None, dest="sender")
+    broadcast.add_argument("--priority", default="normal", choices=("urgent", "high", "normal", "low"))
+    broadcast.add_argument("--summary", required=True)
+    broadcast_body = broadcast.add_mutually_exclusive_group()
+    broadcast_body.add_argument("--body", help="Inline body text, or '-' to read stdin")
+    broadcast_body.add_argument("--body-file", help="Path to markdown body")
+    broadcast.add_argument("--force", action="store_true", help="Queue even if a role is paused or draining")
+    broadcast.add_argument("--no-notify", action="store_true", help="Do not notify target panes")
+    broadcast.add_argument(
+        "--notify-method",
+        default="auto",
+        help="Notification method: auto, display-message, send-keys, or app-server-turn",
+    )
+
     inbox = subparsers.add_parser("inbox", help="Work with role inboxes")
     inbox_sub = inbox.add_subparsers(dest="inbox_command", required=True)
     inbox_next = inbox_sub.add_parser("next", help="Claim and print the next message")
@@ -402,6 +440,26 @@ def build_parser() -> argparse.ArgumentParser:
         role_state = role_sub.add_parser(state_command, help=f"Set role state to {state}")
         role_state.add_argument("role")
 
+    pane = subparsers.add_parser("pane", help="Inspect managed role tmux panes")
+    pane_sub = pane.add_subparsers(dest="pane_command", required=True)
+    pane_capture = pane_sub.add_parser("capture", help="Print recent stdout/history from a role pane")
+    pane_capture.add_argument("role")
+    pane_capture.add_argument(
+        "--lines",
+        "--limit",
+        type=int,
+        default=80,
+        dest="lines",
+        help="Number of pane history lines to print",
+    )
+    pane_capture.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Skip this many newest pane history lines before printing",
+    )
+    pane_capture.add_argument("--tmux-bin", default="tmux")
+
     notify = subparsers.add_parser("notify", help="Notify a role about pending work")
     notify.add_argument("role")
     notify.add_argument("--method", default="auto")
@@ -423,6 +481,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mark active/draining roles paused after snapshotting",
     )
+
+    resume = subparsers.add_parser("resume", help="Resume managed panes from a tmux-team sleep snapshot")
+    resume.add_argument("--snapshot", help="Sleep snapshot path; defaults to runtime sleeps/latest.toml")
+    resume.add_argument("--session", help="tmux session to restore into; defaults to the snapshot session")
+    resume.add_argument("--endpoint", help="App-server endpoint; defaults to first endpoint in the snapshot")
+    resume.add_argument("--codex-bin", default="codex")
+    resume.add_argument("--tmux-bin", default="tmux")
+    resume.add_argument(
+        "--agent-layout",
+        default=DEFAULT_AGENT_LAYOUT,
+        choices=AGENT_LAYOUTS,
+        help="Role pane layout for resumed role panes",
+    )
+    resume.add_argument("--agents-window", default=DEFAULT_AGENTS_WINDOW, help="Name for grouped role-agent window")
+    resume.add_argument("--role-yolo", action="store_true", help="Resume managed role TUIs with Codex YOLO mode")
+    resume.add_argument("--role-profile", default=None, help="Codex profile to pass to every managed role TUI")
+    resume.add_argument("--role-codex-profile", action="append", default=[], metavar="ROLE=PROFILE")
+    resume.add_argument("--role-model", action="append", default=[], metavar="ROLE=MODEL")
+    resume.add_argument("--role-reasoning-effort", action="append", default=[], metavar="ROLE=EFFORT")
+    resume.add_argument("--role-codex-config", action="append", default=[], metavar="ROLE=KEY=VALUE")
+    resume.add_argument("--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint")
+    resume.add_argument("--no-reactivate-roles", action="store_true", help="Do not set resumed roles active")
+    resume.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
 
     codex = subparsers.add_parser("codex", help="Manage Codex app-server role bindings")
     codex_sub = codex.add_subparsers(dest="codex_command", required=True)
@@ -597,6 +678,43 @@ def parse_role_groups(values: Sequence[str]) -> tuple[frozenset[str], ...]:
     return tuple(groups)
 
 
+def resolve_broadcast_recipients(args: argparse.Namespace, roles: dict) -> tuple[str, ...]:
+    requested = split_csv_values(args.only or ())
+    excluded = set(split_csv_values(args.exclude or ()))
+    all_roles = tuple(roles)
+    if not all_roles:
+        raise ValueError("broadcast requires at least one configured role")
+    unknown_excluded = tuple(sorted(role for role in excluded if role not in roles))
+    if unknown_excluded:
+        raise KeyError(f"Unknown excluded role: {', '.join(unknown_excluded)}")
+
+    if not requested or "all" in requested:
+        recipients = [role for role in all_roles if role != args.sender]
+    else:
+        recipients = requested
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for role in recipients:
+        if role in excluded:
+            continue
+        if role not in roles:
+            raise KeyError(f"Unknown recipient role: {role}")
+        if role not in seen:
+            seen.add(role)
+            result.append(role)
+    if not result:
+        raise ValueError("broadcast has no recipients after applying exclusions")
+    return tuple(result)
+
+
+def split_csv_values(values: Sequence[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    for value in values:
+        result.extend(part.strip() for part in value.split(",") if part.strip())
+    return tuple(result)
+
+
 def parse_assignment(value: str, flag: str) -> tuple[str, str]:
     if "=" not in value:
         raise BootstrapError(f"{flag} expects ROLE=PATH")
@@ -610,6 +728,8 @@ def parse_assignment(value: str, flag: str) -> tuple[str, str]:
 
 def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext) -> None:
     if args.command == "send" and args.sender is None:
+        args.sender = policy_context.actor or "operator"
+    if args.command == "broadcast" and args.sender is None:
         args.sender = policy_context.actor or "operator"
     if args.command == "inbox" and getattr(args, "role", None) is None:
         args.role = policy_context.actor
@@ -681,6 +801,17 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         )
         return
 
+    if args.command == "broadcast":
+        for recipient in resolve_broadcast_recipients(args, config.roles):
+            authorize(
+                config,
+                policy_context,
+                "message.send",
+                sender=args.sender,
+                recipient=recipient,
+            )
+        return
+
     if args.command == "inbox":
         authorize(config, policy_context, f"inbox.{args.inbox_command}", role=args.role)
         return
@@ -701,12 +832,20 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
 
+    if args.command == "pane" and args.pane_command == "capture":
+        authorize(config, policy_context, "pane.capture", role=args.role)
+        return
+
     if args.command == "notify":
         authorize(config, policy_context, "role.notify", role=args.role, method=args.method)
         return
 
     if args.command == "sleep":
         authorize(config, policy_context, "team.sleep")
+        return
+
+    if args.command == "resume":
+        authorize(config, policy_context, "team.resume")
         return
 
     if args.command == "codex" and args.codex_command == "bind":
@@ -896,6 +1035,39 @@ def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
     return 0
 
 
+def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
+    normalize_priority(args.priority)
+    body = read_body(args)
+    recipients = resolve_broadcast_recipients(args, service.store.config.roles)
+    print(f"broadcast: {len(recipients)} recipient(s)")
+    blocked = False
+    for recipient in recipients:
+        result = service.send_message(
+            conn,
+            sender=args.sender,
+            recipient=recipient,
+            priority=args.priority,
+            summary=args.summary,
+            body=body,
+            force=args.force,
+            wake=not args.no_notify,
+            notify_method=args.notify_method,
+            actor=args.actor or args.sender,
+        )
+        message = result.message
+        print(f"{message.id} {message.state} to={message.recipient} priority={message.priority}")
+        print(f"body: {message.body_path}")
+        if result.notification is not None:
+            if result.notification.ok:
+                print(f"notify: {result.notification.details}")
+            else:
+                print(f"notify_failed: {result.notification.details}", file=sys.stderr)
+        if result.blocked is not None:
+            blocked = True
+            print(f"blocked: role {result.blocked['role']} is {result.blocked['state']}", file=sys.stderr)
+    return 2 if blocked else 0
+
+
 def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
     if args.inbox_command == "next":
         row = service.claim_next(conn, args.role, args.claim_seconds, actor=args.actor)
@@ -973,6 +1145,40 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
+def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.pane_command != "capture":
+        return 2
+    if args.lines <= 0:
+        raise ValueError("pane capture --lines must be greater than 0")
+    if args.offset < 0:
+        raise ValueError("pane capture --offset must be 0 or greater")
+    role = store.get_role(conn, args.role)
+    if role is None:
+        raise KeyError(f"Unknown role: {args.role}")
+    pane = role["pane"]
+    if not pane:
+        print(f"role {args.role} has no pane", file=sys.stderr)
+        return 1
+    command = [args.tmux_bin, "capture-pane", "-p", "-t", pane, "-S", f"-{args.lines + args.offset}"]
+    if args.offset:
+        command.extend(["-E", f"-{args.offset + 1}"])
+    try:
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as exc:
+        print(f"tmux-team: could not run {args.tmux_bin}: {exc}", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{args.tmux_bin} exited {result.returncode}").strip()
+        print(details, file=sys.stderr)
+        return 1
+    if args.offset:
+        print(f"# pane {args.role} ({pane}) {args.lines} lines offset {args.offset}")
+    else:
+        print(f"# pane {args.role} ({pane}) last {args.lines} lines")
+    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    return 0
+
+
 def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
     result = service.notify_role(conn, args.role, args.method, actor=args.actor)
     if result.ok:
@@ -1021,6 +1227,51 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
         print("dry-run: no snapshot written and no tmux windows killed")
     else:
         print(f"paused_roles: {'no' if args.no_pause_roles else 'yes'}")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
+    role_launch_options = parse_role_launch_options(
+        role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
+        role_models=parse_assignments(args.role_model, "--role-model"),
+        role_reasoning_efforts=parse_assignments(args.role_reasoning_effort, "--role-reasoning-effort"),
+        role_config_overrides=parse_role_config_overrides(args.role_codex_config),
+    )
+    result = resume_team(
+        config,
+        store,
+        conn,
+        snapshot_path=Path(args.snapshot).expanduser() if args.snapshot else None,
+        tmux_bin=args.tmux_bin,
+        codex_bin=args.codex_bin,
+        session=args.session,
+        endpoint=args.endpoint,
+        agent_layout=args.agent_layout,
+        agents_window=args.agents_window,
+        role_yolo=args.role_yolo,
+        role_profile=args.role_profile,
+        role_launch_options=role_launch_options,
+        start_app_server=not args.no_start_app_server,
+        reactivate_roles=not args.no_reactivate_roles,
+        dry_run=args.dry_run,
+    )
+    print(f"snapshot: {result.snapshot_path}")
+    print(f"session: {result.session}")
+    print(f"endpoint: {result.endpoint}")
+    print(f"roles: {result.role_count}")
+    print(f"reactivated_roles: {'yes' if result.reactivated_roles else 'no'}")
+    print("role_threads:")
+    for role, thread_id in result.role_threads.items():
+        pane = result.role_panes.get(role) or "-"
+        print(f"  {role}: thread_id={thread_id} pane={pane}")
+    print("commands:")
+    if result.commands:
+        for command in result.commands:
+            print(f"  {format_command(command)}")
+    else:
+        print("  none")
+    if args.dry_run:
+        print("dry-run: no tmux panes created and no config/runtime state updated")
     return 0
 
 

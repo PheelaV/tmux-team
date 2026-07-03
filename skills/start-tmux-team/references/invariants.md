@@ -50,12 +50,31 @@ Never use tmux stdin as the production wake path for Codex roles.
 - Do not use `tmux send-keys` for normal Codex wake.
 - Use app-server `turn/start`.
 - Wake prompts should be blunt interrupts; do not restate the skill, scratchpad rules, or ack/complete syntax in every wake turn.
+- App-server wake prompts may include compact metadata for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. They must not include the task body.
+- If an urgent message is pending, the app-server wake must tell the role to stop at the current safe point and claim the urgent message before continuing other work.
 - Durable task content must be claimed from the tmux-team inbox.
-- A role handles work as: `inbox next -> ack -> do work -> complete --reply-to-sender -> inbox next` until there is no pending work.
+- A role handles work as: `inbox next -> ack -> do work -> complete --reply-to-sender -> inbox next` until there is no pending work. Startup prompts should include explicit `--role <role>` commands; short commands are allowed only when role discovery works.
 - Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command.
 - Completion can carry detail with `--body` or `--body-file`; keep `--summary` concise.
 - Role panes are bound to team config and role; do not put full config paths in normal wake instructions.
 - `--goal` and `--goal-file` seed only the initial operator message to orchestrator. They are not role startup prompts; the orchestrator decomposes the objective into role-specific inbox messages.
+- `tmux-team broadcast` creates one durable message per recipient. Each recipient must have independent claim, ack, completion, and reply state.
+- Broadcast recipient shaping must use either `--only` or `--exclude`, not both.
+
+## Supervision
+
+The operator and orchestrator can inspect managed role panes for live progress:
+
+```bash
+tmux-team pane capture collector --lines 120 --offset 40
+```
+
+- Pane capture is observation only.
+- `--lines` or `--limit` controls how much history is printed. `--offset` skips the newest lines so the caller can page back.
+- Use it for intermediate progress, stuck turns, visible approval prompts, and recent test output.
+- Do not use pane capture as proof that a message was delivered, acknowledged, or completed.
+- Do not turn pane scrollback into scratchpad or milestone spam.
+- By default, roles can inspect themselves, the orchestrator can inspect all roles, and other cross-role inspection needs explicit policy.
 
 ## Skill Availability
 
@@ -66,9 +85,9 @@ Every Codex role spawned by bootstrap must have the `start-tmux-team` skill avai
 Every managed role has a scratchpad memory file declared by config.
 
 - Bootstrap must create the scratchpad if it is missing.
-- A newly spawned role must be instructed to read this skill, read memory, then claim inbox work or park.
+- A newly spawned role must be instructed to read this skill, read memory with an explicit `--role <role>` command, then claim inbox work or park.
 - Codex `SessionStart` hooks for `startup|resume|clear|compact` should inject `tmux-team codex session-context` output after resets. This restores the same role contract as startup; it is not a new task and does not replace the inbox.
-- A role must run `tmux-team memory show` before claiming pending inbox work.
+- A role must run `tmux-team memory show --role <role>` before claiming pending inbox work unless role discovery is known to work.
 - Use memory for durable context: long-lived goals, constraints, decisions, blockers, handoff notes, current worktree/commit/dirty state, running jobs, owned artifacts, stable inputs, and next action.
 - Keep the latest and most important state at the top so it remains useful after context compression and for human oversight.
 - Update memory only when durable state changed materially. Use a threshold: append when the update would score at least 3 points, where active task/blocker/boundary/long-running job/final-result changes are 3, stable input/artifact/handoff decisions are 2, minor status/test/dirty-state facts are 1, and routine startup/parking/no-pending chatter is 0.
@@ -94,7 +113,7 @@ Role pane env is pane-local state derived from the current config:
 - `TMUX_TEAM_CONFIG`: path to the active team config;
 - `TMUX_TEAM_ROLE`: role name for this pane.
 
-Because Codex tool shells may not inherit every role-process variable, tmux-team also writes `.tmux-team/team.env` inside each role worktree and records the role in tmux pane option `@tmux-team-role`. The CLI discovery order is explicit flags, env, worktree pointer, tmux pane role, then cwd role inference.
+Because Codex tool shells may not inherit every role-process variable, tmux-team also writes `.tmux-team/team.env` inside each role worktree and records the role in tmux pane option `@tmux-team-role`. The CLI discovery order is explicit flags, env, worktree pointer, tmux pane role, then cwd role inference. `.tmux-team/team.env` may contain `TMUX_TEAM_ROLE` only when the worktree belongs to exactly one role; shared worktrees stay config-only.
 
 When roles are added, removed, slept, resumed, or respawned, the new role process must receive fresh env bindings, pointer files, pane labels, and pane options from the current config. Do not set role env at tmux session scope because grouped role panes need different `TMUX_TEAM_ROLE` values.
 
@@ -113,3 +132,5 @@ Autonomous role-to-role messaging requires role panes that can run the `tmux-tea
 ## Sleep
 
 Use `tmux-team sleep` to snapshot role state, pane targets, and app-server bindings before tearing down managed windows. Sleep must leave `tt-control` alive by default and pauses active/draining roles unless explicitly told not to.
+
+Use `tmux-team resume` to restore a slept team from the latest or specified sleep snapshot. Resume must recreate managed role panes with `codex resume <saved-session>`, update pane/app-server bindings, and reactivate roles by default unless the operator passes `--no-reactivate-roles`.

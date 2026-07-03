@@ -21,6 +21,7 @@ class RolePolicy:
     can_claim: tuple[str, ...] = ()
     can_ack: tuple[str, ...] = ()
     can_complete: tuple[str, ...] = ()
+    can_capture_panes: tuple[str, ...] = ()
     can_use_send_keys: bool = False
     can_change_role_state: bool = False
     can_bind_app_server: bool = False
@@ -79,6 +80,7 @@ def parse_role_policy(raw_policy: Any) -> RolePolicy:
         can_claim=_string_tuple(raw_policy, "can_claim"),
         can_ack=_string_tuple(raw_policy, "can_ack"),
         can_complete=_string_tuple(raw_policy, "can_complete"),
+        can_capture_panes=_string_tuple(raw_policy, "can_capture_panes"),
         can_use_send_keys=_boolean(raw_policy, "can_use_send_keys"),
         can_change_role_state=_boolean(raw_policy, "can_change_role_state"),
         can_bind_app_server=_boolean(raw_policy, "can_bind_app_server"),
@@ -138,6 +140,12 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
     if action == "milestone.list":
         return
 
+    if action == "pane.capture":
+        if actor == "orchestrator":
+            return
+        _authorize_role_resource(actor, resource, "role", policy.can_capture_panes, action)
+        return
+
     if action == "role.state.change":
         if not policy.can_change_role_state:
             raise PolicyError(f"actor {actor!r} is not authorized to change role state")
@@ -153,9 +161,10 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             raise PolicyError(f"actor {actor!r} is not authorized to approve stable commits")
         return
 
-    if action == "team.sleep":
+    if action in ("team.sleep", "team.resume"):
         if not policy.can_sleep:
-            raise PolicyError(f"actor {actor!r} is not authorized to sleep the team")
+            verb = "resume" if action == "team.resume" else "sleep"
+            raise PolicyError(f"actor {actor!r} is not authorized to {verb} the team")
         return
 
 

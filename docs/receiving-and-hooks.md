@@ -114,13 +114,32 @@ The normal startup path is `tmux-team bootstrap`, which creates role panes and d
 
 `app-server-turn` submits a short wake turn that tells the role durable inbox work exists. The wake turn is deliberately blunt. It does not restate the skill, command syntax, scratchpad rules, ack/complete syntax, or role boundaries. Role panes spawned by bootstrap already received the startup prompt and have the `start-tmux-team` skill available; the wake is only an interrupt that says "claim durable inbox work now."
 
-Role panes spawned by bootstrap are bound to team config and role, so normal role commands do not need `--config` or `--role`. The fast path is `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE`; fallback discovery uses the role worktree `.tmux-team/team.env` pointer and tmux pane role option. Explicit flags remain available as overrides for scripts and operator control sessions.
+The wake does include a compact subject line for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. It never includes the durable task body. If the highest-priority message is urgent, the wake explicitly tells the role to stop at the current safe point, claim the urgent message before continuing other work, then drain by priority.
+
+Role panes spawned by bootstrap are bound to team config and role, but Codex tool shells do not always inherit pane-local env. Bootstrap therefore gives each role startup prompt explicit `--role <role>` commands. Short commands are still supported when discovery works. The fast path is `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE`; fallback discovery uses the role worktree `.tmux-team/team.env` pointer, tmux pane role option, and cwd inference when that is unambiguous. Shared worktrees intentionally do not get a single role value in `.tmux-team/team.env`.
 
 Each spawned role also receives a startup prompt that tells it to load the `start-tmux-team` skill, read scratchpad memory, then claim inbox work or park. Scratchpads are top-loaded operational memory, not transport: use them for long-term goals, role boundaries, current task, blocker, stable inputs, owned artifacts, and next action. Use `tmux-team memory append --body "..."` only for high-value durable updates; it records the newest note near the top of the file. Routine startup, parking, no-pending, and "still waiting" notes should not be appended.
 
 If the wake says `N pending` with `N > 1`, the role follows its loaded tmux-team role loop and drains one durable inbox message at a time until `inbox next` returns no pending work.
 
 `--reply-to-sender` is the lazy conversational path: completion is recorded on the original message, and a reply message is queued back to the sender when the sender is a managed role. Use `--summary` for the concise result and `--body` or `--body-file` for evidence, test output, or handoff detail that should travel with the completion reply.
+
+Broadcast is just repeated durable send:
+
+```bash
+tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
+tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
+```
+
+It creates one message per recipient. Each recipient has a separate message id, claim, ack, completion, and reply path. The orchestrator should use those per-role states rather than treating a broadcast as one shared task. Use either `--only` for a positive role filter or `--exclude` for a negative role filter; those switches are mutually exclusive.
+
+For live supervision, the orchestrator or operator can inspect recent pane output:
+
+```bash
+tmux-team pane capture collector --lines 120 --offset 40
+```
+
+Pane capture is observation, not delivery. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for intermediate progress, approval prompts, visible test output, or stuck turns that have not yet been summarized in scratchpad memory or inbox completion. It must not be used to decide that a message was delivered or completed.
 
 ## Codex Reset Recovery
 
