@@ -109,6 +109,7 @@ The operator and orchestrator may inspect managed role panes.
 - Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
 - Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
+- Use `tmux-team pane capture <role> --summary` when raw scrollback would flood context; summaries must be generated from bounded capture and remain observational only.
 - `--lines` or `--limit` controls how much history is printed. `--offset` skips the newest lines so the caller can page back.
 - Pane capture is for live progress inspection, stuck-turn diagnosis, and operator overview.
 - Pane capture is not a delivery, acknowledgement, or completion mechanism.

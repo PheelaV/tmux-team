@@ -95,3 +95,14 @@ Pane hygiene now has an explicit inspection surface.
 - `--all` is restricted to the operator or orchestrator because it exposes unmanaged shell panes and current paths.
 
 Invariant: unmanaged panes may exist, but tmux-team must not silently confuse them with managed role panes.
+
+### TT-FEAT-009: Structured Pane-Capture Summaries
+
+Pane capture now has an optional summary mode.
+
+- `pane capture ROLE --summary` captures bounded tmux scrollback and passes it to `codex exec`.
+- `--summary-format json|markdown` selects the requested output shape.
+- `--summary-lines` controls the amount of raw scrollback captured before summarization.
+- `--summary-model` may pass a model through to `codex exec`.
+
+Invariant: pane summaries are for operator context control. They are observation only and must not be treated as delivery, acknowledgement, completion, or durable state.

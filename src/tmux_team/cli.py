@@ -530,6 +530,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Skip this many newest pane history lines before printing",
     )
+    pane_capture.add_argument("--summary", action="store_true", help="Summarize captured pane output with codex exec")
+    pane_capture.add_argument("--summary-format", choices=("json", "markdown"), default="json")
+    pane_capture.add_argument("--summary-model", help="Optional model passed to codex exec with --model")
+    pane_capture.add_argument("--summary-lines", type=int, help="Capture this many lines before summarization")
+    pane_capture.add_argument("--codex-bin", default="codex")
     pane_capture.add_argument("--tmux-bin", default="tmux")
 
     notify = subparsers.add_parser("notify", help="Notify a role about pending work")
@@ -1366,7 +1371,10 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
     if not pane:
         print(f"role {args.role} has no pane", file=sys.stderr)
         return 1
-    command = [args.tmux_bin, "capture-pane", "-p", "-t", pane, "-S", f"-{args.lines + args.offset}"]
+    capture_lines = args.summary_lines if args.summary and args.summary_lines is not None else args.lines
+    if capture_lines <= 0:
+        raise ValueError("pane capture line count must be greater than 0")
+    command = [args.tmux_bin, "capture-pane", "-p", "-t", pane, "-S", f"-{capture_lines + args.offset}"]
     if args.offset:
         command.extend(["-E", f"-{args.offset + 1}"])
     try:
@@ -1378,6 +1386,17 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
         details = (result.stderr or result.stdout or f"{args.tmux_bin} exited {result.returncode}").strip()
         print(details, file=sys.stderr)
         return 1
+    if args.summary:
+        summary = summarize_pane_capture(
+            codex_bin=args.codex_bin,
+            role=args.role,
+            pane=pane,
+            text=result.stdout,
+            output_format=args.summary_format,
+            model=args.summary_model,
+        )
+        print(summary, end="" if summary.endswith("\n") else "\n")
+        return 0
     if args.offset:
         print(f"# pane {args.role} ({pane}) {args.lines} lines offset {args.offset}")
     else:
@@ -1953,6 +1972,51 @@ def list_tmux_window_panes(tmux_bin: str, window: str) -> list[dict[str, str]]:
         pane_id, target, command, path = (line.split("\t") + ["", "", "", ""])[:4]
         panes.append({"id": pane_id, "target": target, "command": command, "path": path})
     return panes
+
+
+def summarize_pane_capture(
+    *,
+    codex_bin: str,
+    role: str,
+    pane: str,
+    text: str,
+    output_format: str,
+    model: str | None = None,
+) -> str:
+    prompt = pane_summary_prompt(role=role, pane=pane, text=text, output_format=output_format)
+    command = [codex_bin, "exec"]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{codex_bin} exited {result.returncode}").strip()
+        raise ValueError(f"pane summary failed: {details}")
+    return result.stdout
+
+
+def pane_summary_prompt(*, role: str, pane: str, text: str, output_format: str) -> str:
+    if output_format == "json":
+        target = (
+            "Return only JSON with keys: role, pane, observed_at, current_state, active_task, "
+            "last_tool_action, visible_blockers, possible_tmux_team_issues, needs_operator_attention, confidence."
+        )
+    else:
+        target = (
+            "Return concise markdown with headings: State, Active Task, Last Tool Action, Blockers, "
+            "tmux-team Issues, Operator Attention, Confidence."
+        )
+    return (
+        "You are summarizing tmux pane output for supervision only.\n"
+        "Pane capture is observation only and must not be treated as delivery, acknowledgement, or completion proof.\n"
+        f"Role: {role}\n"
+        f"Pane: {pane}\n"
+        f"{target}\n\n"
+        "Captured pane text:\n"
+        "```text\n"
+        f"{text.rstrip()}\n"
+        "```\n"
+    )
 
 
 def row_value(row, key: str, default=None):

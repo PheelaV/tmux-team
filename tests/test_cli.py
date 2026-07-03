@@ -760,6 +760,53 @@ exit 9
         self.assertIn("older line", out)
         self.assertIn("capture-pane -p -t test:collector.0 -S -25 -E -6", log_path.read_text(encoding="utf-8"))
 
+    def test_pane_capture_summary_uses_codex_exec(self) -> None:
+        fake_dir = self.root / "pane-summary-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        codex = fake_dir / "codex"
+        codex_log = self.root / "codex-summary.log"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "capture-pane" ]; then
+  printf 'working on tests\\nlast command: pytest -q\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        codex.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" > {codex_log}
+if [ "$1" = "exec" ]; then
+  printf '{{"role":"collector","pane":"test:collector.0","current_state":"working","needs_operator_attention":false}}\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        codex.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "pane",
+            "capture",
+            "collector",
+            "--summary",
+            "--summary-lines",
+            "40",
+            "--tmux-bin",
+            str(tmux),
+            "--codex-bin",
+            str(codex),
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn('"current_state":"working"', out)
+        self.assertIn("exec", codex_log.read_text(encoding="utf-8"))
+
     def test_pane_list_all_marks_unmanaged_panes(self) -> None:
         fake_dir = self.root / "pane-list-bin"
         fake_dir.mkdir()

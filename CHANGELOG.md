@@ -4,6 +4,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Added `tmux-team pane capture --summary` to summarize bounded pane output through `codex exec`.
 - Added `tmux-team pane list --all` to show managed role panes and unmanaged panes in managed windows.
 - Added `tmux-team broadcast --notice` for durable announcements that do not create pending inbox tasks.
 - Added `tmux-team inbox next --auto-ack` and verbose status warnings for claimed-but-not-acknowledged messages.
