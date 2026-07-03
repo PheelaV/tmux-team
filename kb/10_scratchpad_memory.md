@@ -29,6 +29,18 @@ Use Codex `SessionStart` hooks with matcher `startup|resume|clear|compact` to in
 
 This hook is not a task and does not replace the startup prompt. It only restores context. The SQLite inbox remains authoritative for work, and claimed message bodies still provide task-specific instructions.
 
+Role startup and resume prompts include a tmux-team role contract version. Ordinary app-server wakes should follow the loaded role loop and must not force a full skill reread when the current contract is already loaded.
+
+Reread the full skill and invariants on:
+
+- startup;
+- resume after sleep;
+- `SessionStart` recovery after startup, resume, clear, or compact;
+- explicit operator request;
+- role contract or skill version mismatch.
+
+Wake prompts stay blunt: they indicate pending work or a notice and point the role at durable state. The skill, session context, scratchpad, and team config carry the operating framework.
+
 ## Shape
 
 Keep the latest and most important state near the top:

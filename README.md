@@ -81,6 +81,7 @@ Watch progress from the control pane:
 
 ```bash
 tmux-team status
+tmux-team status --verbose
 tmux-team inbox list --role orchestrator
 tmux-team inbox list --role implementer
 tmux-team pane capture implementer --lines 80 --offset 0
@@ -170,27 +171,55 @@ Manual CLI operations are still available:
 tmux-team init --name example-team --runtime-dir /tmp/tmux-team-example
 tmux-team status
 tmux-team send --to orchestrator --summary "test failed" --body-file report.md
+tmux-team send --to collector --summary "Collect evidence" --body-file task.md --correlation-key issue-123
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
 tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
-tmux-team inbox next --role orchestrator
+tmux-team broadcast --notice --summary "Policy updated" --body "Read current operating notes." --exclude orchestrator
+tmux-team inbox next --role orchestrator --auto-ack
+tmux-team inbox reclaimable --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
+tmux-team inbox complete-replies --role orchestrator
+tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
+tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
+tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
+tmux-team pane list --all
 tmux-team pane capture collector --lines 120 --offset 40
+tmux-team pane capture collector --summary --lines 120
+tmux-team watchdog
 tmux-team ext list
 tmux-team ext doctor
 tmux-team sleep
 tmux-team resume
 ```
 
-`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+
+Completion replies are stored as `completion_notice` messages. After reading and acknowledging them, use `tmux-team inbox complete-replies --role ROLE` to close notice bookkeeping without writing a bespoke completion for each one.
+
+Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary. Claimed work that has not been acknowledged after the warning threshold appears with `warning=claimed_unacked`; tune that threshold with `--unacked-warn-seconds`.
+
+Use `tmux-team inbox next --auto-ack` when a role wants claim and acknowledgement to be one step before it starts work.
+
+Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until the watch is completed, failed, or cancelled.
+
+Use `--correlation-key`, `--related-to`, or `--supersedes` on `send` when work belongs to a known thread. Reuse the same correlation key for retries, follow-ups, and verification of the same logical work. `tmux-team` warns when new active work for the same role matches an existing correlation key or normalized summary. The warning does not block delivery; pass `--allow-duplicate` when duplicate work is intentional. Use `status --verbose` and `inbox list --verbose` to inspect relation metadata before sending follow-up work.
+
+Use `broadcast --notice` for durable announcements that should not create inbox work for each recipient. Notices are recorded as completed `notice` messages and can wake roles with a notice-only prompt; recipients do not claim, ack, or complete them.
 
 `broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
 
 `pane capture` reads tmux pane output for live supervision. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for the orchestrator or operator to inspect present progress that has not yet reached inbox completion or scratchpad memory. It must not be used as delivery confirmation; durable state still lives in SQLite messages, notifications, milestones, and memory.
 
+Use `pane capture --summary` to ask `codex exec` for a compact JSON summary of bounded pane output instead of dumping raw scrollback into the caller's context. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
+
+`pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
+
+`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. It reports findings without waking or mutating agents. Run it from cron, tmux, or another scheduler if you want repeated checks.
+
 Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 
-For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks.
+For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract version as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks. Ordinary app-server wakes should follow the loaded role loop and should not trigger full skill rereads unless the operator requests it or the contract version changed.
 
 Scratchpad memory is durable role state, not the queue. Use it for long-term goals, current task, blockers, boundaries, stable inputs, owned artifacts, and next action. Record only high-value durable updates near the top:
 
@@ -284,6 +313,18 @@ make docker-test
 make docker-smoke-test
 make docker-congestion-smoke-test
 ```
+
+Repeatable live Codex dogfood scenario:
+
+```bash
+make live-demo-setup
+make live-demo-bootstrap
+tmux attach -t tt-live-demo
+make live-demo-verify
+make live-demo-clean
+```
+
+The live demo clones a public snapshot, seeds a real failing test, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. Its verifier checks the final test result and durable coordination state, including correlation-key discipline, completion replies, notice broadcasts, watches, milestones, stable approval, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
 
 Opt-in real Codex integration:
 

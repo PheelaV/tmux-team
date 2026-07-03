@@ -90,6 +90,7 @@ Each role has a scratchpad memory file declared in config.
 - Do not use memory as the queue, chat log, command transcript, reasoning dump, or duplicate report body.
 - If inbox instructions conflict with scratchpad boundaries, stop and ask the orchestrator.
 - Reset safety is mechanical: use Codex `SessionStart` hooks for `startup|resume|clear|compact` to inject `tmux-team codex session-context` output. The hook restores the same role contract as the startup prompt; it is not a competing task or replacement for inbox work.
+- The role contract has a version marker. Ordinary app-server wakes should not cause full skill rereads when the current contract version and role loop are already loaded; reread the full skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
 ## Milestone Log
 
@@ -106,7 +107,10 @@ The milestone log is the operator-facing timeline.
 
 The operator and orchestrator may inspect managed role panes.
 
+- Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
+- Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
+- Use `tmux-team pane capture <role> --summary` when raw scrollback would flood context; summaries must be generated from bounded capture, use a compact JSON shape, and remain observational only.
 - `--lines` or `--limit` controls how much history is printed. `--offset` skips the newest lines so the caller can page back.
 - Pane capture is for live progress inspection, stuck-turn diagnosis, and operator overview.
 - Pane capture is not a delivery, acknowledgement, or completion mechanism.
@@ -140,17 +144,46 @@ Initial bootstrap goals are orchestrator inputs only. `--goal` and `--goal-file`
 
 `tmux-team broadcast` is a convenience wrapper around durable send. It must create separate messages per recipient so every role has independent claim, ack, completion, and reply state. It must not create a shared message that multiple roles compete to claim. Recipient shaping must use either `--only` or `--exclude`, not both.
 
+`tmux-team broadcast --notice` is the exception for announcements. It must record one durable `message_kind='notice'` row per recipient, keep those rows out of pending inbox work, and wake roles with notice-only wording when notification is requested.
+
 ## Completion Tracking
 
 Message completion is durable state. Conversational completion replies are explicit but one-command.
 
 - `tmux-team inbox complete` records the result on the original message.
+- Expired claimed messages are recoverable work, not silent ownership. They must appear as `stale_claimed` in operator status surfaces and remain reclaimable through `tmux-team inbox next`.
+- `tmux-team inbox reclaimable --role ROLE` is an observation aid for expired claims; it must not create a second claim/ack path.
+- `tmux-team inbox next --auto-ack` may claim and acknowledge a message atomically for roles that accept work before inspecting details.
+- `tmux-team status --verbose` must warn about claimed-but-not-acknowledged work older than the configured threshold without changing message state.
+- Correlation metadata (`correlation_key`, `related_to`, `supersedes`) is advisory routing context. Duplicate detection must warn without blocking delivery unless a future explicit policy says otherwise.
+- `tmux-team inbox list --verbose` is the operator surface for inspecting relation metadata.
 - Use `--summary` for the concise result and optional `--body` or `--body-file` for evidence, test output, or handoff detail.
 - Roles should use `--reply-to-sender` when completing delegated work from another managed role.
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.
+- Completion replies must be stored as `message_kind='completion_notice'`.
+- `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
 - A dispatcher must keep the message id returned by `tmux-team send`.
 - After fan-out, the dispatcher checks `tmux-team status`, `inbox list`, or events for that message's state before routing follow-up work.
+- For one logical work thread, reuse one stable `--correlation-key` across retries, follow-ups, and verification. Different keys are treated as different work, so near-synonym keys create avoidable duplicate work. Use `--allow-duplicate` only when redundant independent work is deliberate.
 - Plain `complete` remains available for scripts and operator-originated tasks that should not generate reply traffic.
+
+## Supervision Watches
+
+Long-running monitoring work must not be hidden as an indefinitely acknowledged inbox task.
+
+- Use `tmux-team watch start/update/complete` for ongoing supervision with heartbeat-style updates.
+- Watches are durable role-owned state with a current summary, last update, optional next expected update, and terminal status.
+- Watches appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
+- Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+- A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
+
+## Watchdog
+
+Watchdog checks are local supervision, not autonomous orchestration.
+
+- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches.
+- Watchdog checks must not mutate message/watch state, wake roles, or write milestones by default.
+- Watchdog is a single-shot report command. Use cron, tmux, or an explicit scheduler outside tmux-team for repeated checks.
 
 ## State
 
@@ -158,7 +191,7 @@ The config and runtime store are the source of truth.
 
 - `.tmux-team/team.toml` records role names, pane targets, app-server endpoint, and Codex thread IDs.
 - Operator-facing team, role, and lifecycle configuration is TOML.
-- `team.sqlite` records messages, notifications, role state, events, and stable commits.
+- `team.sqlite` records messages, notifications, role state, watches, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
 - `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE` are pane-local process bindings for ergonomics only.
 - Bootstrap startup prompts must include explicit `--role <role>` commands because Codex tool shells may not inherit pane-local env.

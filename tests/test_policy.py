@@ -83,10 +83,12 @@ can_sleep = true
         config = self.config()
 
         authorize(config, PolicyContext(actor="implementer"), "inbox.next", role="implementer")
+        authorize(config, PolicyContext(actor="implementer"), "inbox.reclaimable", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.ack", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.complete", role="implementer")
+        authorize(config, PolicyContext(actor="implementer"), "inbox.complete-replies", role="implementer")
 
-        for action in ("inbox.next", "inbox.ack", "inbox.complete"):
+        for action in ("inbox.next", "inbox.reclaimable", "inbox.ack", "inbox.complete", "inbox.complete-replies"):
             with self.subTest(action=action), self.assertRaises(PolicyError):
                 authorize(config, PolicyContext(actor="implementer"), action, role="orchestrator")
 
@@ -153,6 +155,23 @@ can_sleep = true
         with self.assertRaisesRegex(PolicyError, "send evidence to orchestrator"):
             authorize(config, PolicyContext(actor="collector"), "milestone.add", role="collector")
 
+    def test_watch_management_is_self_or_orchestrator(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "watch.start", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.start", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.update", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.complete", role="collector")
+        authorize(config, PolicyContext(actor="collector"), "watch.list", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "watch.start", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "watch.list", role="")
+
+        with self.assertRaisesRegex(PolicyError, "not authorized"):
+            authorize(config, PolicyContext(actor="implementer"), "watch.start", role="collector")
+
+        with self.assertRaisesRegex(PolicyError, "not authorized"):
+            authorize(config, PolicyContext(actor="implementer"), "watch.list", role="collector")
+
     def test_pane_capture_is_self_or_orchestrator_by_default(self) -> None:
         config = self.config()
 
@@ -167,6 +186,16 @@ can_sleep = true
         config = self.config(RolePolicy(can_capture_panes=("collector",)))
 
         authorize(config, PolicyContext(actor="implementer"), "pane.capture", role="collector")
+
+    def test_pane_list_all_is_operator_or_orchestrator_only(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "pane.list", all="true")
+        authorize(config, PolicyContext(actor="orchestrator"), "pane.list", all="true")
+        authorize(config, PolicyContext(actor="implementer"), "pane.list", all="false")
+
+        with self.assertRaisesRegex(PolicyError, "unmanaged panes"):
+            authorize(config, PolicyContext(actor="implementer"), "pane.list", all="true")
 
     def test_permissive_policy_mode_is_breakglass(self) -> None:
         config = self.config()

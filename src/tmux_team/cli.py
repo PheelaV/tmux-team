@@ -19,6 +19,7 @@ from .bootstrap import (
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
     DEFAULT_CONTROL_WINDOW,
+    ROLE_CONTRACT_VERSION,
     ROLE_PANE_OPTION,
     BootstrapError,
     RoleLaunchOptions,
@@ -45,7 +46,16 @@ from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
-from .store import CLAIMABLE_STATES, ROLE_STATES, Store, normalize_priority
+from .store import (
+    CLAIMABLE_STATES,
+    ROLE_STATES,
+    STALE_CLAIMED_STATE,
+    WATCH_ACTIVE_STATES,
+    WATCH_STATES,
+    Store,
+    normalize_priority,
+    parse_utc_datetime,
+)
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -98,12 +108,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_memory(args, config)
             if args.command == "milestone":
                 return cmd_milestone(args, store, conn)
+            if args.command == "watch":
+                return cmd_watch(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
             if args.command == "pane":
                 return cmd_pane(args, store, conn)
             if args.command == "notify":
                 return cmd_notify(args, service, conn)
+            if args.command == "watchdog":
+                return cmd_watchdog(args, store, conn)
             if args.command == "sleep":
                 return cmd_sleep(args, store, conn, config)
             if args.command == "resume":
@@ -187,7 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("show", help="Show resolved config")
 
-    subparsers.add_parser("status", help="Show roles and queue counts")
+    status = subparsers.add_parser("status", help="Show roles and queue counts")
+    status.add_argument("--verbose", action="store_true", help="Show active message summaries per role")
+    status.add_argument("--active-limit", type=int, default=3, help="Maximum active messages to show per role")
+    status.add_argument(
+        "--unacked-warn-seconds",
+        type=int,
+        default=300,
+        help="Warn in verbose output when claimed work is not acknowledged after this many seconds",
+    )
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
@@ -329,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     body.add_argument("--body-file", help="Path to markdown body")
     send.add_argument("--force", action="store_true", help="Queue even if the role is paused or draining")
     send.add_argument("--no-notify", action="store_true", help="Do not notify the target pane")
+    send.add_argument("--correlation-key", help="Stable key for related or duplicate work")
+    send.add_argument("--related-to", help="Related message id")
+    send.add_argument("--supersedes", help="Message id this message replaces")
+    send.add_argument("--allow-duplicate", action="store_true", help="Do not warn about matching active work")
     send.add_argument(
         "--notify-method",
         default="auto",
@@ -358,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast_body.add_argument("--body-file", help="Path to markdown body")
     broadcast.add_argument("--force", action="store_true", help="Queue even if a role is paused or draining")
     broadcast.add_argument("--no-notify", action="store_true", help="Do not notify target panes")
+    broadcast.add_argument("--notice", action="store_true", help="Record a notice instead of inbox work")
     broadcast.add_argument(
         "--notify-method",
         default="auto",
@@ -369,10 +396,17 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_next = inbox_sub.add_parser("next", help="Claim and print the next message")
     inbox_next.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_next.add_argument("--claim-seconds", type=int, default=3600)
+    inbox_next.add_argument("--auto-ack", action="store_true", help="Acknowledge the claimed message immediately")
     inbox_list = inbox_sub.add_parser("list", help="List inbox messages")
     inbox_list.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_list.add_argument("--state", action="append", help="Filter state; repeatable")
     inbox_list.add_argument("--limit", type=int, default=50)
+    inbox_list.add_argument("--verbose", action="store_true", help="Show correlation and relation metadata")
+    inbox_reclaimable = inbox_sub.add_parser(
+        "reclaimable", help="List expired claimed messages that inbox next can reclaim"
+    )
+    inbox_reclaimable.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
+    inbox_reclaimable.add_argument("--limit", type=int, default=50)
     inbox_ack = inbox_sub.add_parser("ack", help="Acknowledge a message")
     inbox_ack.add_argument("message_id")
     inbox_ack.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
@@ -390,6 +424,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Queue a completion reply to the original sender and wake it when it is a managed role",
     )
     inbox_complete.add_argument("--reply-no-notify", action="store_true", help="Queue the reply without waking sender")
+    inbox_complete_replies = inbox_sub.add_parser(
+        "complete-replies", help="Complete claimed or acknowledged completion notices"
+    )
+    inbox_complete_replies.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
+    inbox_complete_replies.add_argument("--limit", type=int, default=50)
+    inbox_complete_replies.add_argument("--status", default="done")
+    inbox_complete_replies.add_argument("--summary", default="completion notice recorded")
 
     memory = subparsers.add_parser("memory", help="Inspect or update role scratchpad memory")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)
@@ -427,6 +468,31 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_list.add_argument("--limit", type=int, default=50)
     milestone_list.add_argument("--json", action="store_true", help="Print JSON array instead of human output")
 
+    watch = subparsers.add_parser("watch", help="Track long-running role supervision work")
+    watch_sub = watch.add_subparsers(dest="watch_command", required=True)
+    watch_start = watch_sub.add_parser("start", help="Start a long-running supervision watch")
+    watch_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_start.add_argument("--summary", required=True, help="Concise supervision summary")
+    watch_start.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+
+    watch_update = watch_sub.add_parser("update", help="Record a watch heartbeat or blocker")
+    watch_update.add_argument("watch_id")
+    watch_update.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_update.add_argument("--summary", required=True, help="Current watch state")
+    watch_update.add_argument("--state", default="active", choices=WATCH_ACTIVE_STATES)
+    watch_update.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+
+    watch_complete = watch_sub.add_parser("complete", help="Complete a supervision watch")
+    watch_complete.add_argument("watch_id")
+    watch_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_complete.add_argument("--status", default="done", choices=("done", "failed", "cancelled"))
+    watch_complete.add_argument("--summary", required=True, help="Terminal watch summary")
+
+    watch_list = watch_sub.add_parser("list", help="List supervision watches")
+    watch_list.add_argument("--role", help="Owning role; defaults to --actor or all roles for operator")
+    watch_list.add_argument("--state", action="append", choices=WATCH_STATES, help="Filter state; repeatable")
+    watch_list.add_argument("--limit", type=int, default=50)
+
     role = subparsers.add_parser("role", help="Inspect or change role state")
     role_sub = role.add_subparsers(dest="role_command", required=True)
     role_sub.add_parser("list", help="List roles")
@@ -442,6 +508,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pane = subparsers.add_parser("pane", help="Inspect managed role tmux panes")
     pane_sub = pane.add_subparsers(dest="pane_command", required=True)
+    pane_list = pane_sub.add_parser("list", help="List managed role panes")
+    pane_list.add_argument("--all", action="store_true", help="Include unmanaged panes in managed role windows")
+    pane_list.add_argument("--tmux-bin", default="tmux")
     pane_capture = pane_sub.add_parser("capture", help="Print recent stdout/history from a role pane")
     pane_capture.add_argument("role")
     pane_capture.add_argument(
@@ -458,11 +527,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Skip this many newest pane history lines before printing",
     )
+    pane_capture.add_argument("--summary", action="store_true", help="Summarize captured pane output with codex exec")
     pane_capture.add_argument("--tmux-bin", default="tmux")
 
     notify = subparsers.add_parser("notify", help="Notify a role about pending work")
     notify.add_argument("role")
     notify.add_argument("--method", default="auto")
+
+    watchdog = subparsers.add_parser("watchdog", help="Check for stale or stuck team state")
+    watchdog.add_argument("--role", help="Limit checks to one role")
+    watchdog.add_argument("--unacked-warn-seconds", type=int, default=300)
+    watchdog.add_argument("--ack-warn-seconds", type=int, default=3600)
+    watchdog.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog.add_argument("--json", action="store_true", help="Print findings as JSON")
 
     sleep = subparsers.add_parser("sleep", help="Snapshot current bindings and tear down managed tmux team windows")
     sleep.add_argument(
@@ -744,6 +821,11 @@ def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext
             args.role = policy_context.actor
         if args.actor is None:
             args.actor = policy_context.actor or "operator"
+    if args.command == "watch":
+        if getattr(args, "role", None) is None and policy_context.actor is not None:
+            args.role = policy_context.actor
+        if args.watch_command != "list" and args.role is None:
+            raise ValueError(f"watch {args.watch_command} --role is required unless --actor or ${ROLE_ENV} is set")
     if args.command == "codex" and args.codex_command == "session-context" and args.role is None:
         args.role = policy_context.actor
         if args.role is None:
@@ -828,12 +910,20 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
             authorize(config, policy_context, "milestone.list", role=args.role or "")
         return
 
+    if args.command == "watch":
+        authorize(config, policy_context, f"watch.{args.watch_command}", role=args.role or "")
+        return
+
     if args.command == "role" and args.role_command != "list":
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
 
     if args.command == "pane" and args.pane_command == "capture":
         authorize(config, policy_context, "pane.capture", role=args.role)
+        return
+
+    if args.command == "pane" and args.pane_command == "list":
+        authorize(config, policy_context, "pane.list", all=str(args.all).lower())
         return
 
     if args.command == "notify":
@@ -887,7 +977,8 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
     print("roles:")
     for role in store.list_roles(conn):
         role_counts = counts.get(role["name"], {})
-        pending = sum(role_counts.get(state, 0) for state in CLAIMABLE_STATES)
+        stale_claimed = role_counts.get(STALE_CLAIMED_STATE, 0)
+        pending = sum(role_counts.get(state, 0) for state in CLAIMABLE_STATES) + stale_claimed
         claimed = role_counts.get("claimed", 0)
         acknowledged = role_counts.get("acknowledged", 0)
         completed = role_counts.get("completed", 0)
@@ -895,8 +986,21 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
         worktree = role["worktree"] or "-"
         print(
             f"  {role['name']}: state={role['state']} mode={role['mode']} pane={pane} worktree={worktree} "
-            f"pending={pending} claimed={claimed} ack={acknowledged} done={completed}"
+            f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
+        if args.verbose:
+            rows = store.list_active_messages(conn, role=role["name"], limit=args.active_limit)
+            if not rows:
+                print("    active: none")
+            else:
+                print("    active:")
+                for row in rows:
+                    print(f"      {active_message_line(row, args.unacked_warn_seconds)}")
+            watches = store.list_watches(conn, role=role["name"], states=WATCH_ACTIVE_STATES, limit=args.active_limit)
+            if watches:
+                print("    watches:")
+                for watch in watches:
+                    print(f"      {watch_one_line(watch)}")
     return 0
 
 
@@ -1004,6 +1108,57 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
     return 2
 
 
+def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.watch_command == "start":
+        row = store.start_watch(
+            conn,
+            role=args.role,
+            summary=args.summary,
+            created_by=args.actor or "operator",
+            next_update_at=watch_next_update_at(args.next_update_in),
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "update":
+        row = store.update_watch(
+            conn,
+            role=args.role,
+            watch_id=args.watch_id,
+            summary=args.summary,
+            status=args.state,
+            next_update_at=watch_next_update_at(args.next_update_in),
+            actor=args.actor or "operator",
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "complete":
+        row = store.complete_watch(
+            conn,
+            role=args.role,
+            watch_id=args.watch_id,
+            status=args.status,
+            summary=args.summary,
+            actor=args.actor or "operator",
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "list":
+        states = tuple(args.state) if args.state else WATCH_ACTIVE_STATES
+        rows = store.list_watches(conn, role=args.role, states=states, limit=args.limit)
+        if not rows:
+            role = args.role or "all roles"
+            print(f"no watches for {role}")
+            return 0
+        for row in rows:
+            print(watch_one_line(row))
+        return 0
+
+    return 2
+
+
 def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
     normalize_priority(args.priority)
     body = read_body(args)
@@ -1017,6 +1172,10 @@ def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
         force=args.force,
         wake=not args.no_notify,
         notify_method=args.notify_method,
+        correlation_key=args.correlation_key,
+        related_to=args.related_to,
+        supersedes=args.supersedes,
+        allow_duplicate=args.allow_duplicate,
         actor=args.actor or args.sender,
     )
     message = result.message
@@ -1028,6 +1187,8 @@ def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
             print(f"notify: {result.notification.details}")
         else:
             print(f"notify_failed: {result.notification.details}", file=sys.stderr)
+
+    print_duplicate_warnings(result.duplicates)
 
     if result.blocked is not None:
         print(f"blocked: role {result.blocked['role']} is {result.blocked['state']}", file=sys.stderr)
@@ -1042,18 +1203,31 @@ def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
     print(f"broadcast: {len(recipients)} recipient(s)")
     blocked = False
     for recipient in recipients:
-        result = service.send_message(
-            conn,
-            sender=args.sender,
-            recipient=recipient,
-            priority=args.priority,
-            summary=args.summary,
-            body=body,
-            force=args.force,
-            wake=not args.no_notify,
-            notify_method=args.notify_method,
-            actor=args.actor or args.sender,
-        )
+        if args.notice:
+            result = service.send_notice(
+                conn,
+                sender=args.sender,
+                recipient=recipient,
+                summary=args.summary,
+                body=body,
+                force=args.force,
+                wake=not args.no_notify,
+                notify_method=args.notify_method,
+                actor=args.actor or args.sender,
+            )
+        else:
+            result = service.send_message(
+                conn,
+                sender=args.sender,
+                recipient=recipient,
+                priority=args.priority,
+                summary=args.summary,
+                body=body,
+                force=args.force,
+                wake=not args.no_notify,
+                notify_method=args.notify_method,
+                actor=args.actor or args.sender,
+            )
         message = result.message
         print(f"{message.id} {message.state} to={message.recipient} priority={message.priority}")
         print(f"body: {message.body_path}")
@@ -1062,6 +1236,7 @@ def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
                 print(f"notify: {result.notification.details}")
             else:
                 print(f"notify_failed: {result.notification.details}", file=sys.stderr)
+        print_duplicate_warnings(result.duplicates)
         if result.blocked is not None:
             blocked = True
             print(f"blocked: role {result.blocked['role']} is {result.blocked['state']}", file=sys.stderr)
@@ -1074,6 +1249,8 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
         if row is None:
             print(f"no pending messages for {args.role}")
             return 1
+        if args.auto_ack:
+            row = service.ack_message(conn, args.role, row["id"], actor=args.actor)
         print_message(row, include_body=True)
         return 0
 
@@ -1085,6 +1262,18 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
             return 0
         for row in rows:
             print(message_one_line(row))
+            if args.verbose:
+                print(f"  {message_metadata_line(row)}")
+        return 0
+
+    if args.inbox_command == "reclaimable":
+        rows = service.store.list_reclaimable_messages(conn, role=args.role, limit=args.limit)
+        if not rows:
+            print(f"no reclaimable messages for {args.role}")
+            return 0
+        for row in rows:
+            print(message_one_line(row))
+            print(f"  claimed_by={row['claimed_by'] or '-'} claim_expires_at={row['claim_expires_at'] or '-'}")
         return 0
 
     if args.inbox_command == "ack":
@@ -1119,6 +1308,20 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
             print(f"reply_skipped: {result.reply_skipped}", file=sys.stderr)
         return 0
 
+    if args.inbox_command == "complete-replies":
+        rows = service.store.complete_completion_notices(
+            conn,
+            role=args.role,
+            result_status=args.status,
+            result_summary=args.summary,
+            limit=args.limit,
+            actor=args.actor or args.role,
+        )
+        print(f"completed {len(rows)} completion notice(s) for {args.role}")
+        for row in rows:
+            print(message_one_line(row))
+        return 0
+
     return 2
 
 
@@ -1146,6 +1349,9 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
 
 
 def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.pane_command == "list":
+        return cmd_pane_list(args, store, conn)
+
     if args.pane_command != "capture":
         return 2
     if args.lines <= 0:
@@ -1171,11 +1377,55 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
         details = (result.stderr or result.stdout or f"{args.tmux_bin} exited {result.returncode}").strip()
         print(details, file=sys.stderr)
         return 1
+    if args.summary:
+        summary = summarize_pane_capture(
+            role=args.role,
+            pane=pane,
+            text=result.stdout,
+        )
+        print(summary, end="" if summary.endswith("\n") else "\n")
+        return 0
     if args.offset:
         print(f"# pane {args.role} ({pane}) {args.lines} lines offset {args.offset}")
     else:
         print(f"# pane {args.role} ({pane}) last {args.lines} lines")
     print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    return 0
+
+
+def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
+    roles = store.list_roles(conn)
+    managed_by_target = {role["pane"]: role for role in roles if role["pane"]}
+    print("managed panes:")
+    if not managed_by_target:
+        print("  none")
+    for role in roles:
+        pane = role["pane"] or "-"
+        print(
+            f"  role={role['name']} managed=true pane={pane} state={role['state']} worktree={role['worktree'] or '-'}"
+        )
+
+    if not args.all:
+        return 0
+
+    print("all panes in managed windows:")
+    windows = sorted({target for pane in managed_by_target if (target := pane_window_target(pane))})
+    if not windows:
+        print("  none")
+        return 0
+    seen = False
+    for window in windows:
+        for pane in list_tmux_window_panes(args.tmux_bin, window):
+            seen = True
+            role = managed_by_target.get(pane["target"])
+            role_name = role["name"] if role is not None else "-"
+            managed = "true" if role is not None else "false"
+            print(
+                f"  role={role_name} managed={managed} pane={pane['target']} pane_id={pane['id']} "
+                f"command={pane['command'] or '-'} path={pane['path'] or '-'}"
+            )
+    if not seen:
+        print("  none")
     return 0
 
 
@@ -1186,6 +1436,25 @@ def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
         return 0
     print(result.details, file=sys.stderr)
     return 1
+
+
+def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
+    findings = watchdog_findings(
+        store,
+        conn,
+        role=args.role,
+        unacked_warn_seconds=args.unacked_warn_seconds,
+        ack_warn_seconds=args.ack_warn_seconds,
+        watch_grace_seconds=args.watch_grace_seconds,
+    )
+    if args.json:
+        print(json_dumps(findings))
+    elif not findings:
+        print("watchdog ok")
+    else:
+        for finding in findings:
+            print(format_watchdog_finding(finding))
+    return 0
 
 
 def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
@@ -1324,8 +1593,10 @@ def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row
 
     lines = [
         "tmux-team role recovery context.",
+        f"Role contract version: {ROLE_CONTRACT_VERSION}",
         "This is the same operating contract as the initial role startup prompt, not a new task.",
         "It restores role/framework context after Codex startup, resume, clear, or compact. It does not override user messages, inbox task bodies, or higher-priority instructions.",
+        "Skill reload policy: do not reread the full start-tmux-team skill on ordinary wakes when this contract version and the role loop are already loaded. Reread the skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.",
         "",
         f"Role: {role}",
         f"Config: {config_path}",
@@ -1335,7 +1606,7 @@ def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row
         f"Pending inbox messages: {pending}",
         "",
         "Operating loop:",
-        "1. Load the start-tmux-team skill and invariants if they are not already loaded in this context.",
+        "1. Load the start-tmux-team skill and invariants only if they are not already loaded for this contract version.",
         "2. Read scratchpad memory before claiming work.",
         "3. Claim one durable inbox message, acknowledge it, do the work, then complete it.",
         "4. Use --summary for the concise completion result and --body or --body-file for detailed evidence.",
@@ -1568,6 +1839,106 @@ def format_milestone(row: dict) -> str:
     return line
 
 
+def watchdog_findings(
+    store: Store,
+    conn,
+    *,
+    role: str | None,
+    unacked_warn_seconds: int,
+    ack_warn_seconds: int,
+    watch_grace_seconds: int,
+) -> list[dict[str, str]]:
+    roles = [role] if role else [row["name"] for row in store.list_roles(conn)]
+    findings: list[dict[str, str]] = []
+    now = datetime.now(UTC).replace(microsecond=0)
+    unacked_cutoff = (now - timedelta(seconds=unacked_warn_seconds)).isoformat()
+    ack_cutoff = (now - timedelta(seconds=ack_warn_seconds)).isoformat()
+    watch_cutoff = (now - timedelta(seconds=watch_grace_seconds)).isoformat()
+
+    for role_name in roles:
+        if store.get_role(conn, role_name) is None:
+            raise KeyError(f"Unknown role: {role_name}")
+        for row in conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE recipient = ?
+              AND priority = 'urgent'
+              AND state IN ('queued', 'notified', 'retrying')
+            ORDER BY created_at
+            """,
+            (role_name,),
+        ):
+            findings.append(watchdog_message_finding("urgent_pending", "urgent", row))
+
+        for row in store.list_reclaimable_messages(conn, role=role_name, limit=50):
+            findings.append(watchdog_message_finding("stale_claimed", "warning", row))
+
+        for row in conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE recipient = ?
+              AND state = 'claimed'
+              AND acknowledged_at IS NULL
+              AND updated_at <= ?
+            ORDER BY updated_at
+            """,
+            (role_name, unacked_cutoff),
+        ):
+            findings.append(watchdog_message_finding("claimed_unacked", "warning", row))
+
+        for row in conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE recipient = ?
+              AND state = 'acknowledged'
+              AND message_kind = 'task'
+              AND updated_at <= ?
+            ORDER BY updated_at
+            """,
+            (role_name, ack_cutoff),
+        ):
+            findings.append(watchdog_message_finding("old_acknowledged", "warning", row))
+
+        for row in conn.execute(
+            """
+            SELECT * FROM watches
+            WHERE role = ?
+              AND status IN ('active', 'blocked')
+              AND next_update_at IS NOT NULL
+              AND next_update_at <= ?
+            ORDER BY next_update_at
+            """,
+            (role_name, watch_cutoff),
+        ):
+            findings.append(
+                {
+                    "severity": "warning",
+                    "kind": "watch_overdue",
+                    "role": row["role"],
+                    "ref": row["id"],
+                    "summary": row["current_summary"],
+                }
+            )
+    return findings
+
+
+def watchdog_message_finding(kind: str, severity: str, row) -> dict[str, str]:
+    return {
+        "severity": severity,
+        "kind": kind,
+        "role": row["recipient"],
+        "ref": row["id"],
+        "summary": row["summary"],
+    }
+
+
+def format_watchdog_finding(finding: dict[str, str]) -> str:
+    return (
+        f"severity={finding['severity']} kind={finding['kind']} role={finding['role']} "
+        f"ref={finding['ref']} summary={finding['summary']}"
+    )
+
+
 def print_message(row, include_body: bool = False) -> None:
     print(f"id: {row['id']}")
     print(f"from: {row['sender']}")
@@ -1582,10 +1953,172 @@ def print_message(row, include_body: bool = False) -> None:
 
 
 def message_one_line(row) -> str:
+    state = row_value(row, "display_state", row["state"])
     return (
-        f"{row['id']} state={row['state']} from={row['sender']} to={row['recipient']} "
+        f"{row['id']} state={state} from={row['sender']} to={row['recipient']} "
         f"priority={row['priority']} summary={row['summary']}"
     )
+
+
+def message_metadata_line(row) -> str:
+    return (
+        f"kind={row_value(row, 'message_kind', 'task') or 'task'} "
+        f"correlation_key={row_value(row, 'correlation_key', None) or '-'} "
+        f"related_to={row_value(row, 'related_to', None) or '-'} "
+        f"supersedes={row_value(row, 'supersedes', None) or '-'}"
+    )
+
+
+def print_duplicate_warnings(rows) -> None:
+    for row in rows:
+        print(
+            f"duplicate_warning: active message {row['id']} "
+            f"state={row['state']} to={row['recipient']} summary={row['summary']}",
+            file=sys.stderr,
+        )
+
+
+def active_message_line(row, unacked_warn_seconds: int | None = None) -> str:
+    state = row_value(row, "display_state", row["state"])
+    parts = [
+        row["id"],
+        f"state={state}",
+        f"priority={row['priority']}",
+        f"from={row['sender']}",
+        f"age={format_age(row['created_at'])}",
+    ]
+    if row["claim_expires_at"]:
+        parts.append(f"claim_expires_at={row['claim_expires_at']}")
+    if claimed_unacked_warning(row, unacked_warn_seconds):
+        parts.append(f"warning=claimed_unacked claim_age={format_age(row['updated_at'])}")
+    parts.append(f"summary={row['summary']}")
+    return " ".join(parts)
+
+
+def watch_one_line(row) -> str:
+    parts = [
+        row["id"],
+        f"role={row['role']}",
+        f"state={row['status']}",
+        f"age={format_age(row['created_at'])}",
+        f"updated={row['updated_at']}",
+    ]
+    if row["next_update_at"]:
+        parts.append(f"next_update_at={row['next_update_at']}")
+    parts.append(f"summary={row['current_summary']}")
+    return " ".join(parts)
+
+
+def format_age(created_at: str) -> str:
+    age = datetime.now(UTC) - parse_utc_datetime(created_at)
+    seconds = max(0, int(age.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def claimed_unacked_warning(row, threshold_seconds: int | None) -> bool:
+    if threshold_seconds is None:
+        return False
+    if row_value(row, "display_state", row["state"]) != "claimed":
+        return False
+    if row["acknowledged_at"]:
+        return False
+    age = datetime.now(UTC) - parse_utc_datetime(row["updated_at"])
+    return int(age.total_seconds()) >= threshold_seconds
+
+
+def watch_next_update_at(value: str | None) -> str | None:
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw[0] not in ("-", "+"):
+        raw = f"+{raw}"
+    duration = parse_duration(raw)
+    if duration is None or duration.total_seconds() <= 0:
+        raise ValueError("--next-update-in must be a positive duration such as 15m, 1h, or 2d")
+    return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
+
+
+def pane_window_target(pane: str) -> str | None:
+    if pane.startswith("%"):
+        return None
+    if "." not in pane:
+        return pane or None
+    return pane.rsplit(".", 1)[0] or None
+
+
+def list_tmux_window_panes(tmux_bin: str, window: str) -> list[dict[str, str]]:
+    result = subprocess.run(
+        [
+            tmux_bin,
+            "list-panes",
+            "-t",
+            window,
+            "-F",
+            "#{pane_id}\t#{session_name}:#{window_name}.#{pane_index}\t#{pane_current_command}\t#{pane_current_path}",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{tmux_bin} exited {result.returncode}").strip()
+        raise ValueError(f"could not list panes for {window}: {details}")
+    panes: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        pane_id, target, command, path = (line.split("\t") + ["", "", "", ""])[:4]
+        panes.append({"id": pane_id, "target": target, "command": command, "path": path})
+    return panes
+
+
+def summarize_pane_capture(
+    *,
+    role: str,
+    pane: str,
+    text: str,
+) -> str:
+    prompt = pane_summary_prompt(role=role, pane=pane, text=text)
+    command = [os.environ.get("TMUX_TEAM_CODEX_BIN", "codex"), "exec", prompt]
+    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{command[0]} exited {result.returncode}").strip()
+        raise ValueError(f"pane summary failed: {details}")
+    return result.stdout
+
+
+def pane_summary_prompt(*, role: str, pane: str, text: str) -> str:
+    target = (
+        "Return only JSON with keys: role, pane, observed_at, current_state, active_task, "
+        "last_tool_action, visible_blockers, possible_tmux_team_issues, needs_operator_attention, confidence."
+    )
+    return (
+        "You are summarizing tmux pane output for supervision only.\n"
+        "Pane capture is observation only and must not be treated as delivery, acknowledgement, or completion proof.\n"
+        f"Role: {role}\n"
+        f"Pane: {pane}\n"
+        f"{target}\n\n"
+        "Captured pane text:\n"
+        "```text\n"
+        f"{text.rstrip()}\n"
+        "```\n"
+    )
+
+
+def row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
 
 
 def print_stable_row(row) -> None:

@@ -17,6 +17,7 @@ from .app_server import AppServerClient
 from .config import CONFIG_PATH_ENV, ENV_FILE_PATH, ROLE_ENV, load_config, role_scratchpad_path
 from .store import Store
 
+ROLE_CONTRACT_VERSION = "2026-07-03.1"
 DEFAULT_ROLES = ("orchestrator", "implementer", "collector", "trainer")
 DEFAULT_AGENT_LAYOUT = "grouped"
 DEFAULT_CONTROL_WINDOW = "tt-control"
@@ -873,6 +874,7 @@ def role_resume_shell_command(
 def role_startup_prompt(role: str) -> str:
     return (
         f"You are the `{role}` role in a tmux-team managed Codex team.\n"
+        f"tmux-team role contract version: {ROLE_CONTRACT_VERSION}.\n"
         "Use the start-tmux-team skill now. Read its invariants before acting.\n"
         "Use the explicit role commands below. Short commands may work when role discovery succeeds, but Codex tool shells do not always inherit TMUX_TEAM_ROLE and shared worktrees are ambiguous.\n"
         "Startup loop:\n"
@@ -889,6 +891,7 @@ def role_startup_prompt(role: str) -> str:
 def role_resume_prompt(role: str) -> str:
     return (
         f"You are resuming the `{role}` role in a tmux-team managed Codex team after sleep.\n"
+        f"tmux-team role contract version: {ROLE_CONTRACT_VERSION}.\n"
         "Use the start-tmux-team skill if the operating framework is not already loaded in this context.\n"
         f"Run `tmux-team memory show --role {role}` to reload durable role state, then `tmux-team inbox next --role {role}`.\n"
         "If there is no pending message, park and wait for app-server wake. Do not invent work.\n"

@@ -2,6 +2,28 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## Unreleased
+
+## 0.2.0 - 2026-07-03
+
+- Added a versioned tmux-team role contract marker to role startup/resume prompts and `codex session-context` to avoid full skill rereads on ordinary wakes.
+- Added single-shot `tmux-team watchdog` for durable-state supervision findings.
+- Added `tmux-team pane capture --summary` to summarize bounded pane output through `codex exec` as compact JSON.
+- Added `tmux-team pane list --all` to show managed role panes and unmanaged panes in managed windows.
+- Added `tmux-team broadcast --notice` for durable announcements that do not create pending inbox tasks.
+- Added `tmux-team inbox next --auto-ack` and verbose status warnings for claimed-but-not-acknowledged messages.
+- Added `completion_notice` message kind for completion replies and `tmux-team inbox complete-replies` for closing acknowledged completion notices.
+- Added optional `send` message correlation metadata (`--correlation-key`, `--related-to`, `--supersedes`) with warning-only active duplicate detection.
+- Added `tmux-team watch start/list/update/complete` for long-running supervision tasks with heartbeat-style status.
+- Added `tmux-team status --verbose` with bounded active message summaries per role.
+- Added `tmux-team inbox reclaimable` and `stale_claimed` status visibility so expired claimed messages are surfaced as recoverable work.
+- Added a repeatable public-snapshot live demo scenario with `make live-demo-setup`, `make live-demo-bootstrap`, `make live-demo-verify`, and `make live-demo-clean`.
+- Tightened live demo verification to cover stable correlation-key discipline, completion replies, notice broadcasts, watches, milestones, stable approval, and clean final inbox state.
+
+Migration notes:
+
+- Existing `team.sqlite` stores migrate additively to schema version 4 when opened; the new `watches` table, message correlation columns, and message kind column are created automatically.
+
 ## 0.1.3 - 2026-07-03
 
 - Added `tmux-team pane capture <role>` for read-only live supervision of managed role pane output, with `--lines`/`--limit` and `--offset` for paging history.

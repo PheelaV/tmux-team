@@ -347,6 +347,277 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
 
+    def test_expired_claim_is_visible_and_reclaimable(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "stalled task",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator", "--claim-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_id}", out)
+
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("orchestrator:", out)
+        self.assertIn("pending=1 stale_claimed=1", out)
+
+        code, out, err = self.run_cli("inbox", "reclaimable", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{message_id} state=stale_claimed", out)
+        self.assertIn("claim_expires_at=", out)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_id}", out)
+
+    def test_status_verbose_shows_active_message_summaries(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--priority",
+            "high",
+            "--summary",
+            "collect active evidence",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", message_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("status", "--verbose", "--active-limit", "2")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("active:", out)
+        self.assertIn(f"{message_id} state=acknowledged", out)
+        self.assertIn("priority=high", out)
+        self.assertIn("from=collector", out)
+        self.assertIn("summary=collect active evidence", out)
+        self.assertIn("claim_expires_at=", out)
+
+    def test_claimed_unacked_warning_and_auto_ack(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "unacked task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        first_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {first_id}", out)
+
+        code, out, err = self.run_cli("status", "--verbose", "--unacked-warn-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{first_id} state=claimed", out)
+        self.assertIn("warning=claimed_unacked", out)
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "auto ack task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        second_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator", "--auto-ack")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {second_id}", out)
+        self.assertIn("state: acknowledged", out)
+
+    def test_watchdog_reports_urgent_and_unacked_work(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--priority",
+            "urgent",
+            "--summary",
+            "urgent blocker",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        urgent_id = out.split()[0]
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "needs ack",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        unacked_id = out.split()[0]
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("watchdog", "--unacked-warn-seconds", "0")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=urgent_pending role=orchestrator ref={urgent_id}", out)
+        self.assertIn(f"kind=claimed_unacked role=collector ref={unacked_id}", out)
+
+    def test_watch_lifecycle_and_status_verbose(self) -> None:
+        code, out, err = self.run_cli(
+            "watch",
+            "start",
+            "--role",
+            "collector",
+            "--summary",
+            "monitor external run",
+            "--next-update-in",
+            "5m",
+        )
+        self.assertEqual(code, 0, err)
+        watch_id = out.split()[0]
+        self.assertTrue(watch_id.startswith("watch_"))
+        self.assertIn("role=collector", out)
+        self.assertIn("state=active", out)
+        self.assertIn("next_update_at=", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "update",
+            watch_id,
+            "--role",
+            "collector",
+            "--summary",
+            "heartbeat ok",
+            "--next-update-in",
+            "10m",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=heartbeat ok", out)
+
+        code, out, err = self.run_cli("status", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("watches:", out)
+        self.assertIn(f"{watch_id} role=collector state=active", out)
+        self.assertIn("summary=heartbeat ok", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "complete",
+            watch_id,
+            "--role",
+            "collector",
+            "--status",
+            "done",
+            "--summary",
+            "run terminalized",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=done", out)
+
+        code, out, err = self.run_cli("watch", "list", "--role", "collector", "--state", "done")
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=run terminalized", out)
+
+    def test_send_correlation_warns_about_active_duplicates(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "collect evidence",
+            "--body",
+            "body",
+            "--correlation-key",
+            "case-1",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        first_id = out.split()[0]
+        self.assertEqual(err, "")
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "trainer",
+            "--summary",
+            "collect different evidence",
+            "--body",
+            "body",
+            "--correlation-key",
+            "case-1",
+            "--related-to",
+            first_id,
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"duplicate_warning: active message {first_id}", err)
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "trainer",
+            "--summary",
+            "collect different evidence",
+            "--body",
+            "body",
+            "--correlation-key",
+            "case-1",
+            "--allow-duplicate",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("duplicate_warning", err)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--verbose")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("correlation_key=case-1", out)
+        self.assertIn(f"related_to={first_id}", out)
+
     def test_broadcast_creates_one_message_per_recipient(self) -> None:
         code, out, err = self.run_cli(
             "broadcast",
@@ -374,6 +645,39 @@ runtime_dir = "{other_runtime}"
         code, out, err = self.run_cli("inbox", "list", "--role", "collector")
         self.assertEqual(code, 0, err)
         self.assertIn("summary=checkpoint", out)
+
+    def test_broadcast_notice_does_not_create_pending_inbox_work(self) -> None:
+        code, out, err = self.run_cli(
+            "broadcast",
+            "--notice",
+            "--only",
+            "orchestrator,collector",
+            "--from",
+            "operator",
+            "--summary",
+            "policy updated",
+            "--body",
+            "Read the current operating notes before lifecycle work.",
+            "--no-notify",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("broadcast: 2 recipient(s)", out)
+        self.assertEqual(out.count(" completed to="), 2)
+
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("collector:", out)
+        self.assertIn("pending=0", out)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 1)
+        self.assertIn("no pending messages for collector", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector", "--state", "completed", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("summary=policy updated", out)
+        self.assertIn("kind=notice", out)
 
     def test_broadcast_rejects_only_and_exclude_together(self) -> None:
         code, out, err = self.run_cli(
@@ -492,6 +796,85 @@ exit 9
         self.assertIn("older line", out)
         self.assertIn("capture-pane -p -t test:collector.0 -S -25 -E -6", log_path.read_text(encoding="utf-8"))
 
+    def test_pane_capture_summary_uses_codex_exec(self) -> None:
+        fake_dir = self.root / "pane-summary-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        codex = fake_dir / "codex"
+        codex_log = self.root / "codex-summary.log"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "capture-pane" ]; then
+  printf 'working on tests\\nlast command: pytest -q\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        codex.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" > {codex_log}
+if [ "$1" = "exec" ]; then
+  printf '{{"role":"collector","pane":"test:collector.0","current_state":"working","needs_operator_attention":false}}\\n'
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        codex.chmod(0o755)
+
+        with patch.dict(os.environ, {"TMUX_TEAM_CODEX_BIN": str(codex)}):
+            code, out, err = self.run_cli(
+                "pane",
+                "capture",
+                "collector",
+                "--summary",
+                "--lines",
+                "40",
+                "--tmux-bin",
+                str(tmux),
+            )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn('"current_state":"working"', out)
+        self.assertIn("exec", codex_log.read_text(encoding="utf-8"))
+
+    def test_pane_list_all_marks_unmanaged_panes(self) -> None:
+        fake_dir = self.root / "pane-list-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "list-panes" ]; then
+  case "$3" in
+    test:collector)
+      printf '%%1\\ttest:collector.0\\tcodex\\t/tmp/collector\\n'
+      printf '%%2\\ttest:collector.1\\tzsh\\t/tmp/helper\\n'
+      ;;
+    test:orchestrator)
+      printf '%%3\\ttest:orchestrator.0\\tcodex\\t/tmp/orchestrator\\n'
+      ;;
+  esac
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli("pane", "list", "--all", "--tmux-bin", str(tmux))
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("managed panes:", out)
+        self.assertIn("role=collector managed=true pane=test:collector.0", out)
+        self.assertIn("all panes in managed windows:", out)
+        self.assertIn("role=collector managed=true pane=test:collector.0 pane_id=%1", out)
+        self.assertIn("role=- managed=false pane=test:collector.1 pane_id=%2 command=zsh path=/tmp/helper", out)
+
     def test_pane_capture_policy_allows_orchestrator_supervision(self) -> None:
         code, out, err = self.run_main(
             "--config",
@@ -565,6 +948,60 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("from=orchestrator", out)
         self.assertIn("orchestrator completed: test failed", out)
+
+    def test_completion_replies_can_be_bulk_completed_after_ack(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "test failed",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        original_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", original_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            original_id,
+            "--role",
+            "orchestrator",
+            "--summary",
+            "routed",
+            "--reply-to-sender",
+            "--reply-no-notify",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        reply_id = ""
+        for line in out.splitlines():
+            if line.startswith("id: "):
+                reply_id = line.removeprefix("id: ")
+        self.assertTrue(reply_id.startswith("msg_"))
+
+        code, out, err = self.run_cli("inbox", "ack", reply_id, "--role", "collector")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "list", "--role", "collector", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kind=completion_notice", out)
+        self.assertIn(f"related_to={original_id}", out)
+
+        code, out, err = self.run_cli("inbox", "complete-replies", "--role", "collector")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("completed 1 completion notice(s)", out)
+        self.assertIn(f"{reply_id} state=completed", out)
 
     def test_complete_accepts_body_detail(self) -> None:
         code, out, err = self.run_cli(
@@ -973,6 +1410,9 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("same operating contract as the initial role startup prompt", out)
+        self.assertIn("Role contract version:", out)
+        self.assertIn("Skill reload policy:", out)
+        self.assertIn("do not reread the full start-tmux-team skill on ordinary wakes", out)
         self.assertIn("not a new task", out)
         self.assertIn("Role: collector", out)
         self.assertIn("Pending inbox messages: 1", out)
@@ -1128,6 +1568,7 @@ can_notify = ["orchestrator"]
         prompt = role_startup_prompt("collector")
 
         self.assertIn("tmux-team memory show --role collector", prompt)
+        self.assertIn("tmux-team role contract version:", prompt)
         self.assertIn("tmux-team inbox next --role collector", prompt)
         self.assertIn("tmux-team inbox ack <message-id> --role collector", prompt)
         self.assertIn("tmux-team inbox complete <message-id> --role collector", prompt)

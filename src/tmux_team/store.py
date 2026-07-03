@@ -16,10 +16,13 @@ from .app_server import AppServerError, submit_app_server_wake
 from .config import RoleConfig, TeamConfig
 
 MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
+STALE_CLAIMED_STATE = "stale_claimed"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
+WATCH_ACTIVE_STATES = ("active", "blocked")
+WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,10 @@ class Message:
     state: str
     created_at: str
     updated_at: str
+    correlation_key: str | None = None
+    related_to: str | None = None
+    supersedes: str | None = None
+    message_kind: str = "task"
 
 
 @dataclass(frozen=True)
@@ -95,7 +102,11 @@ class Store:
               acknowledged_at TEXT,
               completed_at TEXT,
               result_status TEXT,
-              result_summary TEXT
+              result_summary TEXT,
+              correlation_key TEXT,
+              related_to TEXT,
+              supersedes TEXT,
+              message_kind TEXT NOT NULL DEFAULT 'task'
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_recipient_state_created
@@ -137,8 +148,29 @@ class Store:
               ref_id TEXT,
               payload_json TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS watches (
+              id TEXT PRIMARY KEY,
+              role TEXT NOT NULL,
+              status TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              current_summary TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_update_at TEXT NOT NULL,
+              next_update_at TEXT,
+              completed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_watches_role_status_updated
+              ON watches(role, status, updated_at);
             """
         )
+        self._ensure_column(conn, "messages", "correlation_key", "TEXT")
+        self._ensure_column(conn, "messages", "related_to", "TEXT")
+        self._ensure_column(conn, "messages", "supersedes", "TEXT")
+        self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
 
@@ -177,6 +209,10 @@ class Store:
         summary: str,
         body: str,
         state: str = "queued",
+        correlation_key: str | None = None,
+        related_to: str | None = None,
+        supersedes: str | None = None,
+        message_kind: str = "task",
     ) -> Message:
         now = utc_now()
         message_id = new_message_id()
@@ -184,20 +220,60 @@ class Store:
         body_path.write_text(body, encoding="utf-8")
         conn.execute(
             """
-            INSERT INTO messages(id, sender, recipient, priority, summary, body_path, state, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages(
+              id, sender, recipient, priority, summary, body_path, state, created_at, updated_at,
+              correlation_key, related_to, supersedes, message_kind
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, sender, recipient, normalize_priority(priority), summary, str(body_path), state, now, now),
+            (
+                message_id,
+                sender,
+                recipient,
+                normalize_priority(priority),
+                summary,
+                str(body_path),
+                state,
+                now,
+                now,
+                empty_to_none(correlation_key),
+                empty_to_none(related_to),
+                empty_to_none(supersedes),
+                normalize_message_kind(message_kind),
+            ),
         )
         self.record_event(
             conn,
             "message.created",
             sender,
             message_id,
-            {"to": recipient, "priority": normalize_priority(priority), "summary": summary, "state": state},
+            {
+                "to": recipient,
+                "priority": normalize_priority(priority),
+                "summary": summary,
+                "state": state,
+                "correlation_key": empty_to_none(correlation_key),
+                "related_to": empty_to_none(related_to),
+                "supersedes": empty_to_none(supersedes),
+                "message_kind": normalize_message_kind(message_kind),
+            },
         )
         conn.commit()
-        return Message(message_id, sender, recipient, normalize_priority(priority), summary, body_path, state, now, now)
+        return Message(
+            message_id,
+            sender,
+            recipient,
+            normalize_priority(priority),
+            summary,
+            body_path,
+            state,
+            now,
+            now,
+            empty_to_none(correlation_key),
+            empty_to_none(related_to),
+            empty_to_none(supersedes),
+            normalize_message_kind(message_kind),
+        )
 
     def get_role(self, conn: sqlite3.Connection, role: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM roles WHERE name = ?", (role,)).fetchone()
@@ -274,6 +350,269 @@ class Store:
                     ELSE 3
                   END,
                   created_at
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+        )
+
+    def list_reclaimable_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        clauses = ["state = 'claimed'", "claim_expires_at IS NOT NULL", "claim_expires_at <= ?"]
+        params: list[Any] = [utc_now()]
+        if role:
+            clauses.append("recipient = ?")
+            params.append(role)
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT *, '{STALE_CLAIMED_STATE}' AS display_state
+                FROM messages
+                WHERE {" AND ".join(clauses)}
+                ORDER BY
+                  CASE priority
+                    WHEN 'urgent' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    ELSE 3
+                  END,
+                  claim_expires_at,
+                  created_at
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+        )
+
+    def list_active_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        limit: int = 3,
+    ) -> list[sqlite3.Row]:
+        now = utc_now()
+        return list(
+            conn.execute(
+                f"""
+                SELECT
+                  *,
+                  CASE
+                    WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                    THEN '{STALE_CLAIMED_STATE}'
+                    ELSE state
+                  END AS display_state
+                FROM messages
+                WHERE recipient = ?
+                  AND state IN ('queued', 'notified', 'retrying', 'claimed', 'acknowledged')
+                ORDER BY
+                  CASE priority
+                    WHEN 'urgent' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    ELSE 3
+                  END,
+                  created_at
+                LIMIT ?
+                """,
+                (now, role, limit),
+            )
+        )
+
+    def find_duplicate_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        recipient: str,
+        summary: str,
+        correlation_key: str | None = None,
+        limit: int = 5,
+    ) -> list[sqlite3.Row]:
+        normalized_summary = normalize_summary(summary)
+        clauses = [
+            "recipient = ?",
+            "message_kind = 'task'",
+            "state IN ('queued', 'notified', 'retrying', 'claimed', 'acknowledged')",
+        ]
+        params: list[Any] = [recipient]
+        match_clauses: list[str] = []
+        if correlation_key:
+            match_clauses.append("correlation_key = ?")
+            params.append(correlation_key)
+        if normalized_summary:
+            match_clauses.append("LOWER(TRIM(summary)) = ?")
+            params.append(normalized_summary)
+        if not match_clauses:
+            return []
+        clauses.append(f"({' OR '.join(match_clauses)})")
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT * FROM messages
+                WHERE {" AND ".join(clauses)}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+        )
+
+    def start_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        summary: str,
+        created_by: str,
+        next_update_at: str | None = None,
+    ) -> sqlite3.Row:
+        if self.get_role(conn, role) is None:
+            raise KeyError(f"Unknown role: {role}")
+        now = utc_now()
+        watch_id = new_watch_id()
+        conn.execute(
+            """
+            INSERT INTO watches(
+              id, role, status, summary, current_summary,
+              created_by, created_at, updated_at, last_update_at, next_update_at
+            )
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (watch_id, role, summary, summary, created_by, now, now, now, next_update_at),
+        )
+        self.record_event(
+            conn,
+            "watch.started",
+            created_by,
+            watch_id,
+            {"role": role, "summary": summary, "next_update_at": next_update_at},
+        )
+        conn.commit()
+        return self.get_watch(conn, watch_id)
+
+    def update_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        watch_id: str,
+        summary: str,
+        status: str = "active",
+        next_update_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        if status not in WATCH_ACTIVE_STATES:
+            raise ValueError(f"Invalid active watch status: {status}")
+        row = self._watch_for_role(conn, role, watch_id)
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watches
+            SET status = ?,
+                current_summary = ?,
+                updated_at = ?,
+                last_update_at = ?,
+                next_update_at = ?
+            WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
+            RETURNING *
+            """,
+            (status, summary, now, now, next_update_at, watch_id, role),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot update watch {watch_id} in state {row['status']}")
+        self.record_event(
+            conn,
+            "watch.updated",
+            actor,
+            watch_id,
+            {"role": role, "status": status, "summary": summary, "next_update_at": next_update_at},
+        )
+        conn.commit()
+        return updated
+
+    def complete_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        watch_id: str,
+        status: str,
+        summary: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        if status not in ("done", "failed", "cancelled"):
+            raise ValueError(f"Invalid terminal watch status: {status}")
+        row = self._watch_for_role(conn, role, watch_id)
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watches
+            SET status = ?,
+                current_summary = ?,
+                updated_at = ?,
+                last_update_at = ?,
+                completed_at = ?,
+                next_update_at = NULL
+            WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
+            RETURNING *
+            """,
+            (status, summary, now, now, now, watch_id, role),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot complete watch {watch_id} in state {row['status']}")
+        self.record_event(
+            conn,
+            "watch.completed",
+            actor,
+            watch_id,
+            {"role": role, "status": status, "summary": summary},
+        )
+        conn.commit()
+        return updated
+
+    def list_watches(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str | None = None,
+        states: tuple[str, ...] | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if role:
+            clauses.append("role = ?")
+            params.append(role)
+        if states:
+            invalid = tuple(state for state in states if state not in WATCH_STATES)
+            if invalid:
+                raise ValueError(f"Invalid watch state: {invalid[0]}")
+            placeholders = ", ".join("?" for _ in states)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(states)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT * FROM watches
+                {where}
+                ORDER BY
+                  CASE status
+                    WHEN 'blocked' THEN 0
+                    WHEN 'active' THEN 1
+                    WHEN 'failed' THEN 2
+                    WHEN 'done' THEN 3
+                    ELSE 4
+                  END,
+                  updated_at DESC
                 LIMIT ?
                 """,
                 tuple(params),
@@ -379,35 +718,120 @@ class Store:
         conn.commit()
         return updated
 
-    def notify_role(self, conn: sqlite3.Connection, role: str, method: str = "auto") -> tuple[bool, str]:
+    def complete_completion_notices(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        result_status: str = "done",
+        result_summary: str = "completion notice recorded",
+        limit: int = 50,
+        actor: str = "operator",
+    ) -> list[sqlite3.Row]:
+        now = utc_now()
+        rows = list(
+            conn.execute(
+                """
+                SELECT * FROM messages
+                WHERE recipient = ?
+                  AND message_kind = 'completion_notice'
+                  AND state IN ('claimed', 'acknowledged')
+                ORDER BY updated_at
+                LIMIT ?
+                """,
+                (role, limit),
+            )
+        )
+        completed: list[sqlite3.Row] = []
+        for row in rows:
+            updated = conn.execute(
+                """
+                UPDATE messages
+                SET state = 'completed',
+                    completed_at = ?,
+                    result_status = ?,
+                    result_summary = ?,
+                    updated_at = ?
+                WHERE id = ? AND recipient = ? AND state IN ('claimed', 'acknowledged')
+                RETURNING *
+                """,
+                (now, result_status, result_summary, now, row["id"], role),
+            ).fetchone()
+            if updated is not None:
+                completed.append(updated)
+                self.record_event(
+                    conn,
+                    "message.completed",
+                    actor,
+                    row["id"],
+                    {"status": result_status, "summary": result_summary, "previous_state": row["state"]},
+                )
+        conn.commit()
+        return completed
+
+    def notify_role(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        method: str = "auto",
+        *,
+        notice_message_id: str | None = None,
+        notice_summary: str | None = None,
+    ) -> tuple[bool, str]:
         role_row = self.get_role(conn, role)
         if role_row is None:
             return False, f"unknown role: {role}"
         if method == "auto":
             method = role_notify_method(role_row)
         method = normalize_notify_method(method)
+        is_notice = notice_summary is not None
         pending = self.pending_count(conn, role)
-        if pending == 0:
+        if pending == 0 and not is_notice:
             return True, "no pending messages"
 
         if method == "app-server-turn":
+            if is_notice:
+                prompt = self.app_server_notice_prompt(role, str(notice_summary))
+                return self.notify_role_app_server_prompt(
+                    conn,
+                    role,
+                    role_row,
+                    prompt=prompt,
+                    message_id=notice_message_id,
+                    update_queued=False,
+                    event_type="role.notice_sent",
+                    event_payload={"message_id": notice_message_id},
+                    success_label="app-server notice",
+                    failure_label="app-server notice submission failed",
+                )
             return self.notify_role_app_server(conn, role, role_row, self.pending_wake_context(conn, role))
 
         pane = role_row["pane"]
         if not pane:
-            self.record_notification(conn, None, role, method, "notify_failed", "role has no pane")
+            self.record_notification(conn, notice_message_id, role, method, "notify_failed", "role has no pane")
             conn.commit()
             return False, "role has no pane"
 
-        text = f"[tmux-team] {pending} pending message(s). Run: tmux-team inbox next --role {role}"
+        text = (
+            f"[tmux-team notice] {notice_summary}"
+            if is_notice
+            else f"[tmux-team] {pending} pending message(s). Run: tmux-team inbox next --role {role}"
+        )
         if method not in ("display-message", "send-keys"):
-            self.record_notification(conn, None, role, method, "notify_failed", f"unsupported method: {method}")
+            self.record_notification(
+                conn, notice_message_id, role, method, "notify_failed", f"unsupported method: {method}"
+            )
             conn.commit()
             return False, f"unsupported method: {method}"
+        if is_notice and method == "send-keys":
+            details = "notice notification does not support method: send-keys"
+            self.record_notification(conn, notice_message_id, role, method, "notify_failed", details)
+            conn.commit()
+            return False, details
 
         tmux = shutil.which("tmux")
         if tmux is None:
-            self.record_notification(conn, None, role, method, "notify_failed", "tmux not found")
+            self.record_notification(conn, notice_message_id, role, method, "notify_failed", "tmux not found")
             conn.commit()
             return False, "tmux not found"
 
@@ -419,7 +843,7 @@ class Store:
                 state = "notify_failed"
                 if pane_details.startswith("notify_deferred:"):
                     state = "notify_deferred"
-                self.record_notification(conn, None, role, method, state, pane_details)
+                self.record_notification(conn, notice_message_id, role, method, state, pane_details)
                 event_type = "role.notification_deferred" if state == "notify_deferred" else "role.notification_failed"
                 self.record_event(conn, event_type, "tmux", role, {"method": method, "details": pane_details})
                 conn.commit()
@@ -433,23 +857,29 @@ class Store:
 
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode == 0:
-            now = utc_now()
-            conn.execute(
-                """
-                UPDATE messages
-                SET state = 'notified', attempts = attempts + 1, updated_at = ?
-                WHERE recipient = ? AND state = 'queued'
-                """,
-                (now, role),
-            )
             details = text if method == "display-message" else wake_prompt
-            self.record_notification(conn, None, role, method, "notified", details)
-            self.record_event(conn, "role.notified", "tmux", role, {"pending": pending, "method": method})
+            if is_notice:
+                self.record_notification(conn, notice_message_id, role, method, "notified", details)
+                self.record_event(
+                    conn, "role.notice_sent", "tmux", role, {"message_id": notice_message_id, "method": method}
+                )
+            else:
+                now = utc_now()
+                conn.execute(
+                    """
+                    UPDATE messages
+                    SET state = 'notified', attempts = attempts + 1, updated_at = ?
+                    WHERE recipient = ? AND state = 'queued'
+                    """,
+                    (now, role),
+                )
+                self.record_notification(conn, None, role, method, "notified", details)
+                self.record_event(conn, "role.notified", "tmux", role, {"pending": pending, "method": method})
             conn.commit()
             return True, details
 
         details = (result.stderr or result.stdout or f"tmux exited {result.returncode}").strip()
-        self.record_notification(conn, None, role, method, "notify_failed", details)
+        self.record_notification(conn, notice_message_id, role, method, "notify_failed", details)
         conn.commit()
         return False, details
 
@@ -460,17 +890,6 @@ class Store:
         role_row: sqlite3.Row,
         wake_context: dict[str, Any],
     ) -> tuple[bool, str]:
-        settings = self.resolve_role_app_server(conn, role, role_row)
-        if settings is None:
-            details = "role has no app-server endpoint/thread binding"
-            self.record_notification(conn, None, role, "app-server-turn", "notify_failed", details)
-            self.record_event(
-                conn, "role.notification_failed", "app-server", role, {"method": "app-server-turn", "details": details}
-            )
-            conn.commit()
-            return False, details
-
-        endpoint, thread_id, timeout = settings
         pending = int(wake_context["pending"])
         prompt = self.app_server_wake_prompt(
             role,
@@ -478,6 +897,46 @@ class Store:
             top_message=wake_context.get("top_message"),
             urgent_count=int(wake_context.get("urgent_count") or 0),
         )
+        return self.notify_role_app_server_prompt(
+            conn,
+            role,
+            role_row,
+            prompt=prompt,
+            update_queued=True,
+            event_payload={"pending": pending},
+            success_label="app-server turn",
+            failure_label="app-server turn submission failed",
+        )
+
+    def notify_role_app_server_prompt(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        role_row: sqlite3.Row,
+        *,
+        prompt: str,
+        message_id: str | None = None,
+        update_queued: bool,
+        event_type: str = "role.notified",
+        event_payload: dict[str, Any] | None = None,
+        success_label: str,
+        failure_label: str,
+    ) -> tuple[bool, str]:
+        settings = self.resolve_role_app_server(conn, role, role_row)
+        if settings is None:
+            details = "role has no app-server endpoint/thread binding"
+            self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
+            self.record_event(
+                conn,
+                "role.notification_failed",
+                "app-server",
+                role,
+                {"method": "app-server-turn", "details": details, "message_id": message_id},
+            )
+            conn.commit()
+            return False, details
+
+        endpoint, thread_id, timeout = settings
         try:
             turn = submit_app_server_wake(
                 endpoint=endpoint,
@@ -487,43 +946,49 @@ class Store:
                 timeout=timeout,
             )
         except (AppServerError, OSError, TimeoutError) as exc:
-            details = f"app-server turn submission failed: {exc}"
-            self.record_notification(conn, None, role, "app-server-turn", "notify_failed", details)
+            details = f"{failure_label}: {exc}"
+            self.record_notification(conn, message_id, role, "app-server-turn", "notify_failed", details)
             self.record_event(
-                conn, "role.notification_failed", "app-server", role, {"method": "app-server-turn", "details": details}
+                conn,
+                "role.notification_failed",
+                "app-server",
+                role,
+                {"method": "app-server-turn", "details": details, "message_id": message_id},
             )
             conn.commit()
             return False, details
 
-        now = utc_now()
-        conn.execute(
-            """
-            UPDATE messages
-            SET state = 'notified', attempts = attempts + 1, updated_at = ?
-            WHERE recipient = ? AND state = 'queued'
-            """,
-            (now, role),
-        )
+        if update_queued:
+            now = utc_now()
+            conn.execute(
+                """
+                UPDATE messages
+                SET state = 'notified', attempts = attempts + 1, updated_at = ?
+                WHERE recipient = ? AND state = 'queued'
+                """,
+                (now, role),
+            )
+        payload = {
+            "method": "app-server-turn",
+            "thread_id": turn.thread_id,
+            "turn_id": turn.turn_id,
+        }
+        if event_payload:
+            payload.update(event_payload)
         details = json.dumps(
             {
                 "endpoint": endpoint,
                 "thread_id": turn.thread_id,
                 "turn_id": turn.turn_id,
                 "turn_status": turn.status,
-                "pending": pending,
+                **(event_payload or {}),
             },
             sort_keys=True,
         )
-        self.record_notification(conn, None, role, "app-server-turn", "submitted", details)
-        self.record_event(
-            conn,
-            "role.notified",
-            "app-server",
-            role,
-            {"pending": pending, "method": "app-server-turn", "thread_id": turn.thread_id, "turn_id": turn.turn_id},
-        )
+        self.record_notification(conn, message_id, role, "app-server-turn", "submitted", details)
+        self.record_event(conn, event_type, "app-server", role, payload)
         conn.commit()
-        return True, f"app-server turn submitted thread={turn.thread_id} turn={turn.turn_id}"
+        return True, f"{success_label} submitted thread={turn.thread_id} turn={turn.turn_id}"
 
     def resolve_role_app_server(
         self,
@@ -565,6 +1030,7 @@ class Store:
         lines = [f"Inbox wake: {pending} pending message(s) for role `{role}`."]
         if top_message is not None:
             priority = str(top_message["priority"]).upper()
+            display_state = str(_row_value(top_message, "display_state", top_message["state"]))
             header = (
                 "URGENT tmux-team inbox message pending" if priority == "URGENT" else "tmux-team inbox message pending"
             )
@@ -577,6 +1043,10 @@ class Store:
                     f"Pending: {pending} total, {urgent_count} urgent",
                 ]
             )
+            if display_state == STALE_CLAIMED_STATE:
+                lines.append(
+                    "State: stale claimed message; reclaim it with `tmux-team inbox next` if the previous turn did not finish."
+                )
             if priority == "URGENT":
                 lines.append(
                     "Action: stop at the current safe point, claim this urgent message before continuing other work, then drain by priority."
@@ -587,6 +1057,13 @@ class Store:
             lines.append("Wake notice only. Claim durable inbox work now.")
             lines.append("Follow the loaded role loop and drain until empty.")
         return "\n".join(lines).rstrip() + "\n"
+
+    def app_server_notice_prompt(self, role: str, summary: str) -> str:
+        return (
+            f"tmux-team notice for role `{role}`.\n"
+            f"Summary: {truncate_wake_line(summary)}\n"
+            "No inbox task was queued; no claim, ack, or completion is required.\n"
+        )
 
     def cli_config_arg(self, role: str | None = None) -> str:
         if self.config.config_path is None:
@@ -623,27 +1100,58 @@ class Store:
     def pending_count(self, conn: sqlite3.Connection, role: str) -> int:
         return int(
             conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying')",
-                (role,),
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE recipient = ?
+                  AND (
+                    state IN ('queued', 'notified', 'retrying')
+                    OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+                  )
+                """,
+                (role, utc_now()),
             ).fetchone()[0]
         )
 
     def pending_wake_context(self, conn: sqlite3.Connection, role: str) -> dict[str, Any]:
+        now = utc_now()
         pending = self.pending_count(conn, role)
         urgent_count = int(
             conn.execute(
                 """
                 SELECT COUNT(*) FROM messages
-                WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying') AND priority = 'urgent'
+                WHERE recipient = ?
+                  AND priority = 'urgent'
+                  AND (
+                    state IN ('queued', 'notified', 'retrying')
+                    OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+                  )
                 """,
-                (role,),
+                (role, now),
             ).fetchone()[0]
         )
         top_message = conn.execute(
             """
-            SELECT id, sender, recipient, priority, summary, state, created_at
+            SELECT
+              id,
+              sender,
+              recipient,
+              priority,
+              summary,
+              state,
+              CASE
+                WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                THEN 'stale_claimed'
+                ELSE state
+              END AS display_state,
+              created_at,
+              claim_expires_at,
+              claimed_by
             FROM messages
-            WHERE recipient = ? AND state IN ('queued', 'notified', 'retrying')
+            WHERE recipient = ?
+              AND (
+                state IN ('queued', 'notified', 'retrying')
+                OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+              )
             ORDER BY
               CASE priority
                 WHEN 'urgent' THEN 0
@@ -654,21 +1162,30 @@ class Store:
               created_at
             LIMIT 1
             """,
-            (role,),
+            (now, role, now),
         ).fetchone()
         return {"pending": pending, "urgent_count": urgent_count, "top_message": top_message}
 
     def active_counts(self, conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+        now = utc_now()
         rows = conn.execute(
             """
-            SELECT recipient, state, COUNT(*) AS count
+            SELECT
+              recipient,
+              CASE
+                WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                THEN 'stale_claimed'
+                ELSE state
+              END AS display_state,
+              COUNT(*) AS count
             FROM messages
-            GROUP BY recipient, state
-            """
+            GROUP BY recipient, display_state
+            """,
+            (now,),
         ).fetchall()
         counts: dict[str, dict[str, int]] = {}
         for row in rows:
-            counts.setdefault(row["recipient"], {})[row["state"]] = int(row["count"])
+            counts.setdefault(row["recipient"], {})[row["display_state"]] = int(row["count"])
         return counts
 
     def approve_stable_commit(
@@ -838,6 +1355,23 @@ class Store:
             allowed = ", ".join(allowed_states)
             raise ValueError(f"Cannot {action} message {row['id']} in state {row['state']}; expected one of: {allowed}")
 
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def get_watch(self, conn: sqlite3.Connection, watch_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown watch: {watch_id}")
+        return row
+
+    def _watch_for_role(self, conn: sqlite3.Connection, role: str, watch_id: str) -> sqlite3.Row:
+        row = self.get_watch(conn, watch_id)
+        if row["role"] != role:
+            raise PermissionError(f"Watch {watch_id} belongs to {row['role']}, not {role}")
+        return row
+
 
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
@@ -852,10 +1386,23 @@ def parse_utc_datetime(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 def new_message_id() -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
     return f"msg_{stamp}_{suffix}"
+
+
+def new_watch_id() -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    suffix = secrets.token_hex(3)
+    return f"watch_{stamp}_{suffix}"
 
 
 def normalize_priority(priority: str) -> str:
@@ -863,6 +1410,24 @@ def normalize_priority(priority: str) -> str:
     if value not in PRIORITY_ORDER:
         raise ValueError(f"Invalid priority: {priority}")
     return value
+
+
+def normalize_summary(summary: str) -> str:
+    return " ".join(summary.strip().lower().split())
+
+
+def normalize_message_kind(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized not in ("task", "completion_notice", "notice"):
+        raise ValueError(f"Invalid message kind: {value}")
+    return normalized
+
+
+def empty_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def normalize_notify_method(method: str) -> str:

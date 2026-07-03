@@ -21,6 +21,7 @@ class SendMessageResult:
     message: Message
     blocked: dict[str, str] | None = None
     notification: NotificationResult | None = None
+    duplicates: tuple[sqlite3.Row, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,11 @@ class TeamService:
         force: bool = False,
         wake: bool = True,
         notify_method: str = "auto",
+        correlation_key: str | None = None,
+        related_to: str | None = None,
+        supersedes: str | None = None,
+        message_kind: str = "task",
+        allow_duplicate: bool = False,
         actor: str | None = None,
     ) -> SendMessageResult:
         message_data: dict[str, Any] = {
@@ -58,6 +64,11 @@ class TeamService:
             "force": force,
             "wake": wake,
             "notify_method": notify_method,
+            "correlation_key": correlation_key,
+            "related_to": related_to,
+            "supersedes": supersedes,
+            "message_kind": message_kind,
+            "allow_duplicate": allow_duplicate,
         }
         hooked = self.hook_runner.run(
             self.store,
@@ -76,10 +87,26 @@ class TeamService:
         force = bool(message_data.get("force", force))
         wake = bool(message_data.get("wake", wake))
         notify_method = str(message_data.get("notify_method") or notify_method)
+        correlation_key = optional_str(message_data.get("correlation_key"))
+        related_to = optional_str(message_data.get("related_to"))
+        supersedes = optional_str(message_data.get("supersedes"))
+        message_kind = str(message_data.get("message_kind") or message_kind)
+        allow_duplicate = bool(message_data.get("allow_duplicate", allow_duplicate))
 
         role = self.store.get_role(conn, recipient)
         if role is None:
             raise KeyError(f"Unknown recipient role: {recipient}")
+
+        duplicates: tuple[sqlite3.Row, ...] = ()
+        if not allow_duplicate:
+            duplicates = tuple(
+                self.store.find_duplicate_messages(
+                    conn,
+                    recipient=recipient,
+                    summary=summary,
+                    correlation_key=correlation_key,
+                )
+            )
 
         state = "queued"
         blocked = None
@@ -95,18 +122,79 @@ class TeamService:
             summary=summary,
             body=body,
             state=state,
+            correlation_key=correlation_key,
+            related_to=related_to,
+            supersedes=supersedes,
+            message_kind=message_kind,
         )
         self.hook_runner.run(
             self.store,
             conn,
             "message.created",
-            {"message": message_to_dict(message), "blocked": blocked},
+            {
+                "message": message_to_dict(message),
+                "blocked": blocked,
+                "duplicates": [row_to_dict(row) for row in duplicates],
+            },
             actor=actor or sender,
         )
 
         notification = None
         if state == "queued" and wake:
             notification = self.notify_role(conn, recipient, notify_method, actor=actor or sender)
+        return SendMessageResult(message=message, blocked=blocked, notification=notification, duplicates=duplicates)
+
+    def send_notice(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        sender: str,
+        recipient: str,
+        summary: str,
+        body: str,
+        force: bool = False,
+        wake: bool = True,
+        notify_method: str = "auto",
+        actor: str | None = None,
+    ) -> SendMessageResult:
+        role = self.store.get_role(conn, recipient)
+        if role is None:
+            raise KeyError(f"Unknown recipient role: {recipient}")
+
+        state = "completed"
+        blocked = None
+        if role["state"] != "active" and not force:
+            state = f"blocked_by_role_{role['state']}"
+            blocked = {"role": recipient, "state": role["state"]}
+
+        message = self.store.create_message(
+            conn,
+            sender=sender,
+            recipient=recipient,
+            priority="low",
+            summary=summary,
+            body=body,
+            state=state,
+            message_kind="notice",
+        )
+        self.hook_runner.run(
+            self.store,
+            conn,
+            "message.created",
+            {"message": message_to_dict(message), "blocked": blocked, "notice": True},
+            actor=actor or sender,
+        )
+
+        notification = None
+        if state == "completed" and wake:
+            ok, details = self.store.notify_role(
+                conn,
+                recipient,
+                notify_method,
+                notice_message_id=message.id,
+                notice_summary=summary,
+            )
+            notification = NotificationResult(ok=ok, details=details, method=notify_method)
         return SendMessageResult(message=message, blocked=blocked, notification=notification)
 
     def claim_next(
@@ -228,6 +316,8 @@ class TeamService:
             body=reply_body,
             wake=reply_wake,
             notify_method="app-server-turn",
+            related_to=row["id"],
+            message_kind="completion_notice",
             actor=actor or role,
         )
         return CompleteMessageResult(message=row, reply=reply)
@@ -273,6 +363,10 @@ def message_to_dict(message: Message) -> dict[str, Any]:
         "state": message.state,
         "created_at": message.created_at,
         "updated_at": message.updated_at,
+        "correlation_key": message.correlation_key,
+        "related_to": message.related_to,
+        "supersedes": message.supersedes,
+        "message_kind": message.message_kind,
     }
 
 
@@ -287,7 +381,19 @@ def required_str(data: dict[str, Any], key: str) -> str:
     return str(value)
 
 
+def optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def is_completion_reply(row: sqlite3.Row) -> bool:
+    try:
+        if row["message_kind"] == "completion_notice":
+            return True
+    except (IndexError, KeyError):
+        pass
     try:
         body = Path(str(row["body_path"])).read_text(encoding="utf-8")
     except OSError:

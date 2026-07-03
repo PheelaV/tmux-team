@@ -116,7 +116,7 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             raise PolicyError(f"actor {actor!r} is not authorized to use tmux send-keys notification")
         return
 
-    if action in ("inbox.next", "inbox.list"):
+    if action in ("inbox.next", "inbox.list", "inbox.reclaimable"):
         _authorize_role_resource(actor, resource, "role", policy.can_claim, action)
         return
 
@@ -124,7 +124,7 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
         _authorize_role_resource(actor, resource, "role", policy.can_ack, action)
         return
 
-    if action == "inbox.complete":
+    if action in ("inbox.complete", "inbox.complete-replies"):
         _authorize_role_resource(actor, resource, "role", policy.can_complete, action)
         return
 
@@ -140,10 +140,27 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
     if action == "milestone.list":
         return
 
+    if action == "watch.list":
+        role = resource.get("role")
+        if not role or actor == "orchestrator" or role == actor:
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to list watches for role {role!r}")
+
+    if action in ("watch.start", "watch.update", "watch.complete"):
+        role = _required_resource(action, resource, "role")
+        if actor == "orchestrator" or role == actor:
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to run {action} for role {role!r}")
+
     if action == "pane.capture":
         if actor == "orchestrator":
             return
         _authorize_role_resource(actor, resource, "role", policy.can_capture_panes, action)
+        return
+
+    if action == "pane.list":
+        if resource.get("all") == "true" and actor != "orchestrator":
+            raise PolicyError(f"actor {actor!r} is not authorized to list unmanaged panes")
         return
 
     if action == "role.state.change":

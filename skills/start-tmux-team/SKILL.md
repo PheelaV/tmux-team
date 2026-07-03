@@ -125,20 +125,23 @@ tmux-team resume
 
 Inside spawned role panes, follow the role-specific commands shown in the startup prompt. They include explicit `--role <role>` because Codex tool shells do not always inherit pane-local env, and shared worktrees are ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine only when role discovery works. Use explicit `--config` as an override from the control plane or scripts.
 
-Context recovery should use Codex `SessionStart` hooks, not longer wake prompts. Configure the hook for `startup|resume|clear|compact` and have it print `tmux-team codex session-context`. That output is the same operating contract as the initial role startup prompt, not a new task; it restores role, config, scratchpad, pending count, and the role loop after context reset or compaction.
+Context recovery should use Codex `SessionStart` hooks, not longer wake prompts. Configure the hook for `startup|resume|clear|compact` and have it print `tmux-team codex session-context`. That output is the same operating contract as the initial role startup prompt, not a new task; it restores role, config, scratchpad, pending count, contract version, and the role loop after context reset or compaction.
+
+Do not reread the full skill on ordinary app-server wakes when the current tmux-team role contract version and role loop are already loaded in context. Reread the skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
 Scratchpad memory is mandatory role state. It preserves long-term goals across context compression, sleep/resume, and pane restarts. It is also an observability surface for the role itself, other agents, and the human overseer. Keep the most recent and important state at the top.
 
 Role loop on every startup or wake:
 
-1. Run `tmux-team memory show --role <role>` unless the startup prompt or environment makes short commands reliable.
-2. Run `tmux-team inbox next --role <role>` unless the startup prompt or environment makes short commands reliable.
-3. If no message exists, park. Do not append routine "still idle" memory.
-4. If a message exists, ack it.
-5. Compare message instructions against scratchpad boundaries. If they conflict, stop and ask the orchestrator.
-6. Do the work.
-7. Before long work or completion, update memory only if durable state changed materially: active task, blocker, changed boundary, running job, stable input, owned artifact, final result, or next action. Use `tmux-team memory append --role <role> --body "<concise durable update>"` when role discovery is not guaranteed.
-8. Complete the message with a concise result. Use `--summary` for the one-line result and `--body` or `--body-file` for detailed evidence when needed.
+1. Confirm the tmux-team role contract is loaded; use `tmux-team codex session-context --role <role>` after context reset instead of rereading the full skill on every ordinary wake.
+2. Run `tmux-team memory show --role <role>` unless the startup prompt or environment makes short commands reliable.
+3. Run `tmux-team inbox next --role <role>` unless the startup prompt or environment makes short commands reliable.
+4. If no message exists, park. Do not append routine "still idle" memory.
+5. If a message exists, ack it.
+6. Compare message instructions against scratchpad boundaries. If they conflict, stop and ask the orchestrator.
+7. Do the work.
+8. Before long work or completion, update memory only if durable state changed materially: active task, blocker, changed boundary, running job, stable input, owned artifact, final result, or next action. Use `tmux-team memory append --role <role> --body "<concise durable update>"` when role discovery is not guaranteed.
+9. Complete the message with a concise result. Use `--summary` for the one-line result and `--body` or `--body-file` for detailed evidence when needed.
 
 Use this memory score before appending:
 
@@ -164,6 +167,8 @@ Do not use milestones as chat, scratchpad memory, task transport, or command tra
 Non-orchestrator roles should not call `tmux-team milestone add` by default. They report evidence, blockers, and results by completing their inbox message back to the orchestrator. The orchestrator decides whether that result deserves a milestone.
 
 When completing delegated work, use `tmux-team inbox complete ... --reply-to-sender` so the original sender is woken through the normal message path. Do not use `--reply-to-sender` for pure acknowledgement/bookkeeping messages that would create reply loops. When dispatching fan-out work, still keep the message id printed by `tmux-team send`; it is the durable handle for status and audit.
+
+When dispatching multi-step work, choose one stable `--correlation-key` per logical work thread and reuse it for retries, follow-ups, and verification. Before sending a follow-up, check `tmux-team status --verbose` or `tmux-team inbox list --verbose` for existing active or completed work. Do not invent near-synonym keys for the same task; use `--allow-duplicate` only when redundant independent work is deliberate.
 
 Use `tmux-team broadcast` when the orchestrator needs to send the same checkpoint or instruction to several roles. Broadcast queues one normal message per recipient, so each role still has its own message id, ack, completion, and optional reply. Use either `--only` for a positive role filter or `--exclude` for a negative role filter; those switches are mutually exclusive. Do not treat broadcast as a shared task.
 
