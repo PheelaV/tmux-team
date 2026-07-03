@@ -45,7 +45,7 @@ from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
-from .store import CLAIMABLE_STATES, ROLE_STATES, STALE_CLAIMED_STATE, Store, normalize_priority
+from .store import CLAIMABLE_STATES, ROLE_STATES, STALE_CLAIMED_STATE, Store, normalize_priority, parse_utc_datetime
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -187,7 +187,9 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("show", help="Show resolved config")
 
-    subparsers.add_parser("status", help="Show roles and queue counts")
+    status = subparsers.add_parser("status", help="Show roles and queue counts")
+    status.add_argument("--verbose", action="store_true", help="Show active message summaries per role")
+    status.add_argument("--active-limit", type=int, default=3, help="Maximum active messages to show per role")
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
@@ -903,6 +905,14 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             f"  {role['name']}: state={role['state']} mode={role['mode']} pane={pane} worktree={worktree} "
             f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
+        if args.verbose:
+            rows = store.list_active_messages(conn, role=role["name"], limit=args.active_limit)
+            if not rows:
+                print("    active: none")
+            else:
+                print("    active:")
+                for row in rows:
+                    print(f"      {active_message_line(row)}")
     return 0
 
 
@@ -1603,6 +1613,35 @@ def message_one_line(row) -> str:
         f"{row['id']} state={state} from={row['sender']} to={row['recipient']} "
         f"priority={row['priority']} summary={row['summary']}"
     )
+
+
+def active_message_line(row) -> str:
+    state = row_value(row, "display_state", row["state"])
+    parts = [
+        row["id"],
+        f"state={state}",
+        f"priority={row['priority']}",
+        f"from={row['sender']}",
+        f"age={format_age(row['created_at'])}",
+    ]
+    if row["claim_expires_at"]:
+        parts.append(f"claim_expires_at={row['claim_expires_at']}")
+    parts.append(f"summary={row['summary']}")
+    return " ".join(parts)
+
+
+def format_age(created_at: str) -> str:
+    age = datetime.now(UTC) - parse_utc_datetime(created_at)
+    seconds = max(0, int(age.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
 
 
 def row_value(row, key: str, default=None):

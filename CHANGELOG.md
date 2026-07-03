@@ -4,6 +4,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Added `tmux-team status --verbose` with bounded active message summaries per role.
 - Added `tmux-team inbox reclaimable` and `stale_claimed` status visibility so expired claimed messages are surfaced as recoverable work.
 
 ## 0.1.3 - 2026-07-03

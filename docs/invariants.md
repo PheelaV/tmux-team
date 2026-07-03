@@ -106,6 +106,7 @@ The milestone log is the operator-facing timeline.
 
 The operator and orchestrator may inspect managed role panes.
 
+- Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
 - `--lines` or `--limit` controls how much history is printed. `--offset` skips the newest lines so the caller can page back.
 - Pane capture is for live progress inspection, stuck-turn diagnosis, and operator overview.

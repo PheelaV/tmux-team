@@ -81,6 +81,7 @@ Watch progress from the control pane:
 
 ```bash
 tmux-team status
+tmux-team status --verbose
 tmux-team inbox list --role orchestrator
 tmux-team inbox list --role implementer
 tmux-team pane capture implementer --lines 80 --offset 0
@@ -184,6 +185,8 @@ tmux-team resume
 ```
 
 `inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+
+Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary.
 
 `broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
 

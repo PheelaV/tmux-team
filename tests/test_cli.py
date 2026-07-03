@@ -381,6 +381,39 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn(f"id: {message_id}", out)
 
+    def test_status_verbose_shows_active_message_summaries(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--priority",
+            "high",
+            "--summary",
+            "collect active evidence",
+            "--body",
+            "Evidence goes here.",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("inbox", "ack", message_id, "--role", "orchestrator")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("status", "--verbose", "--active-limit", "2")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("active:", out)
+        self.assertIn(f"{message_id} state=acknowledged", out)
+        self.assertIn("priority=high", out)
+        self.assertIn("from=collector", out)
+        self.assertIn("summary=collect active evidence", out)
+        self.assertIn("claim_expires_at=", out)
+
     def test_broadcast_creates_one_message_per_recipient(self) -> None:
         code, out, err = self.run_cli(
             "broadcast",

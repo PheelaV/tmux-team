@@ -315,6 +315,41 @@ class Store:
             )
         )
 
+    def list_active_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        limit: int = 3,
+    ) -> list[sqlite3.Row]:
+        now = utc_now()
+        return list(
+            conn.execute(
+                f"""
+                SELECT
+                  *,
+                  CASE
+                    WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                    THEN '{STALE_CLAIMED_STATE}'
+                    ELSE state
+                  END AS display_state
+                FROM messages
+                WHERE recipient = ?
+                  AND state IN ('queued', 'notified', 'retrying', 'claimed', 'acknowledged')
+                ORDER BY
+                  CASE priority
+                    WHEN 'urgent' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    ELSE 3
+                  END,
+                  created_at
+                LIMIT ?
+                """,
+                (now, role, limit),
+            )
+        )
+
     def claim_next(self, conn: sqlite3.Connection, role: str, claim_seconds: int) -> sqlite3.Row | None:
         now = utc_now()
         claim_expires_at = (datetime.now(UTC) + timedelta(seconds=claim_seconds)).replace(microsecond=0).isoformat()
