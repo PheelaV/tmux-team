@@ -342,6 +342,10 @@ def build_parser() -> argparse.ArgumentParser:
     body.add_argument("--body-file", help="Path to markdown body")
     send.add_argument("--force", action="store_true", help="Queue even if the role is paused or draining")
     send.add_argument("--no-notify", action="store_true", help="Do not notify the target pane")
+    send.add_argument("--correlation-key", help="Stable key for related or duplicate work")
+    send.add_argument("--related-to", help="Related message id")
+    send.add_argument("--supersedes", help="Message id this message replaces")
+    send.add_argument("--allow-duplicate", action="store_true", help="Do not warn about matching active work")
     send.add_argument(
         "--notify-method",
         default="auto",
@@ -371,6 +375,10 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast_body.add_argument("--body-file", help="Path to markdown body")
     broadcast.add_argument("--force", action="store_true", help="Queue even if a role is paused or draining")
     broadcast.add_argument("--no-notify", action="store_true", help="Do not notify target panes")
+    broadcast.add_argument("--correlation-key", help="Stable key for related or duplicate work")
+    broadcast.add_argument("--related-to", help="Related message id")
+    broadcast.add_argument("--supersedes", help="Message id this message replaces")
+    broadcast.add_argument("--allow-duplicate", action="store_true", help="Do not warn about matching active work")
     broadcast.add_argument(
         "--notify-method",
         default="auto",
@@ -386,6 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_list.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
     inbox_list.add_argument("--state", action="append", help="Filter state; repeatable")
     inbox_list.add_argument("--limit", type=int, default=50)
+    inbox_list.add_argument("--verbose", action="store_true", help="Show correlation and relation metadata")
     inbox_reclaimable = inbox_sub.add_parser(
         "reclaimable", help="List expired claimed messages that inbox next can reclaim"
     )
@@ -1138,6 +1147,10 @@ def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
         force=args.force,
         wake=not args.no_notify,
         notify_method=args.notify_method,
+        correlation_key=args.correlation_key,
+        related_to=args.related_to,
+        supersedes=args.supersedes,
+        allow_duplicate=args.allow_duplicate,
         actor=args.actor or args.sender,
     )
     message = result.message
@@ -1149,6 +1162,8 @@ def cmd_send(args: argparse.Namespace, service: TeamService, conn) -> int:
             print(f"notify: {result.notification.details}")
         else:
             print(f"notify_failed: {result.notification.details}", file=sys.stderr)
+
+    print_duplicate_warnings(result.duplicates)
 
     if result.blocked is not None:
         print(f"blocked: role {result.blocked['role']} is {result.blocked['state']}", file=sys.stderr)
@@ -1173,6 +1188,10 @@ def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
             force=args.force,
             wake=not args.no_notify,
             notify_method=args.notify_method,
+            correlation_key=args.correlation_key,
+            related_to=args.related_to,
+            supersedes=args.supersedes,
+            allow_duplicate=args.allow_duplicate,
             actor=args.actor or args.sender,
         )
         message = result.message
@@ -1183,6 +1202,7 @@ def cmd_broadcast(args: argparse.Namespace, service: TeamService, conn) -> int:
                 print(f"notify: {result.notification.details}")
             else:
                 print(f"notify_failed: {result.notification.details}", file=sys.stderr)
+        print_duplicate_warnings(result.duplicates)
         if result.blocked is not None:
             blocked = True
             print(f"blocked: role {result.blocked['role']} is {result.blocked['state']}", file=sys.stderr)
@@ -1206,6 +1226,8 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
             return 0
         for row in rows:
             print(message_one_line(row))
+            if args.verbose:
+                print(f"  {message_metadata_line(row)}")
         return 0
 
     if args.inbox_command == "reclaimable":
@@ -1718,6 +1740,23 @@ def message_one_line(row) -> str:
         f"{row['id']} state={state} from={row['sender']} to={row['recipient']} "
         f"priority={row['priority']} summary={row['summary']}"
     )
+
+
+def message_metadata_line(row) -> str:
+    return (
+        f"correlation_key={row_value(row, 'correlation_key', None) or '-'} "
+        f"related_to={row_value(row, 'related_to', None) or '-'} "
+        f"supersedes={row_value(row, 'supersedes', None) or '-'}"
+    )
+
+
+def print_duplicate_warnings(rows) -> None:
+    for row in rows:
+        print(
+            f"duplicate_warning: active message {row['id']} "
+            f"state={row['state']} to={row['recipient']} summary={row['summary']}",
+            file=sys.stderr,
+        )
 
 
 def active_message_line(row) -> str:

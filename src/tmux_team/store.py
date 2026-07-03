@@ -22,7 +22,7 @@ ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 WATCH_ACTIVE_STATES = ("active", "blocked")
 WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,9 @@ class Message:
     state: str
     created_at: str
     updated_at: str
+    correlation_key: str | None = None
+    related_to: str | None = None
+    supersedes: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +101,10 @@ class Store:
               acknowledged_at TEXT,
               completed_at TEXT,
               result_status TEXT,
-              result_summary TEXT
+              result_summary TEXT,
+              correlation_key TEXT,
+              related_to TEXT,
+              supersedes TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_recipient_state_created
@@ -161,6 +167,9 @@ class Store:
               ON watches(role, status, updated_at);
             """
         )
+        self._ensure_column(conn, "messages", "correlation_key", "TEXT")
+        self._ensure_column(conn, "messages", "related_to", "TEXT")
+        self._ensure_column(conn, "messages", "supersedes", "TEXT")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
 
@@ -199,6 +208,9 @@ class Store:
         summary: str,
         body: str,
         state: str = "queued",
+        correlation_key: str | None = None,
+        related_to: str | None = None,
+        supersedes: str | None = None,
     ) -> Message:
         now = utc_now()
         message_id = new_message_id()
@@ -206,20 +218,57 @@ class Store:
         body_path.write_text(body, encoding="utf-8")
         conn.execute(
             """
-            INSERT INTO messages(id, sender, recipient, priority, summary, body_path, state, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages(
+              id, sender, recipient, priority, summary, body_path, state, created_at, updated_at,
+              correlation_key, related_to, supersedes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, sender, recipient, normalize_priority(priority), summary, str(body_path), state, now, now),
+            (
+                message_id,
+                sender,
+                recipient,
+                normalize_priority(priority),
+                summary,
+                str(body_path),
+                state,
+                now,
+                now,
+                empty_to_none(correlation_key),
+                empty_to_none(related_to),
+                empty_to_none(supersedes),
+            ),
         )
         self.record_event(
             conn,
             "message.created",
             sender,
             message_id,
-            {"to": recipient, "priority": normalize_priority(priority), "summary": summary, "state": state},
+            {
+                "to": recipient,
+                "priority": normalize_priority(priority),
+                "summary": summary,
+                "state": state,
+                "correlation_key": empty_to_none(correlation_key),
+                "related_to": empty_to_none(related_to),
+                "supersedes": empty_to_none(supersedes),
+            },
         )
         conn.commit()
-        return Message(message_id, sender, recipient, normalize_priority(priority), summary, body_path, state, now, now)
+        return Message(
+            message_id,
+            sender,
+            recipient,
+            normalize_priority(priority),
+            summary,
+            body_path,
+            state,
+            now,
+            now,
+            empty_to_none(correlation_key),
+            empty_to_none(related_to),
+            empty_to_none(supersedes),
+        )
 
     def get_role(self, conn: sqlite3.Connection, role: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM roles WHERE name = ?", (role,)).fetchone()
@@ -368,6 +417,44 @@ class Store:
                 LIMIT ?
                 """,
                 (now, role, limit),
+            )
+        )
+
+    def find_duplicate_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        recipient: str,
+        summary: str,
+        correlation_key: str | None = None,
+        limit: int = 5,
+    ) -> list[sqlite3.Row]:
+        normalized_summary = normalize_summary(summary)
+        clauses = [
+            "recipient = ?",
+            "state IN ('queued', 'notified', 'retrying', 'claimed', 'acknowledged')",
+        ]
+        params: list[Any] = [recipient]
+        match_clauses: list[str] = []
+        if correlation_key:
+            match_clauses.append("correlation_key = ?")
+            params.append(correlation_key)
+        if normalized_summary:
+            match_clauses.append("LOWER(TRIM(summary)) = ?")
+            params.append(normalized_summary)
+        if not match_clauses:
+            return []
+        clauses.append(f"({' OR '.join(match_clauses)})")
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT * FROM messages
+                WHERE {" AND ".join(clauses)}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
             )
         )
 
@@ -1131,6 +1218,11 @@ class Store:
             allowed = ", ".join(allowed_states)
             raise ValueError(f"Cannot {action} message {row['id']} in state {row['state']}; expected one of: {allowed}")
 
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
     def get_watch(self, conn: sqlite3.Connection, watch_id: str) -> sqlite3.Row:
         row = conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone()
         if row is None:
@@ -1181,6 +1273,17 @@ def normalize_priority(priority: str) -> str:
     if value not in PRIORITY_ORDER:
         raise ValueError(f"Invalid priority: {priority}")
     return value
+
+
+def normalize_summary(summary: str) -> str:
+    return " ".join(summary.strip().lower().split())
+
+
+def empty_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def normalize_notify_method(method: str) -> str:

@@ -148,6 +148,8 @@ Message completion is durable state. Conversational completion replies are expli
 - `tmux-team inbox complete` records the result on the original message.
 - Expired claimed messages are recoverable work, not silent ownership. They must appear as `stale_claimed` in operator status surfaces and remain reclaimable through `tmux-team inbox next`.
 - `tmux-team inbox reclaimable --role ROLE` is an observation aid for expired claims; it must not create a second claim/ack path.
+- Correlation metadata (`correlation_key`, `related_to`, `supersedes`) is advisory routing context. Duplicate detection must warn without blocking delivery unless a future explicit policy says otherwise.
+- `tmux-team inbox list --verbose` is the operator surface for inspecting relation metadata.
 - Use `--summary` for the concise result and optional `--body` or `--body-file` for evidence, test output, or handoff detail.
 - Roles should use `--reply-to-sender` when completing delegated work from another managed role.
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.

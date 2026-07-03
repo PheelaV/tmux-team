@@ -171,6 +171,7 @@ Manual CLI operations are still available:
 tmux-team init --name example-team --runtime-dir /tmp/tmux-team-example
 tmux-team status
 tmux-team send --to orchestrator --summary "test failed" --body-file report.md
+tmux-team send --to collector --summary "Collect evidence" --body-file task.md --correlation-key issue-123
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
 tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
 tmux-team inbox next --role orchestrator
@@ -192,6 +193,8 @@ tmux-team resume
 Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary.
 
 Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until a terminal condition is reached.
+
+Use `--correlation-key`, `--related-to`, or `--supersedes` on `send`/`broadcast` when work belongs to a known thread. `tmux-team` warns when new active work for the same role matches an existing correlation key or normalized summary. The warning does not block delivery; pass `--allow-duplicate` when duplicate work is intentional. Use `inbox list --verbose` to inspect relation metadata.
 
 `broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
 

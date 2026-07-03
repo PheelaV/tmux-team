@@ -475,6 +475,68 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("summary=run terminalized", out)
 
+    def test_send_correlation_warns_about_active_duplicates(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "collect evidence",
+            "--body",
+            "body",
+            "--correlation-key",
+            "case-1",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        first_id = out.split()[0]
+        self.assertEqual(err, "")
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "trainer",
+            "--summary",
+            "collect different evidence",
+            "--body",
+            "body",
+            "--correlation-key",
+            "case-1",
+            "--related-to",
+            first_id,
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"duplicate_warning: active message {first_id}", err)
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "trainer",
+            "--summary",
+            "collect different evidence",
+            "--body",
+            "body",
+            "--correlation-key",
+            "case-1",
+            "--allow-duplicate",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("duplicate_warning", err)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--verbose")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("correlation_key=case-1", out)
+        self.assertIn(f"related_to={first_id}", out)
+
     def test_broadcast_creates_one_message_per_recipient(self) -> None:
         code, out, err = self.run_cli(
             "broadcast",

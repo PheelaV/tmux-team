@@ -38,3 +38,16 @@ Long-running supervision now has a durable `watch` primitive instead of requirin
 - The SQLite schema moved to version 2 with an additive `watches` table.
 
 Invariant: watches represent ongoing supervision state. They do not replace inbox assignment, handoff, evidence, or completion messaging.
+
+### TT-FEAT-004: Message Correlation and Duplicate-Work Detection
+
+Messages now carry optional relation metadata and warning-only duplicate detection.
+
+- `send` and `broadcast` accept `--correlation-key`, `--related-to`, and `--supersedes`.
+- Active duplicate detection warns when a new message targets the same role with a matching correlation key or normalized summary.
+- `--allow-duplicate` suppresses duplicate warnings when overlap is deliberate.
+- `inbox list --verbose` shows relation metadata for operator review.
+- Completion replies set `related_to` to the completed message id.
+- The SQLite schema moved to version 3 with additive message metadata columns.
+
+Invariant: correlation is advisory routing context. It must not block message delivery unless a future explicit policy adds that behavior.
