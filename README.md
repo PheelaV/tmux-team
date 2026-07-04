@@ -2,13 +2,51 @@
 
 ![tmux-team banner](docs/assets/banner.png)
 
-`tmux-team` is a lightweight tmux control plane for persistent Codex agent teams.
+`tmux-team` is a tiny tmux-native control plane for visible Codex agent teams.
 
-It exists because plain `tmux send-keys` does not scale once several agents are active. Messages can collide with your own prompt, panes can be in copy mode, input can be cleared accidentally, and delivery is hard to verify.
+Plain tmux is great until you have four agents: prompts collide, panes enter copy mode, messages disappear into scrollback, and nobody knows what is actually done.
 
-`tmux-team` keeps the good part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: database-backed messages, acknowledgments, role-owned todos, app-server wakeups, scratchpad memory files, and sleep/resume snapshots.
+`tmux-team` keeps the useful part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: SQLite inboxes, ack/complete tracking, role-owned todos, scratchpad memory, app-server wakeups, milestones, watchdogs, and sleep/resume snapshots.
 
-Use it when a handful of Codex agents are working in parallel and plain tmux coordination starts breaking down: prompt collisions, `send-keys` races, copy-mode weirdness, lost messages, and too much manual routing.
+The bias is boring reliability: visible panes, explicit states, recoverable claims, and no terminal stdin as production transport.
+
+## Feel The Magic
+
+From a checkout, run the repeatable live demo:
+
+```bash
+make live-demo-setup
+make live-demo-bootstrap
+tmux attach -t tt-live-demo
+make live-demo-verify
+make live-demo-clean
+```
+
+The demo starts a visible Codex team, gives the orchestrator a failing test, routes implementation work, verifies the fix in a collector worktree, approves a stable commit, and exits with a clean inbox.
+
+Expected shape:
+
+```text
+orchestrator: routed failing test to implementer
+implementer: fixed regression and produced a commit
+collector: verified the approved commit in a separate worktree
+watchdog: no stale claims or overdue watches
+stable: approved commit recorded
+verifier: LIVE DEMO VERIFY OK
+```
+
+## What This Is Not
+
+`tmux-team` is not a general agent framework, a virtual office, or a hidden background daemon. It is a local control plane for a handful of visible Codex agents working in tmux.
+
+## What You Get
+
+- Visible tmux panes for every role, with `tt-control` and `tt-app-server` kept separate.
+- Durable SQLite inboxes with claim, ack, complete, completion replies, and reclaimable stale work.
+- App-server wake turns instead of production `tmux send-keys`.
+- Per-role scratchpad memory for long-lived state and active-message todos for reset-safe substeps.
+- Operator timelines, watches, watchdog runners, pane capture, and an optional Textual dashboard.
+- Sleep/resume snapshots so a team can stop and come back without losing role bindings.
 
 ## Install
 
@@ -173,148 +211,32 @@ tmux-team bootstrap \
 
 Bootstrap refuses explicitly mapped missing worktrees, non-git directories, dirty tracked files, and duplicated role worktrees unless allowed. Use `--allow-dirty-role ROLE` or `--allow-shared-worktree ROLE,ROLE` only when that is intentional.
 
-Manual CLI operations are still available:
+## Common Operations
+
+After bootstrap, most operator work uses a small command set. Use the full [CLI Reference](docs/cli-reference.md) when you need less common flags.
 
 ```bash
-tmux-team init --name example-team --runtime-dir /tmp/tmux-team-example
-tmux-team status
-tmux-team send --to orchestrator --summary "test failed" --body-file report.md
-tmux-team send --to collector --summary "Collect evidence" --body-file task.md --correlation-key issue-123
-tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
-tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
-tmux-team broadcast --notice --summary "Policy updated" --body "Read current operating notes." --exclude orchestrator
-tmux-team inbox next --role orchestrator --auto-ack
-tmux-team inbox reclaimable --role orchestrator
-tmux-team inbox ack <message-id> --role orchestrator
-tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
-tmux-team inbox complete-replies --role orchestrator
-tmux-team todo add --role collector --message <message-id> "Run focused test"
-tmux-team todo list --role collector --message <message-id>
-tmux-team todo done --role collector <todo-id>
-tmux-team todo supersede --role collector <todo-id> "Run broader regression"
-tmux-team todo recover --role collector
-tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
-tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
-tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
+tmux-team status --verbose
 tmux-team dashboard --once
-tmux-team dashboard --refresh 2
-tmux-team pane list --all
+tmux-team send --to implementer --summary "Fix failing parser test" --body-file task.md
+tmux-team inbox next --role orchestrator --auto-ack
+tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --reply-to-sender
+tmux-team todo recover --role collector
 tmux-team pane capture collector --lines 120 --offset 40
-tmux-team pane capture collector --summary --lines 120 --summary-timeout 60 --summary-max-bytes 20000
 tmux-team watchdog
-tmux-team watchdog --json
-tmux-team watchdog run --name default --interval 15m
 tmux-team watchdog start --name default --interval 15m
-tmux-team watchdog list
-tmux-team watchdog status default
-tmux-team watchdog stop default
-tmux-team ext list
-tmux-team ext doctor
+tmux-team milestone list --today
 tmux-team sleep
 tmux-team resume
 ```
 
-`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. If there is no new pending work but the role already has claimed or acknowledged work, `inbox next` points at that active message and any open todos instead of only saying the queue is empty. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+The important loop is durable and one-message-at-a-time:
 
-Completion replies are stored as `completion_notice` messages. After reading and acknowledging them, use `tmux-team inbox complete-replies --role ROLE` to close notice bookkeeping without writing a bespoke completion for each one.
-
-Use `tmux-team status --verbose` when counts are not enough. It prints bounded active message summaries per role, including state, priority, sender, age, claim expiry, and summary. Claimed work that has not been acknowledged after the warning threshold appears with `warning=claimed_unacked`; tune that threshold with `--unacked-warn-seconds`.
-
-Use `tmux-team inbox next --auto-ack` when a role wants claim and acknowledgement to be one step before it starts work.
-
-Use `tmux-team todo` for role-owned substeps of the active inbox message. Todos are not assignments and they do not wake other roles; they are durable execution state for the role that owns the message. Open todos block `inbox complete` by default, so a role must complete, reopen, supersede, or clear its checklist before finishing the message. Pass `--allow-open-todos` only for an explicit operator or role override.
-
-Supersede obsolete todos instead of marking them done when the plan changes:
-
-```bash
-tmux-team todo supersede --role collector <todo-id> "Verify the fixed test from the approved commit"
+```text
+send -> app-server wake -> inbox next -> ack -> work -> complete -> optional reply-to-sender
 ```
 
-Use `tmux-team todo recover --role ROLE` after a context reset or pane restart to see active claimed/acknowledged messages, their todos, and recent completed or superseded todos. `codex session-context` also includes active-message todos when present.
-
-Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until the watch is completed, failed, or cancelled.
-
-Use `tmux-team dashboard` for a read-only operator view of role state, active messages, open todos, watches, milestones, memory excerpts, alerts, and optional pane tails. `tmux-team dashboard --once` prints a deterministic text snapshot and works in the base install. The live refreshing dashboard uses Textual and requires the optional `tmux-team[dashboard]` extra.
-
-Dashboard output is observation only. Use inbox, watches, milestones, and memory commands for state changes; use pane capture only to inspect visible progress.
-
-Use `--correlation-key`, `--related-to`, or `--supersedes` on `send` when work belongs to a known thread. Reuse the same correlation key for retries, follow-ups, and verification of the same logical work. `tmux-team` warns when new active work for the same role matches an existing correlation key or normalized summary. The warning does not block delivery; pass `--allow-duplicate` when duplicate work is intentional. Use `status --verbose` and `inbox list --verbose` to inspect relation metadata before sending follow-up work.
-
-Use `broadcast --notice` for durable announcements that should not create inbox work for each recipient. Notices are recorded as completed `notice` messages and can wake roles with a notice-only prompt; recipients do not claim, ack, or complete them.
-
-`broadcast` is not a separate transport. It queues one normal message per recipient, so every recipient has its own message id, claim, ack, completion, and optional reply. By default it targets all configured roles except the sender. Use `--only` for a positive recipient filter or `--exclude` for a negative filter; they are mutually exclusive. `--to` remains a compatibility alias for `--only`.
-
-`pane capture` reads tmux pane output for live supervision. Use `--lines` or `--limit` for how much history to print, and `--offset` to page back from the newest output. It is useful for the orchestrator or operator to inspect present progress that has not yet reached inbox completion or scratchpad memory. It must not be used as delivery confirmation; durable state still lives in SQLite messages, notifications, milestones, and memory.
-
-Use `pane capture --summary` to ask `codex exec` for a compact JSON summary of bounded pane output instead of dumping raw scrollback into the caller's context. Summary mode sends the prompt through stdin, caps captured pane text with `--summary-max-bytes`, and bounds the model call with `--summary-timeout`. The summary prompt is observation-only and does not treat pane text as delivery, acknowledgement, or completion proof.
-
-`pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
-
-`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. Bare `tmux-team watchdog` remains a single-shot checker and reports findings without waking or mutating agents.
-
-Use native watchdog runners when you want repeated checks without ad hoc shell loops:
-
-```bash
-tmux-team watchdog start --name default --interval 15m
-tmux-team watchdog list
-tmux-team watchdog stop default
-```
-
-`watchdog start` opens a visible tmux window named `tt-watchdog-<name>` that runs `watchdog run`. The runner prints a self-describing header with name, interval, scope, delivery label, last run, next run, findings, pane, and safe-close guidance. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
-
-Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
-
-For Codex context resets, configure a `SessionStart` hook with matcher `startup|resume|clear|compact` that runs `tmux-team codex session-context`. That hook emits the same role contract version as the initial startup prompt plus the current scratchpad excerpt, so it restores framework context without turning wake prompts into long instruction blocks. Ordinary app-server wakes should follow the loaded role loop and should not trigger full skill rereads unless the operator requests it or the contract version changed.
-
-Scratchpad memory is durable role state, not the queue. Use it for long-term goals, current task, blockers, boundaries, stable inputs, owned artifacts, and next action. Record only high-value durable updates near the top:
-
-```bash
-tmux-team memory show
-tmux-team memory append --body "Active task: reproduce failing segment test; next action: run targeted pytest."
-```
-
-Use existing scratchpads during migration with `--role-memory ROLE=PATH`.
-
-Do not append routine startup, parking, no-pending, command transcript, or "still waiting" notes. A practical threshold: append only when the update changes an active task, blocker, boundary, long-running job, final result, or next action; fold minor status facts into the next important update.
-
-Milestones are the append-only operator timeline. Use them for broad state changes and results that answer "what happened today?" without reading every inbox message or pane transcript. By default, the operator/control plane and orchestrator record milestones; other roles report evidence through inbox completion and let the orchestrator decide what is milestone-worthy:
-
-```bash
-tmux-team milestone add --kind result --summary "Targeted test fixed and passed" --tag test
-tmux-team milestone list --today
-tmux-team milestone list --since -4h
-```
-
-Do not use milestones for command transcripts or routine chatter. Good milestone events include team start, task routing, evidence accepted, blocker found/resolved, tests passing, stable commit approval, sleep/resume, and team resize.
-
-Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
-
-- `team.sqlite` for messages, todos, watches, role state, notifications, events, and stable commits;
-- `events.jsonl` for append-only audit;
-- `milestones.jsonl` for append-only operator milestones;
-- `messages/*.md` for message bodies;
-- `sleeps/*.toml` for operator-facing sleep/restart snapshots.
-
-Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime-dir`, `TMUX_TEAM_HOME`, or `[team].runtime_dir` in `.tmux-team/team.toml`; that is also the precedence order.
-
-`tmux-team sleep` snapshots role state, pane targets, tmux session/window/pane IDs, and Codex app-server thread bindings before tearing down managed role/app-server windows. It leaves `tt-control` alive by default and marks active/draining roles paused so stale bindings do not receive new work. Use `tmux-team sleep --dry-run` to inspect the plan first.
-
-`tmux-team resume` reads `.tmux-team/runtime/sleeps/latest.toml` by default, restarts the app-server when needed, recreates managed role panes, and launches each role with `codex resume <saved-session>` so the live Codex conversation is resumed instead of replaced by a fresh startup session. Use `tmux-team resume --dry-run` to inspect the planned tmux commands, `--snapshot PATH` for an older snapshot, and `--no-reactivate-roles` when resumed roles should stay paused.
-
-Tmux notification uses `tmux display-message` by default. It does not type into the agent's prompt composer.
-
-Wake-capable Codex delivery uses Codex app-server remote TUI mode. Bootstrap configures this automatically, but the manual form is:
-
-```bash
-codex app-server --listen ws://127.0.0.1:4500
-codex --remote ws://127.0.0.1:4500
-tmux-team codex bind implementer --endpoint ws://127.0.0.1:4500 --thread-id <thread-id>
-tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
-```
-
-`app-server-turn` submits a real Codex turn to the role's thread. The pane stays the live Codex UI, but `tmux-team` never types into the pane.
-
-Project-local extensions live under `.tmux-team/extensions/<name>/extension.toml`. The first extension surface supports executable JSON hooks around message creation, claim, ack, completion, and notification operations. See [docs/extensions.md](docs/extensions.md).
+Use scratchpad memory for long-lived role state, todos for active-message substeps, milestones for operator summaries, watches for long-running supervision, and pane capture only for live observation. Pane text is never the source of truth for delivery or completion.
 
 ## Tests
 

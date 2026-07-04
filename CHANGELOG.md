@@ -4,6 +4,9 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
+- Updated repo-local marketplace metadata to install the current `v0.3.1` plugin tag.
+
 ## 0.3.1 - 2026-07-04
 
 - Fixed the live Textual dashboard crash when pane previews are enabled by avoiding a `pane_lines` name collision in the refresh path.

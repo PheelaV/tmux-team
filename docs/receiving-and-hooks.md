@@ -1,10 +1,10 @@
 # Receiving and Hooks
 
-## Current Message Receiving
+## Message Receiving
 
-`tmux-team` currently uses explicit polling.
+`tmux-team` uses app-server wake for Codex role panes and an explicit durable claim loop for work. Roles do not run hidden background pollers.
 
-The durable message lives in SQLite. A role receives work by running:
+The durable message lives in SQLite. After startup, resume, or wake, a role receives work by running:
 
 ```bash
 tmux-team memory show --role implementer
@@ -38,7 +38,7 @@ urgent -> high -> normal -> low
 
 Messages blocked by role state, such as `blocked_by_role_paused`, are recorded but not claimable.
 
-## Current Wake-Up
+## Wake-Up
 
 Non-app-server roles have two tmux notification modes, but only one should be considered safe by default.
 
