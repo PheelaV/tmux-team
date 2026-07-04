@@ -1161,7 +1161,7 @@ def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
             role_filter=args.role,
             refresh=args.refresh,
             include_pane_preview=include_pane_preview,
-            pane_lines=args.pane_lines,
+            pane_line_count=args.pane_lines,
             tmux_bin=args.tmux_bin,
         )
     except DashboardDependencyError as exc:

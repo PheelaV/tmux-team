@@ -21,6 +21,7 @@ from tmux_team.bootstrap import (
 )
 from tmux_team.cli import infer_role_from_tmux_pane, main
 from tmux_team.config import RoleConfig, TeamConfig, load_config
+from tmux_team.dashboard import DashboardSnapshot, textual_pane_preview_body
 from tmux_team.store import Store
 
 
@@ -534,6 +535,33 @@ runtime_dir = "{other_runtime}"
         self.assertIn("monitor fixture", out)
         self.assertIn("Active task: dashboard", out)
         self.assertNotIn("Pane Preview", out)
+
+    def test_textual_pane_preview_body_handles_enabled_previews(self) -> None:
+        snapshot = DashboardSnapshot(
+            team="test-team",
+            config_path=str(self.config),
+            runtime_dir=str(self.root / "runtime"),
+            collected_at="2026-07-04T12:00:00+00:00",
+            roles=(),
+            active_messages=(),
+            watches=(),
+            watchdog_runners=(),
+            milestones=(),
+            memories=(),
+            pane_previews=(
+                {
+                    "role": "collector",
+                    "pane": "%7",
+                    "text": "first\nsecond\nthird",
+                },
+            ),
+            alerts=(),
+        )
+
+        lines = textual_pane_preview_body(snapshot, include_pane_preview=True)
+
+        self.assertEqual(lines, ["collector %7:", "  first", "  second", "  third"])
+        self.assertEqual(textual_pane_preview_body(snapshot, include_pane_preview=False), ["disabled"])
 
     def test_expired_claim_is_visible_and_reclaimable(self) -> None:
         code, out, err = self.run_cli(

@@ -230,7 +230,9 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot) -> str:
     lines.extend(indent_lines(memory_lines(snapshot.memories), "  "))
     if snapshot.pane_previews:
         lines.extend(["", "Pane Preview"])
-        lines.extend(indent_lines(pane_lines(snapshot.pane_previews, tail_count=6, truncate_at=None), "  "))
+        lines.extend(
+            indent_lines(format_pane_preview_lines(snapshot.pane_previews, tail_count=6, truncate_at=None), "  ")
+        )
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -240,7 +242,7 @@ def run_textual_dashboard(
     role_filter: str | None,
     refresh: float,
     include_pane_preview: bool,
-    pane_lines: int,
+    pane_line_count: int,
     tmux_bin: str,
 ) -> int:
     try:
@@ -299,7 +301,7 @@ def run_textual_dashboard(
                     conn,
                     role_filter=role_filter,
                     include_pane_preview=include_pane_preview,
-                    pane_lines=pane_lines,
+                    pane_lines=pane_line_count,
                     tmux_bin=tmux_bin,
                 )
             self.query_one("#summary", Static).update(summary_panel(snapshot, refresh))
@@ -331,11 +333,7 @@ def run_textual_dashboard(
             self.query_one("#memory", Static).update(
                 section_panel("Memory", memory_lines(snapshot.memories, truncate_at=140))
             )
-            pane_body = (
-                pane_lines(snapshot.pane_previews, tail_count=5, truncate_at=140)
-                if include_pane_preview
-                else ["disabled"]
-            )
+            pane_body = textual_pane_preview_body(snapshot, include_pane_preview=include_pane_preview)
             self.query_one("#panes", Static).update(section_panel("Pane Preview", pane_body))
 
     DashboardApp().run()
@@ -428,6 +426,12 @@ def lines_panel(title: str, rows: Iterable[str]) -> str:
     return f"[b]{title}[/b]\n" + "\n".join(truncate(row, 140) for row in values)
 
 
+def textual_pane_preview_body(snapshot: DashboardSnapshot, *, include_pane_preview: bool) -> list[str]:
+    if not include_pane_preview:
+        return ["disabled"]
+    return format_pane_preview_lines(snapshot.pane_previews, tail_count=5, truncate_at=140)
+
+
 def memory_lines(rows: Iterable[dict[str, object]], *, truncate_at: int | None = None) -> list[str]:
     lines: list[str] = []
     for row in rows:
@@ -436,7 +440,7 @@ def memory_lines(rows: Iterable[dict[str, object]], *, truncate_at: int | None =
     return lines or ["none"]
 
 
-def pane_lines(
+def format_pane_preview_lines(
     rows: Iterable[dict[str, object]],
     *,
     tail_count: int,
