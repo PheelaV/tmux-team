@@ -10,6 +10,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Added durable watchdog runner state in SQLite and surfaced it in `status --verbose`, `dashboard`, and `pane list --all`.
 - Hardened watchdog runners so duplicate running names are rejected and stopped runner state is observed by long-running loops.
 - Allowed orchestrator strict-policy supervision to inspect cross-role inbox lists/reclaimable work and approve stable commits without breakglass mode.
+- Added unblock-first orchestrator guidance so safe downstream prep work is routed promptly with explicit gates instead of waiting for local review/bookkeeping to finish.
 
 Migration notes:
 

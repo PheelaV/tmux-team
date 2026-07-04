@@ -2123,6 +2123,19 @@ can_notify = ["orchestrator"]
         self.assertIn(message_id, out)
         self.assertIn("run focused regression", out)
 
+    def test_codex_session_context_includes_orchestrator_unblock_first_rule(self) -> None:
+        code, out, err = self.run_cli("codex", "session-context", "--role", "orchestrator", "--max-memory-chars", "0")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Orchestrator unblock-first rule:", out)
+        self.assertIn("bounded gated handoff", out)
+        self.assertIn("approve/cancel/update follow-up", out)
+
+        code, out, err = self.run_cli("codex", "session-context", "--role", "collector", "--max-memory-chars", "0")
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Orchestrator unblock-first rule:", out)
+
     def test_codex_session_context_defaults_to_actor_role(self) -> None:
         code, out, err = self.run_main(
             "--config",
@@ -2281,6 +2294,14 @@ can_notify = ["orchestrator"]
         self.assertIn("Do not append routine startup/parking/status chatter", prompt)
         self.assertNotIn("missing or stale", prompt)
         self.assertNotIn("durable status update", prompt)
+        self.assertNotIn("Orchestrator unblock-first rule", prompt)
+
+    def test_orchestrator_startup_prompt_includes_unblock_first_rule(self) -> None:
+        prompt = role_startup_prompt("orchestrator")
+
+        self.assertIn("Orchestrator unblock-first rule:", prompt)
+        self.assertIn("bounded gated handoff", prompt)
+        self.assertIn("approve/cancel/update follow-up", prompt)
 
     def test_bootstrap_dry_run_plans_visible_remote_tui_team(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"

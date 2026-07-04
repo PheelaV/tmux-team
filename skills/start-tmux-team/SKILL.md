@@ -183,6 +183,19 @@ Non-orchestrator roles should not call `tmux-team milestone add` by default. The
 
 When completing delegated work, use `tmux-team inbox complete ... --reply-to-sender` so the original sender is woken through the normal message path. Do not use `--reply-to-sender` for pure acknowledgement/bookkeeping messages that would create reply loops. When dispatching fan-out work, still keep the message id printed by `tmux-team send`; it is the durable handle for status and audit.
 
+Orchestrator unblock-first rule: when new operator or role information can unblock another role's safe setup work, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate. Prefer a gated prep message over waiting for local review or bookkeeping to finish:
+
+```bash
+tmux-team send \
+  --to collector \
+  --priority high \
+  --summary "Prepare next run; launch gated on stable approval" \
+  --correlation-key next-run-prep \
+  --body "Start preflight/setup now. Do not launch until stable approval or explicit release arrives."
+```
+
+State the hold condition clearly, continue validation, then send an approve/cancel/update follow-up. Do not block downstream prep on redundant verification already supplied by a worker unless forwarding the handoff would cross a safety boundary.
+
 When dispatching multi-step work, choose one stable `--correlation-key` per logical work thread and reuse it for retries, follow-ups, and verification. Before sending a follow-up, check `tmux-team status --verbose` or `tmux-team inbox list --verbose` for existing active or completed work. Do not invent near-synonym keys for the same task; use `--allow-duplicate` only when redundant independent work is deliberate.
 
 Use `tmux-team broadcast` when the orchestrator needs to send the same checkpoint or instruction to several roles. Broadcast queues one normal message per recipient, so each role still has its own message id, ack, completion, and optional reply. Use either `--only` for a positive role filter or `--exclude` for a negative role filter; those switches are mutually exclusive. Do not treat broadcast as a shared task.

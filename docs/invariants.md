@@ -118,6 +118,17 @@ Todos are role-owned checklist state for active inbox work.
 - `tmux-team status --verbose`, `tmux-team todo recover`, and `tmux-team codex session-context` are the recovery surfaces for active todos.
 - The owning role mutates its todos. The orchestrator and operator may inspect todos for supervision.
 
+## Orchestrator Routing
+
+The orchestrator is on the critical path for team throughput and should not serialize safe preparatory work behind local bookkeeping.
+
+- When new operator or role information can unblock another role's setup, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate.
+- Prefer a gated prep message over waiting to finish local review or repeated validation.
+- State hold conditions clearly, such as "prepare now; do not launch until stable approval arrives."
+- Continue local validation after routing the prep message, then send an approve, cancel, or update follow-up.
+- Do not block downstream prep on redundant verification already supplied by a worker unless forwarding the handoff would cross a safety boundary.
+- Use a stable `--correlation-key` to keep prep messages and later approval/cancellation connected.
+
 ## Supervision
 
 The operator and orchestrator may inspect managed role panes.

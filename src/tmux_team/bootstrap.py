@@ -883,6 +883,7 @@ def role_startup_prompt(role: str) -> str:
         f"3. Run `tmux-team inbox next --role {role}`.\n"
         "4. If there is no pending message, park and wait for app-server wake. Do not invent work.\n"
         "5. If a message exists, ack it, compare it against scratchpad boundaries, do the work, update scratchpad only if durable state changed materially, then complete it concisely.\n"
+        f"{orchestrator_unblock_first_guidance(role)}"
         f"Use `tmux-team inbox ack <message-id> --role {role}` and `tmux-team inbox complete <message-id> --role {role} ...` for the claimed message.\n"
         "Use `--reply-to-sender` for delegated work results, but not for pure acknowledgement loops.\n"
     )
@@ -895,6 +896,17 @@ def role_resume_prompt(role: str) -> str:
         "Use the start-tmux-team skill if the operating framework is not already loaded in this context.\n"
         f"Run `tmux-team memory show --role {role}` to reload durable role state, then `tmux-team inbox next --role {role}`.\n"
         "If there is no pending message, park and wait for app-server wake. Do not invent work.\n"
+        f"{orchestrator_unblock_first_guidance(role)}"
+    )
+
+
+def orchestrator_unblock_first_guidance(role: str) -> str:
+    if role != "orchestrator":
+        return ""
+    return (
+        "Orchestrator unblock-first rule: when new operator or role information can safely unblock another role's setup, "
+        "send a bounded gated handoff promptly before local review or bookkeeping. State any hold condition clearly, "
+        "continue validation, then send approve/cancel/update follow-up.\n"
     )
 
 

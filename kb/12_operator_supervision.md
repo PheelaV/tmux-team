@@ -51,6 +51,23 @@ Long-running monitoring must not be hidden as an indefinitely acknowledged inbox
 
 Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 
+## Unblock-First Routing
+
+The orchestrator is allowed to do careful review, but it should not block safe preparatory work behind redundant local validation.
+
+When the operator or another role provides information that lets a worker safely begin setup, the orchestrator should send a bounded prep message first, then continue review. The prep message should include the safety gate:
+
+```bash
+tmux-team send \
+  --to collector \
+  --priority high \
+  --summary "Prepare next run; launch gated on stable approval" \
+  --correlation-key next-run-prep \
+  --body "Start preflight/setup now. Do not launch until stable approval or explicit release arrives."
+```
+
+This is a routing discipline, not a new queue type. Existing message priority, correlation keys, todos, and stable approval are enough for the first version.
+
 ## Pane Hygiene
 
 Operators may create helper shells in managed role windows. Those panes are useful, but lifecycle and supervision commands must not confuse them with roles.

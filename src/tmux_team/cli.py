@@ -2258,6 +2258,16 @@ def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row
         "7. Update scratchpad memory only for high-value durable changes: active task, blocker, changed boundary, long-running work, final result, or next action.",
         "8. If no inbox message exists, park and wait for app-server wake. Do not invent work.",
     ]
+    if role == "orchestrator":
+        lines.extend(
+            [
+                "",
+                "Orchestrator unblock-first rule:",
+                "- When new operator or role information can safely unblock another role's setup work, send a bounded gated handoff promptly before local review or bookkeeping.",
+                "- State hold conditions clearly, continue validation, then send approve/cancel/update follow-up.",
+                "- Do not block downstream prep on redundant verification already supplied by the worker unless forwarding it would create irreversible external effects or violate an explicit safety gate.",
+            ]
+        )
     active_todos = active_todo_context_lines(store, conn, role)
     if active_todos:
         lines.extend(["", "Active todos:", *active_todos])

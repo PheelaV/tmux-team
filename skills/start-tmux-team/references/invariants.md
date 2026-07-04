@@ -113,6 +113,17 @@ Todos are role-owned checklist state for active inbox work.
 - Use `todo recover`, `status --verbose`, and `codex session-context` after reset to recover active todo state.
 - The owning role mutates its todos. The orchestrator and operator may inspect todos for supervision.
 
+## Orchestrator Routing
+
+The orchestrator should avoid becoming a serial bottleneck for safe prep work.
+
+- When new operator or role information can unblock another role's setup, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate.
+- Prefer a gated prep message over waiting to finish local review or bookkeeping.
+- State the hold condition in the message body, such as "prepare now; do not launch until stable approval arrives."
+- Continue local validation after routing the prep message, then send an approve, cancel, or update follow-up.
+- Do not block downstream prep on redundant verification already supplied by a worker unless forwarding the handoff would cross a safety boundary.
+- Use a stable `--correlation-key` so the prep message and later approval/cancellation remain linked.
+
 ## Watchdog Runners
 
 Watchdog checks are local supervision, not autonomous orchestration.
