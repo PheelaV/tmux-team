@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tmux-team"
-version = "0.2.1"
+version = "0.3.0"
 description = "Minimal tmux-backed control plane for persistent agent teams."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dashboard = [
+  "textual>=0.89",
+]
 dev = [
   "ruff>=0.8",
 ]

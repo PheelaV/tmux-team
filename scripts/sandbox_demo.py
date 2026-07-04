@@ -491,6 +491,9 @@ echo '[implementer] claiming routed task'
 msg_id="$(awk -F': ' '/^id:/ {{ print $2; exit }}' implementer_claim.txt)"
 test -n "$msg_id"
 "${{TT[@]}}" inbox ack "$msg_id" --role implementer
+"${{TT[@]}}" todo add --role implementer --message "$msg_id" 'Patch add implementation' > implementer_todo.txt
+todo_id="$(awk '{{ for (i = 1; i <= NF; i++) if ($i ~ /^todo_/) {{ print $i; exit }} }}' implementer_todo.txt)"
+test -n "$todo_id"
 set +e
 {q(sys.executable)} -B -m unittest -v test_calculator > implementer_before.log 2>&1
 before_status=$?
@@ -510,6 +513,7 @@ if old not in text:
 path.write_text(text.replace(old, "return a + b"), encoding="utf-8")
 PY
 {q(sys.executable)} -B -m unittest -v test_calculator > implementer_after.log 2>&1
+"${{TT[@]}}" todo done --role implementer "$todo_id"
 "${{TT[@]}}" inbox complete "$msg_id" --role implementer --status fixed --summary 'calculator.add fixed; unittest passes'
 """
 
@@ -534,6 +538,9 @@ while true; do
   "${{TT[@]}}" inbox ack "$msg_id" --role implementer
   case "$summary" in
     'urgent multiply regression')
+      "${{TT[@]}}" todo add --role implementer --message "$msg_id" 'Patch multiply implementation' > "implementer_todo_${{idx}}.txt"
+      todo_id="$(awk '{{ for (i = 1; i <= NF; i++) if ($i ~ /^todo_/) {{ print $i; exit }} }}' "implementer_todo_${{idx}}.txt")"
+      test -n "$todo_id"
       {q(sys.executable)} - <<'PY'
 from pathlib import Path
 
@@ -545,9 +552,16 @@ if old not in text:
     raise SystemExit("expected multiply regression was not found")
 path.write_text(text.replace(old, new), encoding="utf-8")
 PY
+      "${{TT[@]}}" todo done --role implementer "$todo_id"
       "${{TT[@]}}" inbox complete "$msg_id" --role implementer --status fixed --summary 'multiply fixed; add still pending'
       ;;
     'fix add regression')
+      "${{TT[@]}}" todo add --role implementer --message "$msg_id" 'Run add-only fix' > "implementer_todo_${{idx}}.txt"
+      old_todo_id="$(awk '{{ for (i = 1; i <= NF; i++) if ($i ~ /^todo_/) {{ print $i; exit }} }}' "implementer_todo_${{idx}}.txt")"
+      test -n "$old_todo_id"
+      "${{TT[@]}}" todo supersede --role implementer "$old_todo_id" 'Patch add and run full unittest' > "implementer_todo_supersede_${{idx}}.txt"
+      todo_id="$(awk '/^replacement:/ {{ for (i = 1; i <= NF; i++) if ($i ~ /^todo_/) {{ print $i; exit }} }}' "implementer_todo_supersede_${{idx}}.txt")"
+      test -n "$todo_id"
       {q(sys.executable)} - <<'PY'
 from pathlib import Path
 
@@ -560,6 +574,7 @@ if old not in text:
 path.write_text(text.replace(old, new), encoding="utf-8")
 PY
       {q(sys.executable)} -B -m unittest -v test_calculator > implementer_after_add.log 2>&1
+      "${{TT[@]}}" todo done --role implementer "$todo_id"
       "${{TT[@]}}" inbox complete "$msg_id" --role implementer --status fixed --summary 'add fixed; unittest passes'
       ;;
     'cleanup README')
@@ -630,6 +645,7 @@ def verify(paths: Paths, scenario: str) -> None:
         "SELECT sender, recipient, state, result_status, summary FROM messages ORDER BY created_at"
     ).fetchall()
     notifications = conn.execute("SELECT role, method, state FROM notifications ORDER BY id").fetchall()
+    todos = conn.execute("SELECT role, state, text FROM todos ORDER BY created_at").fetchall()
     conn.close()
 
     expected = {
@@ -646,10 +662,19 @@ def verify(paths: Paths, scenario: str) -> None:
     if not {"orchestrator", "implementer"}.issubset(notified_roles):
         rendered = "\n".join(str(dict(row)) for row in notifications)
         raise DemoError(f"expected tmux notification records for orchestrator and implementer\n{rendered}")
+    if [(row["role"], row["state"], row["text"]) for row in todos] != [
+        ("implementer", "done", "Patch add implementation")
+    ]:
+        rendered = "\n".join(str(dict(row)) for row in todos)
+        raise DemoError(f"expected implementer todo to be completed\n{rendered}")
 
     calculator = (paths.project / "calculator.py").read_text(encoding="utf-8")
     if "return a + b" not in calculator:
         raise DemoError("calculator.py was not fixed")
+    dashboard = run(tt(paths) + ["dashboard", "--once", "--no-pane-preview"], cwd=paths.project, check=True).stdout
+    for expected in ("tmux-team dashboard", "Roles", "Active Work", "implementer"):
+        if expected not in dashboard:
+            raise DemoError(f"dashboard snapshot missing {expected!r}\n{dashboard}")
 
     print("messages:")
     for row in messages:
@@ -657,6 +682,9 @@ def verify(paths: Paths, scenario: str) -> None:
     print("notifications:")
     for row in notifications:
         print(f"  {row['role']}: {row['state']}")
+    print("todos:")
+    for row in todos:
+        print(f"  {row['role']}: {row['state']} / {row['text']}")
 
 
 def verify_congestion(paths: Paths) -> None:
@@ -681,6 +709,7 @@ def verify_congestion(paths: Paths) -> None:
         """
     ).fetchall()
     notifications = conn.execute("SELECT role, method, state FROM notifications ORDER BY id").fetchall()
+    todos = conn.execute("SELECT role, state, text, superseded_by FROM todos ORDER BY created_at").fetchall()
     conn.close()
 
     expected_states = {
@@ -721,10 +750,26 @@ def verify_congestion(paths: Paths) -> None:
     ):
         rendered = "\n".join(str(dict(row)) for row in notifications)
         raise DemoError(f"expected copy-mode send-keys notification deferral\n{rendered}")
+    todo_states = {(row["state"], row["text"]) for row in todos}
+    expected_todos = {
+        ("done", "Patch multiply implementation"),
+        ("superseded", "Run add-only fix"),
+        ("done", "Patch add and run full unittest"),
+    }
+    if not expected_todos.issubset(todo_states):
+        rendered = "\n".join(str(dict(row)) for row in todos)
+        raise DemoError(f"missing expected todo states\n{rendered}")
+    open_todos = [dict(row) for row in todos if row["state"] == "open"]
+    if open_todos:
+        raise DemoError(f"expected no open todos after congestion flow\n{open_todos}")
 
     calculator = (paths.project / "calculator.py").read_text(encoding="utf-8")
     if "return a + b" not in calculator or "return a * b" not in calculator:
         raise DemoError("calculator.py was not fully fixed")
+    dashboard = run(tt(paths) + ["dashboard", "--once", "--no-pane-preview"], cwd=paths.project, check=True).stdout
+    for expected in ("tmux-team dashboard", "Roles", "Active Work", "implementer"):
+        if expected not in dashboard:
+            raise DemoError(f"dashboard snapshot missing {expected!r}\n{dashboard}")
 
     print("messages:")
     for row in messages:
@@ -735,6 +780,10 @@ def verify_congestion(paths: Paths) -> None:
     print("claim order:")
     for recipient, summary in claim_order:
         print(f"  {recipient}: {summary}")
+    print("todos:")
+    for row in todos:
+        suffix = f" superseded_by={row['superseded_by']}" if row["superseded_by"] else ""
+        print(f"  {row['role']}: {row['state']} / {row['text']}{suffix}")
 
 
 def send_keys(session: str, role: str, command: str) -> None:

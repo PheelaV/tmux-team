@@ -15,6 +15,28 @@ Use durable state before scraping panes.
 
 Verbose status is supervision and triage. It does not imply delivery, acknowledgement, or completion beyond the durable message state it prints.
 
+## Dashboard
+
+`tmux-team dashboard` is the aggregated operator view.
+
+Design choice:
+
+- keep `dashboard --once` in the base install as deterministic text output for tests, scripts, and SSH-safe snapshots;
+- put the live refreshing TUI behind the optional `tmux-team[dashboard]` extra with Textual;
+- keep the dashboard read-only in v1.
+
+The dashboard should combine existing supervision surfaces rather than inventing new state:
+
+- roles and message counts from SQLite;
+- active messages and open todos from SQLite;
+- watches from SQLite;
+- milestones from `milestones.jsonl`;
+- latest scratchpad excerpts from role memory files;
+- bounded pane tails from tmux when preview is enabled;
+- recent notification failures/deferred notices as alerts.
+
+It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete watch, or inspect full message body can be added later behind explicit commands.
+
 ## Watches
 
 Long-running monitoring must not be hidden as an indefinitely acknowledged inbox task.
@@ -52,9 +74,9 @@ Do not scrape pane output into scratchpad memory or milestones unless it represe
 
 ## Watchdog
 
-`tmux-team watchdog` is a single-shot durable-state report.
+`tmux-team watchdog` is a durable-state report and native runner surface.
 
-It reports:
+Bare `tmux-team watchdog` remains a single-shot report. It reports:
 
 - urgent pending work;
 - stale claimed messages;
@@ -62,4 +84,20 @@ It reports:
 - old acknowledged tasks;
 - overdue watches.
 
-It must not mutate message or watch state, wake roles, or write milestones by default. Repeated checks belong in cron, tmux, or another explicit scheduler outside tmux-team.
+It must not mutate message or watch state, wake roles, or write milestones by default.
+
+Use native runners for repeated checks:
+
+```bash
+tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog list
+tmux-team watchdog stop default
+```
+
+Runner invariants:
+
+- runners are visible tmux infrastructure, not hidden background processes;
+- runner panes print their purpose, interval, scope, delivery label, last run, next run, last finding, and safe-close guidance;
+- runner state is durable in SQLite and appears in `status --verbose` and `dashboard`;
+- `pane list --all` marks runner panes with `infrastructure=watchdog`;
+- watches are role-owned deadlines, while watchdog runners are periodic checkers.

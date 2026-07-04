@@ -95,7 +95,7 @@ Remaining implementation direction:
 - issue per-role runtime credentials at bootstrap;
 - store only credential hashes in SQLite;
 - derive sender/claim role from authenticated role context for role commands;
-- keep `codex bind`, `stable approve`, `sleep`, `--force`, role-state changes, and `send-keys` operator-only.
+- keep `codex bind`, `sleep`, `--force`, role-state changes, and `send-keys` operator-only; stable approval is operator/orchestrator only.
 - make permissive mode visible in `status` and config.
 
 Policy should be enforced by default for authenticated role contexts. Operator commands remain intentionally broad unless an operator policy is added later.

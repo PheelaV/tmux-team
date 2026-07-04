@@ -21,8 +21,10 @@ CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 WATCH_ACTIVE_STATES = ("active", "blocked")
 WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
+TODO_STATES = ("open", "done", "superseded")
+WATCHDOG_RUNNER_STATES = ("running", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,44 @@ class Store:
 
             CREATE INDEX IF NOT EXISTS idx_watches_role_status_updated
               ON watches(role, status, updated_at);
+
+            CREATE TABLE IF NOT EXISTS todos (
+              id TEXT PRIMARY KEY,
+              role TEXT NOT NULL,
+              message_id TEXT NOT NULL,
+              text TEXT NOT NULL,
+              state TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT,
+              superseded_by TEXT,
+              FOREIGN KEY(role) REFERENCES roles(name),
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_todos_role_message_state_created
+              ON todos(role, message_id, state, created_at);
+
+            CREATE TABLE IF NOT EXISTS watchdog_runners (
+              name TEXT PRIMARY KEY,
+              state TEXT NOT NULL,
+              interval_seconds INTEGER NOT NULL,
+              scope_role TEXT,
+              delivery_method TEXT NOT NULL,
+              pane TEXT,
+              window TEXT,
+              process_id INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_run_at TEXT,
+              next_run_at TEXT,
+              last_finding_count INTEGER NOT NULL DEFAULT 0,
+              last_finding_summary TEXT,
+              last_error TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_watchdog_runners_state_updated
+              ON watchdog_runners(state, updated_at);
             """
         )
         self._ensure_column(conn, "messages", "correlation_key", "TEXT")
@@ -425,6 +465,295 @@ class Store:
             )
         )
 
+    def list_in_progress_messages(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        limit: int = 10,
+    ) -> list[sqlite3.Row]:
+        now = utc_now()
+        return list(
+            conn.execute(
+                f"""
+                SELECT
+                  *,
+                  CASE
+                    WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                    THEN '{STALE_CLAIMED_STATE}'
+                    ELSE state
+                  END AS display_state
+                FROM messages
+                WHERE recipient = ?
+                  AND state IN ('claimed', 'acknowledged')
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (now, role, limit),
+            )
+        )
+
+    def add_todo(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        message_id: str,
+        text: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_text = text.strip()
+        if not normalized_text:
+            raise ValueError("todo text is required")
+        message = self._message_for_role(conn, role, message_id)
+        self._require_message_state(message, "add todo for", ("claimed", "acknowledged"))
+        now = utc_now()
+        todo_id = new_todo_id()
+        conn.execute(
+            """
+            INSERT INTO todos(id, role, message_id, text, state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'open', ?, ?)
+            """,
+            (todo_id, role, message_id, normalized_text, now, now),
+        )
+        self.record_event(
+            conn,
+            "todo.created",
+            actor,
+            todo_id,
+            {"role": role, "message_id": message_id, "text": normalized_text},
+        )
+        conn.commit()
+        return self.get_todo(conn, todo_id)
+
+    def list_todos(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        message_id: str | None = None,
+        states: tuple[str, ...] | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        if states:
+            invalid = tuple(state for state in states if state not in TODO_STATES)
+            if invalid:
+                raise ValueError(f"Invalid todo state: {invalid[0]}")
+        clauses = ["role = ?"]
+        params: list[Any] = [role]
+        if message_id is not None:
+            clauses.append("message_id = ?")
+            params.append(message_id)
+        if states:
+            placeholders = ", ".join("?" for _ in states)
+            clauses.append(f"state IN ({placeholders})")
+            params.extend(states)
+        params.append(limit)
+        return list(
+            conn.execute(
+                f"""
+                SELECT * FROM todos
+                WHERE {" AND ".join(clauses)}
+                ORDER BY
+                  CASE state
+                    WHEN 'open' THEN 0
+                    WHEN 'done' THEN 1
+                    ELSE 2
+                  END,
+                  created_at
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+        )
+
+    def get_todo(self, conn: sqlite3.Connection, todo_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown todo: {todo_id}")
+        return row
+
+    def complete_todo(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        todo_id: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        row = self._todo_for_role(conn, role, todo_id)
+        if row["state"] == "superseded":
+            raise ValueError(f"Cannot complete todo {todo_id} in state superseded")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE todos
+            SET state = 'done', updated_at = ?, completed_at = COALESCE(completed_at, ?)
+            WHERE id = ? AND role = ? AND state IN ('open', 'done')
+            RETURNING *
+            """,
+            (now, now, todo_id, role),
+        ).fetchone()
+        if updated is None:
+            current = self._todo_for_role(conn, role, todo_id)
+            raise ValueError(f"Cannot complete todo {todo_id} in state {current['state']}")
+        self.record_event(
+            conn,
+            "todo.completed",
+            actor,
+            todo_id,
+            {"role": role, "message_id": updated["message_id"], "text": updated["text"]},
+        )
+        conn.commit()
+        return updated
+
+    def reopen_todo(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        todo_id: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        row = self._todo_for_role(conn, role, todo_id)
+        if row["state"] == "superseded":
+            raise ValueError(f"Cannot reopen todo {todo_id} in state superseded")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE todos
+            SET state = 'open', updated_at = ?, completed_at = NULL
+            WHERE id = ? AND role = ? AND state IN ('open', 'done')
+            RETURNING *
+            """,
+            (now, todo_id, role),
+        ).fetchone()
+        if updated is None:
+            current = self._todo_for_role(conn, role, todo_id)
+            raise ValueError(f"Cannot reopen todo {todo_id} in state {current['state']}")
+        self.record_event(
+            conn,
+            "todo.reopened",
+            actor,
+            todo_id,
+            {"role": role, "message_id": updated["message_id"], "text": updated["text"]},
+        )
+        conn.commit()
+        return updated
+
+    def supersede_todo(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        todo_id: str,
+        replacement_text: str,
+        actor: str = "operator",
+    ) -> tuple[sqlite3.Row, sqlite3.Row]:
+        row = self._todo_for_role(conn, role, todo_id)
+        if row["state"] != "open":
+            raise ValueError(f"Cannot supersede todo {todo_id} in state {row['state']}; expected open")
+        normalized_text = replacement_text.strip()
+        if not normalized_text:
+            raise ValueError("replacement todo text is required")
+        now = utc_now()
+        replacement_id = new_todo_id()
+        conn.execute(
+            """
+            INSERT INTO todos(id, role, message_id, text, state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'open', ?, ?)
+            """,
+            (replacement_id, role, row["message_id"], normalized_text, now, now),
+        )
+        updated = conn.execute(
+            """
+            UPDATE todos
+            SET state = 'superseded',
+                updated_at = ?,
+                completed_at = ?,
+                superseded_by = ?
+            WHERE id = ? AND role = ? AND state = 'open'
+            RETURNING *
+            """,
+            (now, now, replacement_id, todo_id, role),
+        ).fetchone()
+        if updated is None:
+            current = self._todo_for_role(conn, role, todo_id)
+            raise ValueError(f"Cannot supersede todo {todo_id} in state {current['state']}")
+        self.record_event(
+            conn,
+            "todo.superseded",
+            actor,
+            todo_id,
+            {
+                "role": role,
+                "message_id": row["message_id"],
+                "text": row["text"],
+                "superseded_by": replacement_id,
+                "replacement_text": normalized_text,
+            },
+        )
+        self.record_event(
+            conn,
+            "todo.created",
+            actor,
+            replacement_id,
+            {
+                "role": role,
+                "message_id": row["message_id"],
+                "text": normalized_text,
+                "supersedes": todo_id,
+            },
+        )
+        conn.commit()
+        return updated, self.get_todo(conn, replacement_id)
+
+    def clear_todos(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        message_id: str,
+        actor: str = "operator",
+    ) -> int:
+        self._message_for_role(conn, role, message_id)
+        deleted = conn.execute("DELETE FROM todos WHERE role = ? AND message_id = ?", (role, message_id)).rowcount
+        self.record_event(conn, "todo.cleared", actor, message_id, {"role": role, "deleted": deleted})
+        conn.commit()
+        return int(deleted)
+
+    def open_todo_count(self, conn: sqlite3.Connection, *, role: str, message_id: str) -> int:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM todos WHERE role = ? AND message_id = ? AND state IN ('open')",
+                (role, message_id),
+            ).fetchone()[0]
+        )
+
+    def open_todo_counts(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        message_ids: Iterable[str],
+    ) -> dict[str, int]:
+        ids = tuple(dict.fromkeys(message_ids))
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        rows = conn.execute(
+            f"""
+            SELECT message_id, COUNT(*) AS count
+            FROM todos
+            WHERE role = ?
+              AND state = 'open'
+              AND message_id IN ({placeholders})
+            GROUP BY message_id
+            """,
+            (role, *ids),
+        ).fetchall()
+        return {row["message_id"]: int(row["count"]) for row in rows}
+
     def find_duplicate_messages(
         self,
         conn: sqlite3.Connection,
@@ -616,6 +945,233 @@ class Store:
                 LIMIT ?
                 """,
                 tuple(params),
+            )
+        )
+
+    def upsert_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        state: str,
+        interval_seconds: int,
+        scope_role: str | None = None,
+        delivery_method: str = "report-only",
+        pane: str | None = None,
+        window: str | None = None,
+        process_id: int | None = None,
+        next_run_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        if state not in WATCHDOG_RUNNER_STATES:
+            raise ValueError(f"Invalid watchdog runner state: {state}")
+        if interval_seconds <= 0:
+            raise ValueError("watchdog runner interval_seconds must be positive")
+        if scope_role and self.get_role(conn, scope_role) is None:
+            raise KeyError(f"Unknown role: {scope_role}")
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO watchdog_runners(
+              name, state, interval_seconds, scope_role, delivery_method, pane, window, process_id,
+              created_at, updated_at, next_run_at, last_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(name) DO UPDATE SET
+              state = excluded.state,
+              interval_seconds = excluded.interval_seconds,
+              scope_role = excluded.scope_role,
+              delivery_method = excluded.delivery_method,
+              pane = COALESCE(excluded.pane, watchdog_runners.pane),
+              window = COALESCE(excluded.window, watchdog_runners.window),
+              process_id = COALESCE(excluded.process_id, watchdog_runners.process_id),
+              updated_at = excluded.updated_at,
+              next_run_at = excluded.next_run_at,
+              last_error = NULL
+            """,
+            (
+                normalized_name,
+                state,
+                interval_seconds,
+                empty_to_none(scope_role),
+                delivery_method,
+                empty_to_none(pane),
+                empty_to_none(window),
+                process_id,
+                now,
+                now,
+                next_run_at,
+            ),
+        )
+        self.record_event(
+            conn,
+            "watchdog.runner_upserted",
+            actor,
+            normalized_name,
+            {
+                "state": state,
+                "interval_seconds": interval_seconds,
+                "scope_role": empty_to_none(scope_role),
+                "delivery_method": delivery_method,
+                "pane": empty_to_none(pane),
+                "window": empty_to_none(window),
+                "process_id": process_id,
+                "next_run_at": next_run_at,
+            },
+        )
+        conn.commit()
+        return self.get_watchdog_runner(conn, normalized_name)
+
+    def record_watchdog_runner_run(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        interval_seconds: int,
+        scope_role: str | None,
+        delivery_method: str,
+        pane: str | None,
+        window: str | None,
+        process_id: int | None,
+        last_run_at: str,
+        next_run_at: str | None,
+        finding_count: int,
+        finding_summary: str,
+        actor: str = "watchdog",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        if interval_seconds <= 0:
+            raise ValueError("watchdog runner interval_seconds must be positive")
+        if scope_role and self.get_role(conn, scope_role) is None:
+            raise KeyError(f"Unknown role: {scope_role}")
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO watchdog_runners(
+              name, state, interval_seconds, scope_role, delivery_method, pane, window, process_id,
+              created_at, updated_at, last_run_at, next_run_at, last_finding_count,
+              last_finding_summary, last_error
+            )
+            VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(name) DO UPDATE SET
+              state = 'running',
+              interval_seconds = excluded.interval_seconds,
+              scope_role = excluded.scope_role,
+              delivery_method = excluded.delivery_method,
+              pane = COALESCE(excluded.pane, watchdog_runners.pane),
+              window = COALESCE(excluded.window, watchdog_runners.window),
+              process_id = COALESCE(excluded.process_id, watchdog_runners.process_id),
+              updated_at = excluded.updated_at,
+              last_run_at = excluded.last_run_at,
+              next_run_at = excluded.next_run_at,
+              last_finding_count = excluded.last_finding_count,
+              last_finding_summary = excluded.last_finding_summary,
+              last_error = NULL
+            """,
+            (
+                normalized_name,
+                interval_seconds,
+                empty_to_none(scope_role),
+                delivery_method,
+                empty_to_none(pane),
+                empty_to_none(window),
+                process_id,
+                now,
+                now,
+                last_run_at,
+                next_run_at,
+                finding_count,
+                finding_summary,
+            ),
+        )
+        self.record_event(
+            conn,
+            "watchdog.runner_ran",
+            actor,
+            normalized_name,
+            {
+                "scope_role": empty_to_none(scope_role),
+                "finding_count": finding_count,
+                "finding_summary": finding_summary,
+                "last_run_at": last_run_at,
+                "next_run_at": next_run_at,
+            },
+        )
+        conn.commit()
+        return self.get_watchdog_runner(conn, normalized_name)
+
+    def stop_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        state: str = "stopped",
+        error: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        if state not in ("stopped", "failed"):
+            raise ValueError("watchdog runner stop state must be stopped or failed")
+        row = self.get_watchdog_runner(conn, normalized_name)
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET state = ?,
+                updated_at = ?,
+                next_run_at = NULL,
+                last_error = ?
+            WHERE name = ?
+            RETURNING *
+            """,
+            (state, now, empty_to_none(error), normalized_name),
+        ).fetchone()
+        if updated is None:
+            raise KeyError(f"Unknown watchdog runner: {normalized_name}")
+        self.record_event(
+            conn,
+            "watchdog.runner_stopped",
+            actor,
+            normalized_name,
+            {"previous_state": row["state"], "state": state, "error": empty_to_none(error)},
+        )
+        conn.commit()
+        return updated
+
+    def get_watchdog_runner(self, conn: sqlite3.Connection, name: str) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = conn.execute("SELECT * FROM watchdog_runners WHERE name = ?", (normalized_name,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown watchdog runner: {normalized_name}")
+        return row
+
+    def list_watchdog_runners(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        if name:
+            try:
+                return [self.get_watchdog_runner(conn, name)]
+            except KeyError:
+                return []
+        return list(
+            conn.execute(
+                """
+                SELECT * FROM watchdog_runners
+                ORDER BY
+                  CASE state
+                    WHEN 'running' THEN 0
+                    WHEN 'failed' THEN 1
+                    ELSE 2
+                  END,
+                  updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
             )
         )
 
@@ -1372,6 +1928,12 @@ class Store:
             raise PermissionError(f"Watch {watch_id} belongs to {row['role']}, not {role}")
         return row
 
+    def _todo_for_role(self, conn: sqlite3.Connection, role: str, todo_id: str) -> sqlite3.Row:
+        row = self.get_todo(conn, todo_id)
+        if row["role"] != role:
+            raise PermissionError(f"Todo {todo_id} belongs to {row['role']}, not {role}")
+        return row
+
 
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
@@ -1403,6 +1965,22 @@ def new_watch_id() -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
     return f"watch_{stamp}_{suffix}"
+
+
+def new_todo_id() -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    suffix = secrets.token_hex(3)
+    return f"todo_{stamp}_{suffix}"
+
+
+def normalize_watchdog_runner_name(name: str) -> str:
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("watchdog runner name is required")
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_.-")
+    if any(char not in allowed for char in normalized):
+        raise ValueError("watchdog runner name may contain only letters, numbers, '.', '_', and '-'")
+    return normalized
 
 
 def normalize_priority(priority: str) -> str:

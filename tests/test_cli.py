@@ -347,6 +347,194 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("state=completed", out)
 
+    def test_todo_lifecycle_supports_supersede_and_clear(self) -> None:
+        message_id = self.claim_collector_message("investigate failure")
+
+        code, out, err = self.run_cli(
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "run targeted test",
+        )
+        self.assertEqual(code, 0, err)
+        first_todo = out.split()[2]
+        self.assertTrue(first_todo.startswith("todo_"))
+        self.assertIn("[ ]", out)
+        self.assertIn("state=open", out)
+        self.assertIn("text=run targeted test", out)
+
+        code, out, err = self.run_cli("todo", "done", "--role", "collector", first_todo)
+        self.assertEqual(code, 0, err)
+        self.assertIn("[x]", out)
+        self.assertIn("state=done", out)
+
+        code, out, err = self.run_cli("todo", "reopen", "--role", "collector", first_todo)
+        self.assertEqual(code, 0, err)
+        self.assertIn("[ ]", out)
+        self.assertIn("state=open", out)
+
+        code, out, err = self.run_cli(
+            "todo",
+            "supersede",
+            "--role",
+            "collector",
+            first_todo,
+            "run broader pytest selection",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("superseded:", out)
+        self.assertIn("replacement:", out)
+        self.assertIn("state=superseded", out)
+        self.assertIn("state=open", out)
+        self.assertIn("text=run broader pytest selection", out)
+        replacement_todo = ""
+        for line in out.splitlines():
+            if line.startswith("replacement: "):
+                replacement_todo = line.split()[3]
+        self.assertTrue(replacement_todo.startswith("todo_"))
+
+        code, out, err = self.run_cli("todo", "list", "--role", "collector", "--message", message_id)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"superseded_by={replacement_todo}", out)
+        self.assertIn(first_todo, out)
+        self.assertIn(replacement_todo, out)
+
+        code, out, err = self.run_cli("todo", "clear", "--role", "collector", "--message", message_id)
+        self.assertEqual(code, 0, err)
+        self.assertIn("cleared 2 todo(s)", out)
+
+        code, out, err = self.run_cli("todo", "list", "--role", "collector", "--message", message_id)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"no todos for collector/{message_id}", out)
+
+    def test_inbox_complete_blocks_open_todos_unless_allowed(self) -> None:
+        message_id = self.claim_collector_message("fix bug")
+        code, out, err = self.run_cli(
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "run verification",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            message_id,
+            "--role",
+            "collector",
+            "--summary",
+            "fixed",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("has 1 open todo(s)", err)
+        self.assertIn("--allow-open-todos", err)
+
+        code, out, err = self.run_cli(
+            "inbox",
+            "complete",
+            message_id,
+            "--role",
+            "collector",
+            "--summary",
+            "operator override",
+            "--allow-open-todos",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=completed", out)
+
+    def test_inbox_next_points_to_active_work_and_open_todos(self) -> None:
+        message_id = self.claim_collector_message("continue existing work")
+        code, out, err = self.run_cli(
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "inspect current failure",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "collector")
+
+        self.assertEqual(code, 1)
+        self.assertIn("no pending messages for collector", out)
+        self.assertIn("active work already claimed or acknowledged", out)
+        self.assertIn(f"{message_id} state=acknowledged", out)
+        self.assertIn("todos_open=1", out)
+        self.assertIn("inspect current failure", out)
+        self.assertIn("recover: tmux-team todo recover", out)
+
+    def test_status_verbose_and_recover_show_open_todos(self) -> None:
+        message_id = self.claim_collector_message("collect evidence")
+        code, out, err = self.run_cli(
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "capture failing traceback",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("status", "--verbose", "--active-limit", "2")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{message_id} state=acknowledged", out)
+        self.assertIn("todos_open=1", out)
+
+        code, out, err = self.run_cli("todo", "recover", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn("active work for collector:", out)
+        self.assertIn("capture failing traceback", out)
+
+    def test_dashboard_once_renders_state_without_textual(self) -> None:
+        message_id = self.claim_collector_message("collect dashboard evidence")
+        code, out, err = self.run_cli(
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "capture dashboard fixture",
+        )
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli(
+            "watch",
+            "start",
+            "--role",
+            "collector",
+            "--summary",
+            "monitor fixture",
+            "--next-update-in",
+            "5m",
+        )
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_cli("memory", "append", "--role", "collector", "--body", "Active task: dashboard")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("dashboard", "--once", "--role", "collector", "--no-pane-preview")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("tmux-team dashboard", out)
+        self.assertIn("Roles", out)
+        self.assertIn("collector", out)
+        self.assertIn("todos", out)
+        self.assertIn("collect dashboard evidence", out)
+        self.assertIn("capture dashboard fixture", out)
+        self.assertIn("monitor fixture", out)
+        self.assertIn("Active task: dashboard", out)
+        self.assertNotIn("Pane Preview", out)
+
     def test_expired_claim_is_visible_and_reclaimable(self) -> None:
         code, out, err = self.run_cli(
             "send",
@@ -499,6 +687,174 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn(f"kind=urgent_pending role=orchestrator ref={urgent_id}", out)
         self.assertIn(f"kind=claimed_unacked role=collector ref={unacked_id}", out)
+
+    def test_watchdog_run_records_runner_state_and_findings(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--priority",
+            "urgent",
+            "--summary",
+            "urgent runner blocker",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        urgent_id = out.split()[0]
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "run",
+            "--name",
+            "default",
+            "--interval",
+            "1s",
+            "--iterations",
+            "1",
+            "--unacked-warn-seconds",
+            "0",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("tmux-team watchdog runner", out)
+        self.assertIn("name: default", out)
+        self.assertIn("state: running", out)
+        self.assertIn(f"kind=urgent_pending role=orchestrator ref={urgent_id}", out)
+
+        code, out, err = self.run_cli("watchdog", "status", "default")
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=stopped interval=1s scope=team", out)
+        self.assertIn("findings=1", out)
+        self.assertIn("safe_to_close=yes", out)
+
+    def test_watchdog_start_stop_and_status_use_visible_tmux_window(self) -> None:
+        fake_dir = self.root / "watchdog-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "watchdog-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "kill-pane" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "default",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=running interval=1m scope=team", out)
+        self.assertIn("pane=%9", out)
+        self.assertIn("tmux: tt-test:tt-watchdog-default pane=%9", out)
+        logged = log_path.read_text(encoding="utf-8")
+        self.assertIn("new-window -d -P -F #{pane_id} -t tt-test -n tt-watchdog-default", logged)
+        self.assertIn("watchdog run --name default --interval 1m", logged)
+        self.assertIn("set-option -p -t %9 @tmux-team-watchdog default", logged)
+        self.assertIn("select-pane -t %9 -T tt-watchdog-default", logged)
+
+        code, out, err = self.run_cli("status", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("watchdog_runners:", out)
+        self.assertIn("default state=running interval=1m", out)
+
+        code, out, err = self.run_cli("watchdog", "stop", "default", "--tmux-bin", str(tmux))
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=stopped interval=1m", out)
+        self.assertIn("safe_to_close=yes", out)
+        logged = log_path.read_text(encoding="utf-8")
+        self.assertIn("kill-pane -t %9", logged)
+
+    def test_watchdog_start_refuses_duplicate_running_runner(self) -> None:
+        fake_dir = self.root / "watchdog-duplicate-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "default",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "default",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("watchdog runner default is already running; stop it first", err)
+
+    def test_dashboard_renders_watchdog_runner_state(self) -> None:
+        code, out, err = self.run_cli(
+            "watchdog",
+            "run",
+            "--name",
+            "demo",
+            "--interval",
+            "1s",
+            "--iterations",
+            "1",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("dashboard", "--once", "--no-pane-preview")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Watchdog Runners", out)
+        self.assertIn("demo stopped interval=1s scope=team", out)
 
     def test_watch_lifecycle_and_status_verbose(self) -> None:
         code, out, err = self.run_cli(
@@ -1008,6 +1364,66 @@ exit 9
         self.assertIn("role=collector managed=true pane=test:agents.1 pane_id=%2", out)
         self.assertIn("role=- managed=false pane=test:agents.2 pane_id=%3 command=zsh path=/tmp/helper", out)
 
+    def test_pane_list_all_marks_watchdog_panes(self) -> None:
+        fake_dir = self.root / "pane-list-watchdog-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
+  exit 0
+fi
+if [ "$1" = "display-message" ]; then
+  case "$4" in
+    %9) printf 'tt-test:tt-watchdog-default\\n'; exit 0 ;;
+  esac
+fi
+if [ "$1" = "list-panes" ]; then
+  case "$3" in
+    test:collector)
+      printf '%%1\\ttest:collector.0\\tcodex\\t/tmp/collector\\n'
+      ;;
+    test:orchestrator)
+      printf '%%2\\ttest:orchestrator.0\\tcodex\\t/tmp/orchestrator\\n'
+      ;;
+    tt-test:tt-watchdog-default)
+      printf '%%9\\ttt-test:tt-watchdog-default.0\\tzsh\\t/tmp/project\\n'
+      ;;
+  esac
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "default",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("pane", "list", "--all", "--tmux-bin", str(tmux))
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "role=- managed=false pane=tt-test:tt-watchdog-default.0 pane_id=%9 "
+            "command=zsh path=/tmp/project watchdog=default infrastructure=watchdog",
+            out,
+        )
+
     def test_pane_capture_policy_allows_orchestrator_supervision(self) -> None:
         code, out, err = self.run_main(
             "--config",
@@ -1380,6 +1796,116 @@ exit 9
         self.assertEqual(out, "")
         self.assertIn("not authorized to run inbox.next", err)
 
+    def test_orchestrator_can_inspect_cross_role_inboxes_but_not_claim_them(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--summary",
+            "collector evidence",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "orchestrator",
+            "inbox",
+            "list",
+            "--role",
+            "collector",
+            "--verbose",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn(message_id, out)
+        self.assertIn("collector evidence", out)
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "orchestrator",
+            "inbox",
+            "next",
+            "--role",
+            "collector",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to run inbox.next", err)
+
+    def test_todo_policy_is_role_owned_with_orchestrator_read_access(self) -> None:
+        message_id = self.claim_collector_message("collector checklist")
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "trainer",
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "bad edit",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to run todo.add", err)
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "orchestrator",
+            "todo",
+            "list",
+            "--role",
+            "collector",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("no todos for collector", out)
+
+        with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
+            code, out, err = self.run_main("todo", "add", "--message", message_id, "own checklist item")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("role=collector", out)
+
+    def test_watchdog_policy_allows_inspection_but_not_role_management(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "watchdog",
+            "list",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("no watchdog runners", out)
+
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "collector",
+            "watchdog",
+            "start",
+            "--session",
+            "tt-test",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not authorized to manage watchdog runners", err)
+
     def test_authenticated_actor_needs_policy_for_role_state_changes(self) -> None:
         code, out, err = self.run_main(
             "--config",
@@ -1505,6 +2031,31 @@ can_notify = ["orchestrator"]
                 self.assertEqual(out, "")
                 self.assertIn(expected_error, err)
 
+    def test_orchestrator_can_approve_stable_commit_by_default(self) -> None:
+        code, out, err = self.run_main(
+            "--config",
+            str(self.config),
+            "--actor",
+            "orchestrator",
+            "stable",
+            "approve",
+            "abc123",
+            "--role",
+            "collector",
+            "--by",
+            "orchestrator",
+            "--note",
+            "ready for verification",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("collector: abc123 approved_by=orchestrator", out)
+
+        code, out, err = self.run_cli("stable", "current", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn("collector: abc123 approved_by=orchestrator", out)
+        self.assertIn("note=ready for verification", out)
+
     def test_policy_mode_permissive_is_cli_breakglass(self) -> None:
         code, out, err = self.run_main(
             "--config",
@@ -1551,6 +2102,26 @@ can_notify = ["orchestrator"]
         self.assertIn("Pending inbox messages: 1", out)
         self.assertIn("Scratchpad excerpt:", out)
         self.assertIn("Active task: collect evidence.", out)
+
+    def test_codex_session_context_includes_active_todos(self) -> None:
+        message_id = self.claim_collector_message("collect detailed evidence")
+        code, out, err = self.run_cli(
+            "todo",
+            "add",
+            "--role",
+            "collector",
+            "--message",
+            message_id,
+            "run focused regression",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("codex", "session-context", "--role", "collector", "--max-memory-chars", "0")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Active todos:", out)
+        self.assertIn(message_id, out)
+        self.assertIn("run focused regression", out)
 
     def test_codex_session_context_defaults_to_actor_role(self) -> None:
         code, out, err = self.run_main(
@@ -2164,6 +2735,25 @@ can_notify = ["orchestrator"]
 
     def run_cli(self, *args: str) -> tuple[int, str, str]:
         return self.run_main("--config", str(self.config), *args)
+
+    def claim_collector_message(self, summary: str) -> str:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--summary",
+            summary,
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        message_id = out.split()[0]
+        code, _out, err = self.run_cli("inbox", "next", "--role", "collector", "--auto-ack")
+        self.assertEqual(code, 0, err)
+        return message_id
 
     def run_main(self, *args: str) -> tuple[int, str, str]:
         stdout = StringIO()

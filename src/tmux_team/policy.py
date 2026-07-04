@@ -116,9 +116,15 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             raise PolicyError(f"actor {actor!r} is not authorized to use tmux send-keys notification")
         return
 
-    if action in ("inbox.next", "inbox.list", "inbox.reclaimable"):
+    if action == "inbox.next":
         _authorize_role_resource(actor, resource, "role", policy.can_claim, action)
         return
+
+    if action in ("inbox.list", "inbox.reclaimable"):
+        role = _required_resource(action, resource, "role")
+        if actor == "orchestrator" or _role_matches(role, actor, policy.can_claim):
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to run {action} for role {role!r}")
 
     if action == "inbox.ack":
         _authorize_role_resource(actor, resource, "role", policy.can_ack, action)
@@ -126,6 +132,16 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
 
     if action in ("inbox.complete", "inbox.complete-replies"):
         _authorize_role_resource(actor, resource, "role", policy.can_complete, action)
+        return
+
+    if action in ("todo.list", "todo.recover"):
+        role = _required_resource(action, resource, "role")
+        if actor == "orchestrator" or role == actor:
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to run {action} for role {role!r}")
+
+    if action in ("todo.add", "todo.done", "todo.reopen", "todo.supersede", "todo.clear"):
+        _authorize_role_resource(actor, resource, "role", (), action)
         return
 
     if action in ("memory.read", "memory.update"):
@@ -163,6 +179,14 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             raise PolicyError(f"actor {actor!r} is not authorized to list unmanaged panes")
         return
 
+    if action == "watchdog.list":
+        return
+
+    if action == "watchdog.manage":
+        if actor == "orchestrator":
+            return
+        raise PolicyError(f"actor {actor!r} is not authorized to manage watchdog runners")
+
     if action == "role.state.change":
         if not policy.can_change_role_state:
             raise PolicyError(f"actor {actor!r} is not authorized to change role state")
@@ -174,7 +198,7 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
         return
 
     if action == "stable.approve":
-        if not policy.can_approve_stable:
+        if actor != "orchestrator" and not policy.can_approve_stable:
             raise PolicyError(f"actor {actor!r} is not authorized to approve stable commits")
         return
 

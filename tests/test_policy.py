@@ -83,14 +83,27 @@ can_sleep = true
         config = self.config()
 
         authorize(config, PolicyContext(actor="implementer"), "inbox.next", role="implementer")
+        authorize(config, PolicyContext(actor="implementer"), "inbox.list", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.reclaimable", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.ack", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.complete", role="implementer")
         authorize(config, PolicyContext(actor="implementer"), "inbox.complete-replies", role="implementer")
+        authorize(config, PolicyContext(actor="orchestrator"), "inbox.list", role="collector")
+        authorize(config, PolicyContext(actor="orchestrator"), "inbox.reclaimable", role="collector")
 
-        for action in ("inbox.next", "inbox.reclaimable", "inbox.ack", "inbox.complete", "inbox.complete-replies"):
+        for action in (
+            "inbox.next",
+            "inbox.list",
+            "inbox.reclaimable",
+            "inbox.ack",
+            "inbox.complete",
+            "inbox.complete-replies",
+        ):
             with self.subTest(action=action), self.assertRaises(PolicyError):
                 authorize(config, PolicyContext(actor="implementer"), action, role="orchestrator")
+
+        with self.assertRaises(PolicyError):
+            authorize(config, PolicyContext(actor="orchestrator"), "inbox.next", role="collector")
 
     def test_actor_can_only_notify_itself_by_default(self) -> None:
         config = self.config()
@@ -145,6 +158,8 @@ can_sleep = true
         authorize(config, context, "stable.approve", role="global")
         authorize(config, context, "team.sleep")
         authorize(config, context, "team.resume")
+
+        authorize(self.config(), PolicyContext(actor="orchestrator"), "stable.approve", role="collector")
 
     def test_milestones_are_operator_or_orchestrator_only(self) -> None:
         config = self.config()

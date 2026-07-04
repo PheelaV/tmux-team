@@ -57,6 +57,29 @@ Completion notices are durable, claimable, and visible until the recipient has s
 
 `inbox complete-replies --role ROLE` exists to close claimed or acknowledged completion notices in bulk after review.
 
+## Active Message Todos
+
+Per-role todos are durable execution state for one active message.
+
+They were added to solve a specific role-loop problem: once an agent has acknowledged a message, the inbox no longer describes the current subplan. Scratchpad memory is too long-lived for transient steps, and milestones are too broad. Todos fill that gap:
+
+```text
+inbox message = assignment and completion boundary
+todo rows = role-owned active checklist for that assignment
+scratchpad = long-lived operational memory
+milestones = operator timeline
+```
+
+Important constraints:
+
+- todos are scoped to `(role, message_id)`;
+- only claimed or acknowledged messages can receive new todos;
+- open todos block `inbox complete` unless `--allow-open-todos` is explicit;
+- `todo supersede` marks an obsolete step terminal and creates a replacement step for the same message;
+- `todo recover`, `status --verbose`, and `codex session-context` expose active todos after context reset.
+
+This intentionally avoids a second queue. Todos do not wake roles, do not address other roles, and do not replace messages.
+
 ## Notice Broadcasts
 
 `broadcast --notice` records one completed `message_kind='notice'` row per recipient.
