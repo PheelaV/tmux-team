@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,12 @@ from .config import (
     runtime_dir_env,
     write_default_config,
 )
+from .dashboard import (
+    DashboardDependencyError,
+    collect_dashboard_snapshot,
+    render_dashboard_snapshot,
+    run_textual_dashboard,
+)
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
@@ -50,16 +57,20 @@ from .store import (
     CLAIMABLE_STATES,
     ROLE_STATES,
     STALE_CLAIMED_STATE,
+    TODO_STATES,
     WATCH_ACTIVE_STATES,
     WATCH_STATES,
     Store,
     normalize_priority,
+    normalize_watchdog_runner_name,
     parse_utc_datetime,
 )
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 DEFAULT_PANE_SUMMARY_MAX_BYTES = 20_000
 DEFAULT_PANE_SUMMARY_TIMEOUT_SECONDS = 120.0
+DEFAULT_WATCHDOG_INTERVAL = "15m"
+WATCHDOG_PANE_OPTION = "@tmux-team-watchdog"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -96,6 +107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_config(args, config)
             if args.command == "status":
                 return cmd_status(args, store, conn)
+            if args.command == "dashboard":
+                return cmd_dashboard(args, store, conn, config)
             if args.command == "ext":
                 return cmd_ext(args, config)
 
@@ -108,6 +121,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_inbox(args, service, conn)
             if args.command == "memory":
                 return cmd_memory(args, config)
+            if args.command == "todo":
+                return cmd_todo(args, store, conn)
             if args.command == "milestone":
                 return cmd_milestone(args, store, conn)
             if args.command == "watch":
@@ -212,6 +227,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=300,
         help="Warn in verbose output when claimed work is not acknowledged after this many seconds",
     )
+
+    dashboard = subparsers.add_parser("dashboard", help="Open a read-only operator dashboard")
+    dashboard.add_argument("--refresh", type=float, default=2.0, help="Live dashboard refresh interval in seconds")
+    dashboard.add_argument("--once", action="store_true", help="Print one text snapshot and exit")
+    dashboard.add_argument("--role", help="Limit the dashboard to one role")
+    dashboard.add_argument("--no-pane-preview", action="store_true", help="Do not capture role pane tails")
+    dashboard.add_argument("--pane-lines", type=int, default=8, help="Pane tail lines to show when preview is enabled")
+    dashboard.add_argument("--tmux-bin", default="tmux")
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
@@ -426,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Queue a completion reply to the original sender and wake it when it is a managed role",
     )
     inbox_complete.add_argument("--reply-no-notify", action="store_true", help="Queue the reply without waking sender")
+    inbox_complete.add_argument(
+        "--allow-open-todos",
+        action="store_true",
+        help="Complete even when the message still has open role todos",
+    )
     inbox_complete_replies = inbox_sub.add_parser(
         "complete-replies", help="Complete claimed or acknowledged completion notices"
     )
@@ -446,6 +474,34 @@ def build_parser() -> argparse.ArgumentParser:
     memory_body.add_argument("--body", help="Inline note text, or '-' to read stdin")
     memory_body.add_argument("--body-file", help="Path to markdown note")
     memory_append.add_argument("note", nargs="?", help="Note text; kept for quick one-line updates")
+
+    todo = subparsers.add_parser("todo", help="Track role-owned checklist items for active inbox work")
+    todo_sub = todo.add_subparsers(dest="todo_command", required=True)
+    todo_list = todo_sub.add_parser("list", help="List role todos")
+    todo_list.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_list.add_argument("--message", dest="message_id", help="Limit to one inbox message id")
+    todo_list.add_argument("--state", action="append", choices=TODO_STATES, help="Filter state; repeatable")
+    todo_list.add_argument("--limit", type=int, default=50)
+    todo_add = todo_sub.add_parser("add", help="Add a todo for an active inbox message")
+    todo_add.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_add.add_argument("--message", dest="message_id", required=True, help="Active inbox message id")
+    todo_add.add_argument("text", help="Todo text")
+    todo_done = todo_sub.add_parser("done", help="Mark a todo done")
+    todo_done.add_argument("todo_id")
+    todo_done.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_reopen = todo_sub.add_parser("reopen", help="Reopen a completed todo")
+    todo_reopen.add_argument("todo_id")
+    todo_reopen.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_supersede = todo_sub.add_parser("supersede", help="Supersede a todo with a replacement todo")
+    todo_supersede.add_argument("todo_id")
+    todo_supersede.add_argument("text", help="Replacement todo text")
+    todo_supersede.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_clear = todo_sub.add_parser("clear", help="Delete todos for one role/message")
+    todo_clear.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_clear.add_argument("--message", dest="message_id", required=True, help="Inbox message id")
+    todo_recover = todo_sub.add_parser("recover", help="Show active role work and associated todos")
+    todo_recover.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    todo_recover.add_argument("--limit", type=int, default=10)
 
     milestone = subparsers.add_parser("milestone", help="Record or inspect append-only team milestones")
     milestone_sub = milestone.add_subparsers(dest="milestone_command", required=True)
@@ -554,6 +610,40 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog.add_argument("--ack-warn-seconds", type=int, default=3600)
     watchdog.add_argument("--watch-grace-seconds", type=int, default=0)
     watchdog.add_argument("--json", action="store_true", help="Print findings as JSON")
+    watchdog_sub = watchdog.add_subparsers(dest="watchdog_command")
+    watchdog_run = watchdog_sub.add_parser("run", help="Run a visible periodic watchdog loop in this pane")
+    watchdog_run.add_argument("--name", default="default", help="Runner name")
+    watchdog_run.add_argument("--interval", default=DEFAULT_WATCHDOG_INTERVAL, help="Run interval such as 15m")
+    watchdog_run.add_argument("--role", help="Limit checks to one role")
+    watchdog_run.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
+    watchdog_run.add_argument("--unacked-warn-seconds", type=int, default=300)
+    watchdog_run.add_argument("--ack-warn-seconds", type=int, default=3600)
+    watchdog_run.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog_run.add_argument("--iterations", type=int, help="Exit after this many iterations; useful for tests")
+    watchdog_start = watchdog_sub.add_parser("start", help="Start a watchdog runner in a visible tmux window")
+    watchdog_start.add_argument("--name", default="default", help="Runner name")
+    watchdog_start.add_argument("--interval", default=DEFAULT_WATCHDOG_INTERVAL, help="Run interval such as 15m")
+    watchdog_start.add_argument("--role", help="Limit checks to one role")
+    watchdog_start.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
+    watchdog_start.add_argument("--unacked-warn-seconds", type=int, default=300)
+    watchdog_start.add_argument("--ack-warn-seconds", type=int, default=3600)
+    watchdog_start.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog_start.add_argument("--session", help="tmux session; defaults to current tmux session")
+    watchdog_start.add_argument("--window-name", help="tmux window name; defaults to tt-watchdog-<name>")
+    watchdog_start.add_argument("--tmux-bin", default="tmux")
+    watchdog_start.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
+    watchdog_stop = watchdog_sub.add_parser("stop", help="Stop a watchdog runner and optionally kill its tmux pane")
+    watchdog_stop.add_argument("name", nargs="?", default="default")
+    watchdog_stop.add_argument("--tmux-bin", default="tmux")
+    watchdog_stop.add_argument("--no-kill-pane", action="store_true", help="Only mark the runner stopped in state")
+    watchdog_list = watchdog_sub.add_parser("list", help="List watchdog runner lifecycle state")
+    watchdog_list.add_argument("--json", action="store_true")
+    watchdog_list.add_argument("--limit", type=int, default=50)
+    watchdog_list.add_argument("--stale-grace-seconds", type=int, default=60)
+    watchdog_status = watchdog_sub.add_parser("status", help="Show one watchdog runner or all runners")
+    watchdog_status.add_argument("name", nargs="?")
+    watchdog_status.add_argument("--json", action="store_true")
+    watchdog_status.add_argument("--stale-grace-seconds", type=int, default=60)
 
     sleep = subparsers.add_parser("sleep", help="Snapshot current bindings and tear down managed tmux team windows")
     sleep.add_argument(
@@ -830,6 +920,10 @@ def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext
         args.role = policy_context.actor
         if args.role is None:
             raise ValueError(f"memory --role is required unless --actor or ${ROLE_ENV} is set")
+    if args.command == "todo" and getattr(args, "role", None) is None:
+        args.role = policy_context.actor
+        if args.role is None:
+            raise ValueError(f"todo --role is required unless --actor or ${ROLE_ENV} is set")
     if args.command == "milestone" and args.milestone_command == "add":
         if args.role is None:
             args.role = policy_context.actor
@@ -917,6 +1011,11 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, action, role=args.role)
         return
 
+    if args.command == "todo":
+        action = f"todo.{args.todo_command}"
+        authorize(config, policy_context, action, role=args.role)
+        return
+
     if args.command == "milestone":
         if args.milestone_command == "add":
             authorize(config, policy_context, "milestone.add", role=args.role or "")
@@ -942,6 +1041,12 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
 
     if args.command == "notify":
         authorize(config, policy_context, "role.notify", role=args.role, method=args.method)
+        return
+
+    if args.command == "watchdog":
+        command = args.watchdog_command or "check"
+        action = "watchdog.list" if command in ("check", "list", "status") else "watchdog.manage"
+        authorize(config, policy_context, action)
         return
 
     if args.command == "sleep":
@@ -1008,14 +1113,59 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
                 print("    active: none")
             else:
                 print("    active:")
+                todo_counts = store.open_todo_counts(conn, role=role["name"], message_ids=(row["id"] for row in rows))
                 for row in rows:
-                    print(f"      {active_message_line(row, args.unacked_warn_seconds)}")
+                    line = active_message_line(row, args.unacked_warn_seconds)
+                    open_todos = todo_counts.get(row["id"], 0)
+                    if open_todos:
+                        line = f"{line} todos_open={open_todos}"
+                    print(f"      {line}")
             watches = store.list_watches(conn, role=role["name"], states=WATCH_ACTIVE_STATES, limit=args.active_limit)
             if watches:
                 print("    watches:")
                 for watch in watches:
                     print(f"      {watch_one_line(watch)}")
+    if args.verbose:
+        runners = store.list_watchdog_runners(conn, limit=args.active_limit)
+        print("watchdog_runners:")
+        if not runners:
+            print("  none")
+        else:
+            for runner in runners:
+                print(f"  {watchdog_runner_one_line(runner, stale_grace_seconds=60)}")
     return 0
+
+
+def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
+    if args.refresh <= 0:
+        raise ValueError("dashboard --refresh must be greater than 0")
+    if args.pane_lines < 0:
+        raise ValueError("dashboard --pane-lines must be 0 or greater")
+    include_pane_preview = not args.no_pane_preview and args.pane_lines > 0
+
+    if args.once:
+        snapshot = collect_dashboard_snapshot(
+            store,
+            conn,
+            role_filter=args.role,
+            include_pane_preview=include_pane_preview,
+            pane_lines=args.pane_lines,
+            tmux_bin=args.tmux_bin,
+        )
+        print(render_dashboard_snapshot(snapshot), end="")
+        return 0
+
+    try:
+        return run_textual_dashboard(
+            config,
+            role_filter=args.role,
+            refresh=args.refresh,
+            include_pane_preview=include_pane_preview,
+            pane_lines=args.pane_lines,
+            tmux_bin=args.tmux_bin,
+        )
+    except DashboardDependencyError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def cmd_ext(args: argparse.Namespace, config) -> int:
@@ -1079,6 +1229,90 @@ def cmd_memory(args: argparse.Namespace, config) -> int:
         return 0
 
     return 2
+
+
+def cmd_todo(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.todo_command == "list":
+        states = tuple(args.state) if args.state else None
+        rows = store.list_todos(conn, role=args.role, message_id=args.message_id, states=states, limit=args.limit)
+        if not rows:
+            target = f"{args.role}/{args.message_id}" if args.message_id else args.role
+            print(f"no todos for {target}")
+            return 0
+        for row in rows:
+            print(todo_one_line(row))
+        return 0
+
+    if args.todo_command == "add":
+        row = store.add_todo(
+            conn,
+            role=args.role,
+            message_id=args.message_id,
+            text=args.text,
+            actor=args.actor or args.role,
+        )
+        print(todo_one_line(row))
+        return 0
+
+    if args.todo_command == "done":
+        row = store.complete_todo(conn, role=args.role, todo_id=args.todo_id, actor=args.actor or args.role)
+        print(todo_one_line(row))
+        return 0
+
+    if args.todo_command == "reopen":
+        row = store.reopen_todo(conn, role=args.role, todo_id=args.todo_id, actor=args.actor or args.role)
+        print(todo_one_line(row))
+        return 0
+
+    if args.todo_command == "supersede":
+        old, new = store.supersede_todo(
+            conn,
+            role=args.role,
+            todo_id=args.todo_id,
+            replacement_text=args.text,
+            actor=args.actor or args.role,
+        )
+        print(f"superseded: {todo_one_line(old)}")
+        print(f"replacement: {todo_one_line(new)}")
+        return 0
+
+    if args.todo_command == "clear":
+        deleted = store.clear_todos(
+            conn,
+            role=args.role,
+            message_id=args.message_id,
+            actor=args.actor or args.role,
+        )
+        print(f"cleared {deleted} todo(s) for {args.role}/{args.message_id}")
+        return 0
+
+    if args.todo_command == "recover":
+        return cmd_todo_recover(args, store, conn)
+
+    return 2
+
+
+def cmd_todo_recover(args: argparse.Namespace, store: Store, conn) -> int:
+    active_messages = store.list_in_progress_messages(conn, role=args.role, limit=args.limit)
+    if not active_messages:
+        print(f"no active claimed or acknowledged messages for {args.role}")
+    else:
+        print(f"active work for {args.role}:")
+        for row in active_messages:
+            print(f"  {active_message_line(row)}")
+            todos = store.list_todos(conn, role=args.role, message_id=row["id"], limit=args.limit)
+            if not todos:
+                print("    todos: none")
+            else:
+                for todo in todos:
+                    print(f"    {todo_one_line(todo)}")
+
+    recent = store.list_todos(conn, role=args.role, states=("done", "superseded"), limit=args.limit)
+    if recent:
+        print("recent completed/superseded todos:")
+        for row in recent:
+            print(f"  {todo_one_line(row)}")
+    return 0
 
 
 def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
@@ -1261,6 +1495,26 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
     if args.inbox_command == "next":
         row = service.claim_next(conn, args.role, args.claim_seconds, actor=args.actor)
         if row is None:
+            active_rows = service.store.list_in_progress_messages(conn, role=args.role, limit=5)
+            if active_rows:
+                print(f"no pending messages for {args.role}")
+                print("active work already claimed or acknowledged:")
+                todo_counts = service.store.open_todo_counts(
+                    conn, role=args.role, message_ids=(active_row["id"] for active_row in active_rows)
+                )
+                for active_row in active_rows:
+                    line = active_message_line(active_row)
+                    open_todos = todo_counts.get(active_row["id"], 0)
+                    if open_todos:
+                        line = f"{line} todos_open={open_todos}"
+                    print(f"  {line}")
+                    todos = service.store.list_todos(
+                        conn, role=args.role, message_id=active_row["id"], states=("open",), limit=5
+                    )
+                    for todo in todos:
+                        print(f"    {todo_one_line(todo)}")
+                print("recover: tmux-team todo recover")
+                return 1
             print(f"no pending messages for {args.role}")
             return 1
         if args.auto_ack:
@@ -1296,6 +1550,12 @@ def cmd_inbox(args: argparse.Namespace, service: TeamService, conn) -> int:
         return 0
 
     if args.inbox_command == "complete":
+        open_todos = service.store.open_todo_count(conn, role=args.role, message_id=args.message_id)
+        if open_todos and not args.allow_open_todos:
+            raise ValueError(
+                f"Message {args.message_id} has {open_todos} open todo(s); "
+                "complete or supersede them, or pass --allow-open-todos"
+            )
         summary = completion_summary(args)
         result = service.complete_message_with_optional_reply(
             conn,
@@ -1416,6 +1676,8 @@ def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
 def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
     roles = store.list_roles(conn)
     managed_by_target = {role["pane"]: role for role in roles if role["pane"]}
+    watchdogs = store.list_watchdog_runners(conn)
+    watchdog_by_target = {row["pane"]: row for row in watchdogs if row["pane"]}
     print("managed panes:")
     if not managed_by_target:
         print("  none")
@@ -1429,7 +1691,13 @@ def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
         return 0
 
     print("all panes in managed windows:")
-    windows = sorted({target for pane in managed_by_target if (target := pane_window_target(args.tmux_bin, pane))})
+    windows = sorted(
+        {
+            target
+            for pane in tuple(managed_by_target) + tuple(watchdog_by_target)
+            if (target := pane_window_target(args.tmux_bin, pane))
+        }
+    )
     if not windows:
         print("  none")
         return 0
@@ -1438,11 +1706,15 @@ def cmd_pane_list(args: argparse.Namespace, store: Store, conn) -> int:
         for pane in list_tmux_window_panes(args.tmux_bin, window):
             seen = True
             role = managed_by_target.get(pane["target"]) or managed_by_target.get(pane["id"])
+            watchdog = watchdog_by_target.get(pane["target"]) or watchdog_by_target.get(pane["id"])
             role_name = role["name"] if role is not None else "-"
             managed = "true" if role is not None else "false"
+            suffix = ""
+            if watchdog is not None:
+                suffix = f" watchdog={watchdog['name']} infrastructure=watchdog"
             print(
                 f"  role={role_name} managed={managed} pane={pane['target']} pane_id={pane['id']} "
-                f"command={pane['command'] or '-'} path={pane['path'] or '-'}"
+                f"command={pane['command'] or '-'} path={pane['path'] or '-'}{suffix}"
             )
     if not seen:
         print("  none")
@@ -1459,6 +1731,15 @@ def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
 
 
 def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.watchdog_command == "run":
+        return cmd_watchdog_run(args, store, conn)
+    if args.watchdog_command == "start":
+        return cmd_watchdog_start(args, store, conn)
+    if args.watchdog_command == "stop":
+        return cmd_watchdog_stop(args, store, conn)
+    if args.watchdog_command in ("list", "status"):
+        return cmd_watchdog_list(args, store, conn)
+
     findings = watchdog_findings(
         store,
         conn,
@@ -1475,6 +1756,348 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
         for finding in findings:
             print(format_watchdog_finding(finding))
     return 0
+
+
+def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
+    name = normalize_watchdog_runner_name(args.name)
+    interval_seconds = parse_positive_duration_seconds(args.interval, "--interval")
+    if args.iterations is not None and args.iterations <= 0:
+        raise ValueError("watchdog run --iterations must be greater than 0")
+
+    pane = os.environ.get("TMUX_PANE")
+    window = current_tmux_window()
+    process_id = os.getpid()
+    iteration = 0
+    try:
+        while True:
+            now = datetime.now(UTC).replace(microsecond=0)
+            next_run = (now + timedelta(seconds=interval_seconds)).isoformat()
+            findings = watchdog_findings(
+                store,
+                conn,
+                role=args.role,
+                unacked_warn_seconds=args.unacked_warn_seconds,
+                ack_warn_seconds=args.ack_warn_seconds,
+                watch_grace_seconds=args.watch_grace_seconds,
+            )
+            summary = summarize_watchdog_findings(findings)
+            row = store.record_watchdog_runner_run(
+                conn,
+                name=name,
+                interval_seconds=interval_seconds,
+                scope_role=args.role,
+                delivery_method=args.delivery,
+                pane=pane,
+                window=window,
+                process_id=process_id,
+                last_run_at=now.isoformat(),
+                next_run_at=next_run,
+                finding_count=len(findings),
+                finding_summary=summary,
+                actor=name,
+            )
+            print_watchdog_runner_header(row, stale_grace_seconds=0)
+            if findings:
+                for finding in findings:
+                    print(format_watchdog_finding(finding))
+            else:
+                print("watchdog ok")
+            sys.stdout.flush()
+
+            iteration += 1
+            if args.iterations is not None and iteration >= args.iterations:
+                store.stop_watchdog_runner(conn, name=name, actor=name)
+                return 0
+            if not sleep_watchdog_interval(store, conn, name=name, interval_seconds=interval_seconds):
+                print(f"watchdog runner {name} stopped by durable state")
+                return 0
+    except KeyboardInterrupt:
+        stop_watchdog_runner_if_exists(store, conn, name=name, actor=name)
+        print(f"watchdog runner {name} stopped")
+        return 130
+    except Exception as exc:
+        stop_watchdog_runner_if_exists(store, conn, name=name, state="failed", error=str(exc), actor=name)
+        raise
+
+
+def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
+    name = normalize_watchdog_runner_name(args.name)
+    interval_seconds = parse_positive_duration_seconds(args.interval, "--interval")
+    if args.role and store.get_role(conn, args.role) is None:
+        raise KeyError(f"Unknown role: {args.role}")
+    existing = store.list_watchdog_runners(conn, name=name)
+    if existing and watchdog_runner_display_state(existing[0], stale_grace_seconds=60) == "running":
+        raise ValueError(f"watchdog runner {name} is already running; stop it first")
+    session = args.session or detect_current_tmux_session(args.tmux_bin)
+    if not session:
+        raise ValueError("watchdog start requires --session unless run inside tmux")
+    window_name = args.window_name or f"tt-watchdog-{name}"
+    project_root = store.config.project_root or Path.cwd()
+    config_path = store.config.config_path
+    command = ["tmux-team"]
+    if config_path is not None:
+        command.extend(["--config", str(config_path)])
+    command.extend(
+        [
+            "watchdog",
+            "run",
+            "--name",
+            name,
+            "--interval",
+            args.interval,
+            "--delivery",
+            args.delivery,
+            "--unacked-warn-seconds",
+            str(args.unacked_warn_seconds),
+            "--ack-warn-seconds",
+            str(args.ack_warn_seconds),
+            "--watch-grace-seconds",
+            str(args.watch_grace_seconds),
+        ]
+    )
+    if args.role:
+        command.extend(["--role", args.role])
+    tmux_command = [
+        args.tmux_bin,
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        session,
+        "-n",
+        window_name,
+        "-c",
+        str(project_root),
+        shlex.join(command),
+    ]
+    option_commands = [
+        [args.tmux_bin, "set-option", "-p", "-t", "{pane}", WATCHDOG_PANE_OPTION, name],
+        [args.tmux_bin, "select-pane", "-t", "{pane}", "-T", window_name],
+    ]
+    if args.dry_run:
+        print(format_command(tmux_command))
+        for command_template in option_commands:
+            print(format_command([part if part != "{pane}" else "<pane-id>" for part in command_template]))
+        return 0
+
+    result = subprocess.run(tmux_command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or f"{args.tmux_bin} exited {result.returncode}").strip()
+        store.upsert_watchdog_runner(
+            conn,
+            name=name,
+            state="failed",
+            interval_seconds=interval_seconds,
+            scope_role=args.role,
+            delivery_method=args.delivery,
+            window=f"{session}:{window_name}",
+            actor=args.actor or "operator",
+        )
+        store.stop_watchdog_runner(conn, name=name, state="failed", error=details, actor=args.actor or "operator")
+        raise ValueError(f"could not start watchdog runner {name}: {details}")
+    pane = result.stdout.strip()
+    if not pane:
+        raise ValueError(f"could not start watchdog runner {name}: tmux did not return a pane id")
+    for command_template in option_commands:
+        option_command = [part if part != "{pane}" else pane for part in command_template]
+        subprocess.run(option_command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    row = store.upsert_watchdog_runner(
+        conn,
+        name=name,
+        state="running",
+        interval_seconds=interval_seconds,
+        scope_role=args.role,
+        delivery_method=args.delivery,
+        pane=pane,
+        window=f"{session}:{window_name}",
+        next_run_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
+        actor=args.actor or "operator",
+    )
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
+    print(f"tmux: {session}:{window_name} pane={pane}")
+    return 0
+
+
+def cmd_watchdog_stop(args: argparse.Namespace, store: Store, conn) -> int:
+    row = store.get_watchdog_runner(conn, args.name)
+    pane = row["pane"]
+    if pane and not args.no_kill_pane:
+        result = subprocess.run(
+            [args.tmux_bin, "kill-pane", "-t", pane],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout or f"{args.tmux_bin} exited {result.returncode}").strip()
+            raise ValueError(f"could not kill watchdog pane {pane}: {details}")
+    updated = store.stop_watchdog_runner(conn, name=args.name, actor=args.actor or "operator")
+    print(watchdog_runner_one_line(updated, stale_grace_seconds=60))
+    return 0
+
+
+def cmd_watchdog_list(args: argparse.Namespace, store: Store, conn) -> int:
+    name = args.name if args.watchdog_command == "status" else None
+    limit = getattr(args, "limit", 50)
+    rows = store.list_watchdog_runners(conn, name=name, limit=limit)
+    if args.json:
+        print(json_dumps([watchdog_runner_dict(row, args.stale_grace_seconds) for row in rows]))
+        return 0
+    if not rows:
+        target = name or "watchdog runners"
+        print(f"no {target}")
+        return 0
+    for row in rows:
+        print(watchdog_runner_one_line(row, stale_grace_seconds=args.stale_grace_seconds))
+    return 0
+
+
+def stop_watchdog_runner_if_exists(
+    store: Store,
+    conn,
+    *,
+    name: str,
+    state: str = "stopped",
+    error: str | None = None,
+    actor: str = "operator",
+) -> None:
+    try:
+        store.stop_watchdog_runner(conn, name=name, state=state, error=error, actor=actor)
+    except KeyError:
+        return
+
+
+def sleep_watchdog_interval(store: Store, conn, *, name: str, interval_seconds: int) -> bool:
+    deadline = time.monotonic() + interval_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, 1.0))
+        try:
+            row = store.get_watchdog_runner(conn, name)
+        except KeyError:
+            return False
+        if row["state"] != "running":
+            return False
+
+
+def parse_positive_duration_seconds(value: str, flag: str) -> int:
+    raw = value.strip()
+    if not raw:
+        raise ValueError(f"{flag} must be a positive duration such as 15m, 1h, or 2d")
+    if raw[0] not in ("-", "+"):
+        raw = f"+{raw}"
+    duration = parse_duration(raw)
+    if duration is None or duration.total_seconds() <= 0:
+        raise ValueError(f"{flag} must be a positive duration such as 15m, 1h, or 2d")
+    return max(1, int(duration.total_seconds()))
+
+
+def current_tmux_window() -> str | None:
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    try:
+        return resolve_pane_window_target(os.environ.get("TMUX_TEAM_TMUX_BIN", "tmux"), pane)
+    except ValueError:
+        return None
+
+
+def summarize_watchdog_findings(findings: list[dict[str, str]]) -> str:
+    if not findings:
+        return "ok"
+    first = findings[0]
+    suffix = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+    return f"{first['severity']} {first['kind']} role={first['role']} ref={first['ref']}{suffix}"
+
+
+def print_watchdog_runner_header(row, *, stale_grace_seconds: int) -> None:
+    print("tmux-team watchdog runner")
+    print(f"name: {row['name']}")
+    print(f"state: {watchdog_runner_display_state(row, stale_grace_seconds)}")
+    print(f"interval: {format_seconds_duration(int(row['interval_seconds']))}")
+    print(f"scope: {row['scope_role'] or 'team'}")
+    print(f"delivery: {row['delivery_method']}")
+    print(f"last run: {row['last_run_at'] or '-'}")
+    print(f"next run: {row['next_run_at'] or '-'}")
+    print(f"last finding: {row['last_finding_summary'] or '-'}")
+    print(f"backing pane: {row['pane'] or '-'}")
+    print(f"safe to close: {watchdog_runner_safe_to_close(row, stale_grace_seconds)}")
+
+
+def watchdog_runner_one_line(row, *, stale_grace_seconds: int) -> str:
+    state = watchdog_runner_display_state(row, stale_grace_seconds)
+    parts = [
+        f"{row['name']}",
+        f"state={state}",
+        f"interval={format_seconds_duration(int(row['interval_seconds']))}",
+        f"scope={row['scope_role'] or 'team'}",
+        f"delivery={row['delivery_method']}",
+        f"last_run={row['last_run_at'] or '-'}",
+        f"next_run={row['next_run_at'] or '-'}",
+        f"findings={row['last_finding_count']}",
+        f"summary={row['last_finding_summary'] or '-'}",
+        f"pane={row['pane'] or '-'}",
+        f"window={row['window'] or '-'}",
+        f"pid={row['process_id'] or '-'}",
+        f"safe_to_close={watchdog_runner_safe_to_close(row, stale_grace_seconds)}",
+    ]
+    if row["last_error"]:
+        parts.append(f"error={row['last_error']}")
+    return " ".join(parts)
+
+
+def watchdog_runner_dict(row, stale_grace_seconds: int) -> dict[str, object]:
+    return {
+        "name": row["name"],
+        "state": row["state"],
+        "display_state": watchdog_runner_display_state(row, stale_grace_seconds),
+        "interval_seconds": int(row["interval_seconds"]),
+        "scope_role": row["scope_role"],
+        "delivery_method": row["delivery_method"],
+        "pane": row["pane"],
+        "window": row["window"],
+        "process_id": row["process_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_run_at": row["last_run_at"],
+        "next_run_at": row["next_run_at"],
+        "last_finding_count": int(row["last_finding_count"]),
+        "last_finding_summary": row["last_finding_summary"],
+        "last_error": row["last_error"],
+        "safe_to_close": watchdog_runner_safe_to_close(row, stale_grace_seconds),
+    }
+
+
+def watchdog_runner_display_state(row, stale_grace_seconds: int) -> str:
+    if row["state"] != "running":
+        return str(row["state"])
+    next_run_at = row["next_run_at"]
+    if not next_run_at:
+        return "stale"
+    stale_at = parse_utc_datetime(str(next_run_at)) + timedelta(seconds=stale_grace_seconds)
+    if stale_at < datetime.now(UTC):
+        return "stale"
+    return "running"
+
+
+def watchdog_runner_safe_to_close(row, stale_grace_seconds: int) -> str:
+    state = watchdog_runner_display_state(row, stale_grace_seconds)
+    return "yes" if state in ("stopped", "failed") else "no"
+
+
+def format_seconds_duration(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
@@ -1629,16 +2252,44 @@ def codex_session_context(args: argparse.Namespace, store: Store, conn, role_row
         "1. Load the start-tmux-team skill and invariants only if they are not already loaded for this contract version.",
         "2. Read scratchpad memory before claiming work.",
         "3. Claim one durable inbox message, acknowledge it, do the work, then complete it.",
-        "4. Use --summary for the concise completion result and --body or --body-file for detailed evidence.",
-        "5. Use --reply-to-sender for delegated role work so the sender is woken through the normal path.",
-        "6. Update scratchpad memory only for high-value durable changes: active task, blocker, changed boundary, long-running work, final result, or next action.",
-        "7. If no inbox message exists, park and wait for app-server wake. Do not invent work.",
+        "4. Use `tmux-team todo` for active-message substeps; supersede obsolete steps instead of marking them done.",
+        "5. Use --summary for the concise completion result and --body or --body-file for detailed evidence.",
+        "6. Use --reply-to-sender for delegated role work so the sender is woken through the normal path.",
+        "7. Update scratchpad memory only for high-value durable changes: active task, blocker, changed boundary, long-running work, final result, or next action.",
+        "8. If no inbox message exists, park and wait for app-server wake. Do not invent work.",
     ]
+    if role == "orchestrator":
+        lines.extend(
+            [
+                "",
+                "Orchestrator unblock-first rule:",
+                "- When new operator or role information can safely unblock another role's setup work, send a bounded gated handoff promptly before local review or bookkeeping.",
+                "- State hold conditions clearly, continue validation, then send approve/cancel/update follow-up.",
+                "- Do not block downstream prep on redundant verification already supplied by the worker unless forwarding it would create irreversible external effects or violate an explicit safety gate.",
+            ]
+        )
+    active_todos = active_todo_context_lines(store, conn, role)
+    if active_todos:
+        lines.extend(["", "Active todos:", *active_todos])
     if memory_excerpt:
         lines.extend(["", "Scratchpad excerpt:", memory_excerpt])
     else:
         lines.extend(["", "Scratchpad excerpt: (missing or omitted)"])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def active_todo_context_lines(
+    store: Store, conn, role: str, *, message_limit: int = 5, todo_limit: int = 10
+) -> list[str]:
+    lines: list[str] = []
+    for message in store.list_in_progress_messages(conn, role=role, limit=message_limit):
+        todos = store.list_todos(conn, role=role, message_id=message["id"], limit=todo_limit)
+        if not todos:
+            continue
+        lines.append(f"- {message['id']} {message['state']} summary={message['summary']}")
+        for todo in todos:
+            lines.append(f"  {todo_one_line(todo)}")
+    return lines
 
 
 def scratchpad_excerpt(path: Path, max_chars: int) -> str:
@@ -1987,6 +2638,21 @@ def message_metadata_line(row) -> str:
         f"related_to={row_value(row, 'related_to', None) or '-'} "
         f"supersedes={row_value(row, 'supersedes', None) or '-'}"
     )
+
+
+def todo_one_line(row) -> str:
+    marker = {"open": "[ ]", "done": "[x]", "superseded": "[-]"}.get(row["state"], "[?]")
+    parts = [
+        marker,
+        row["id"],
+        f"state={row['state']}",
+        f"role={row['role']}",
+        f"message={row['message_id']}",
+    ]
+    if row["superseded_by"]:
+        parts.append(f"superseded_by={row['superseded_by']}")
+    parts.append(f"text={row['text']}")
+    return " ".join(parts)
 
 
 def print_duplicate_warnings(rows) -> None:

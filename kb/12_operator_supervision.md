@@ -15,6 +15,28 @@ Use durable state before scraping panes.
 
 Verbose status is supervision and triage. It does not imply delivery, acknowledgement, or completion beyond the durable message state it prints.
 
+## Dashboard
+
+`tmux-team dashboard` is the aggregated operator view.
+
+Design choice:
+
+- keep `dashboard --once` in the base install as deterministic text output for tests, scripts, and SSH-safe snapshots;
+- put the live refreshing TUI behind the optional `tmux-team[dashboard]` extra with Textual;
+- keep the dashboard read-only in v1.
+
+The dashboard should combine existing supervision surfaces rather than inventing new state:
+
+- roles and message counts from SQLite;
+- active messages and open todos from SQLite;
+- watches from SQLite;
+- milestones from `milestones.jsonl`;
+- latest scratchpad excerpts from role memory files;
+- bounded pane tails from tmux when preview is enabled;
+- recent notification failures/deferred notices as alerts.
+
+It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete watch, or inspect full message body can be added later behind explicit commands.
+
 ## Watches
 
 Long-running monitoring must not be hidden as an indefinitely acknowledged inbox task.
@@ -28,6 +50,23 @@ Long-running monitoring must not be hidden as an indefinitely acknowledged inbox
 - `status --verbose` shows active watches alongside active inbox messages.
 
 Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+
+## Unblock-First Routing
+
+The orchestrator is allowed to do careful review, but it should not block safe preparatory work behind redundant local validation.
+
+When the operator or another role provides information that lets a worker safely begin setup, the orchestrator should send a bounded prep message first, then continue review. The prep message should include the safety gate:
+
+```bash
+tmux-team send \
+  --to collector \
+  --priority high \
+  --summary "Prepare next run; launch gated on stable approval" \
+  --correlation-key next-run-prep \
+  --body "Start preflight/setup now. Do not launch until stable approval or explicit release arrives."
+```
+
+This is a routing discipline, not a new queue type. Existing message priority, correlation keys, todos, and stable approval are enough for the first version.
 
 ## Pane Hygiene
 
@@ -52,9 +91,9 @@ Do not scrape pane output into scratchpad memory or milestones unless it represe
 
 ## Watchdog
 
-`tmux-team watchdog` is a single-shot durable-state report.
+`tmux-team watchdog` is a durable-state report and native runner surface.
 
-It reports:
+Bare `tmux-team watchdog` remains a single-shot report. It reports:
 
 - urgent pending work;
 - stale claimed messages;
@@ -62,4 +101,20 @@ It reports:
 - old acknowledged tasks;
 - overdue watches.
 
-It must not mutate message or watch state, wake roles, or write milestones by default. Repeated checks belong in cron, tmux, or another explicit scheduler outside tmux-team.
+It must not mutate message or watch state, wake roles, or write milestones by default.
+
+Use native runners for repeated checks:
+
+```bash
+tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog list
+tmux-team watchdog stop default
+```
+
+Runner invariants:
+
+- runners are visible tmux infrastructure, not hidden background processes;
+- runner panes print their purpose, interval, scope, delivery label, last run, next run, last finding, and safe-close guidance;
+- runner state is durable in SQLite and appears in `status --verbose` and `dashboard`;
+- `pane list --all` marks runner panes with `infrastructure=watchdog`;
+- watches are role-owned deadlines, while watchdog runners are periodic checkers.

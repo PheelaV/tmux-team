@@ -4,6 +4,34 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Removed `tmux-team dashboard --split`; open the dashboard manually in a tmux window/pane or through the control pane instead.
+- Simplified dashboard rendering internals while keeping `dashboard --once` and the optional Textual live dashboard behavior.
+- Added native watchdog runner lifecycle commands: `watchdog run`, `watchdog start`, `watchdog stop`, `watchdog list`, and `watchdog status`.
+- Added durable watchdog runner state in SQLite and surfaced it in `status --verbose`, `dashboard`, and `pane list --all`.
+- Hardened watchdog runners so duplicate running names are rejected and stopped runner state is observed by long-running loops.
+- Allowed orchestrator strict-policy supervision to inspect cross-role inbox lists/reclaimable work and approve stable commits without breakglass mode.
+- Added unblock-first orchestrator guidance so safe downstream prep work is routed promptly with explicit gates instead of waiting for local review/bookkeeping to finish.
+
+Migration notes:
+
+- Existing `team.sqlite` stores migrate additively to schema version 6 when opened; the new `watchdog_runners` table is created automatically.
+- Replace ad hoc watchdog shell loops with `tmux-team watchdog start --name <name> --interval <duration>` when you want native visible scheduling.
+
+## 0.3.0 - 2026-07-04
+
+- Added role-owned active-message todos with `tmux-team todo add/list/done/reopen/supersede/clear/recover`.
+- Added `todo supersede` so obsolete checklist steps can be terminalized while creating a replacement step for the same message.
+- Made `tmux-team inbox complete` refuse messages with open todos unless `--allow-open-todos` is passed.
+- Made `inbox next`, `status --verbose`, and `codex session-context` surface active claimed/acknowledged work and open todos for reset recovery.
+- Added `tmux-team dashboard --once` for deterministic read-only operator snapshots and an optional live Textual dashboard via `tmux-team[dashboard]`.
+- Updated role skill guidance so spawned agents treat todos as active execution state, not inbox transport, scratchpad memory, or milestones.
+
+Migration notes:
+
+- Existing `team.sqlite` stores migrate additively to schema version 5 when opened; the new `todos` table is created automatically.
+- Install the optional `tmux-team[dashboard]` extra to use the live dashboard; base installs can still run `tmux-team dashboard --once`.
+- Update the installed plugin/skill after pulling this release so role startup and `SessionStart` recovery prompts mention active-message todos.
+
 ## 0.2.1 - 2026-07-03
 
 - Fixed `pane list --all` for managed roles stored as tmux `%pane_id` targets.

@@ -117,6 +117,9 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
 tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
 tmux-team pane capture collector --lines 120 --offset 40
+tmux-team watchdog
+tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog list
 tmux-team role pause trainer
 tmux-team role resume trainer
 tmux-team sleep
@@ -139,9 +142,21 @@ Role loop on every startup or wake:
 4. If no message exists, park. Do not append routine "still idle" memory.
 5. If a message exists, ack it.
 6. Compare message instructions against scratchpad boundaries. If they conflict, stop and ask the orchestrator.
-7. Do the work.
-8. Before long work or completion, update memory only if durable state changed materially: active task, blocker, changed boundary, running job, stable input, owned artifact, final result, or next action. Use `tmux-team memory append --role <role> --body "<concise durable update>"` when role discovery is not guaranteed.
-9. Complete the message with a concise result. Use `--summary` for the one-line result and `--body` or `--body-file` for detailed evidence when needed.
+7. Use `tmux-team todo` for active-message substeps that should survive context reset while the message is active.
+8. Do the work.
+9. Before long work or completion, update memory only if durable state changed materially: active task, blocker, changed boundary, running job, stable input, owned artifact, final result, or next action. Use `tmux-team memory append --role <role> --body "<concise durable update>"` when role discovery is not guaranteed.
+10. Complete or supersede open todos, then complete the message with a concise result. Use `--summary` for the one-line result and `--body` or `--body-file` for detailed evidence when needed.
+
+Todos are role-owned checklist state for the active inbox message. They are not assignments, scratchpad memory, milestones, or messages to other roles. Use them when a message has several execution steps, when the role is about to do work that could be interrupted, or when a context reset would otherwise lose the active subplan:
+
+```bash
+tmux-team todo add --role <role> --message <message-id> "Run focused regression"
+tmux-team todo done --role <role> <todo-id>
+tmux-team todo supersede --role <role> <todo-id> "Run broader verification instead"
+tmux-team todo recover --role <role>
+```
+
+If a todo is obsolete because the plan changed, supersede it instead of marking it done. `tmux-team inbox complete` refuses to finish a message while open todos remain unless the caller explicitly passes `--allow-open-todos`.
 
 Use this memory score before appending:
 
@@ -168,11 +183,26 @@ Non-orchestrator roles should not call `tmux-team milestone add` by default. The
 
 When completing delegated work, use `tmux-team inbox complete ... --reply-to-sender` so the original sender is woken through the normal message path. Do not use `--reply-to-sender` for pure acknowledgement/bookkeeping messages that would create reply loops. When dispatching fan-out work, still keep the message id printed by `tmux-team send`; it is the durable handle for status and audit.
 
+Orchestrator unblock-first rule: when new operator or role information can unblock another role's safe setup work, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate. Prefer a gated prep message over waiting for local review or bookkeeping to finish:
+
+```bash
+tmux-team send \
+  --to collector \
+  --priority high \
+  --summary "Prepare next run; launch gated on stable approval" \
+  --correlation-key next-run-prep \
+  --body "Start preflight/setup now. Do not launch until stable approval or explicit release arrives."
+```
+
+State the hold condition clearly, continue validation, then send an approve/cancel/update follow-up. Do not block downstream prep on redundant verification already supplied by a worker unless forwarding the handoff would cross a safety boundary.
+
 When dispatching multi-step work, choose one stable `--correlation-key` per logical work thread and reuse it for retries, follow-ups, and verification. Before sending a follow-up, check `tmux-team status --verbose` or `tmux-team inbox list --verbose` for existing active or completed work. Do not invent near-synonym keys for the same task; use `--allow-duplicate` only when redundant independent work is deliberate.
 
 Use `tmux-team broadcast` when the orchestrator needs to send the same checkpoint or instruction to several roles. Broadcast queues one normal message per recipient, so each role still has its own message id, ack, completion, and optional reply. Use either `--only` for a positive role filter or `--exclude` for a negative role filter; those switches are mutually exclusive. Do not treat broadcast as a shared task.
 
 Use `tmux-team pane capture <role> --lines N --offset N` for live supervision when memory and messages are not enough. `--lines` or `--limit` controls how much history to print; `--offset` pages back from the newest output. Pane capture lets the orchestrator or operator inspect recent visible pane output for progress, stuck commands, approval prompts, or intermediate test output. Pane capture is observation only; do not use it as proof of delivery or completion.
+
+Use native watchdog runners for repeated durable-state checks. Bare `tmux-team watchdog` is a single-shot checker. `tmux-team watchdog start --name <name> --interval <duration>` opens visible tmux infrastructure, records runner state in SQLite, and surfaces it through `watchdog list`, `status --verbose`, `dashboard`, and `pane list --all`. Do not treat watchdog runners as role agents or watches.
 
 For freeze, checkpoint, restart, or do-not-continue instructions, send an urgent message. App-server wakes include the highest-priority pending sender, priority, and summary; urgent wakes tell the role to stop at the current safe point and claim the urgent message before continuing other work. Keep the full instruction in the durable message body.
 

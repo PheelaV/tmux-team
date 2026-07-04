@@ -10,6 +10,7 @@ The durable message lives in SQLite. A role receives work by running:
 tmux-team memory show --role implementer
 tmux-team inbox next --role implementer
 tmux-team inbox ack <message-id> --role implementer
+tmux-team todo add --role implementer --message <message-id> "Run focused regression"
 tmux-team inbox complete <message-id> --role implementer --status fixed --summary "..." --body-file result.md --reply-to-sender
 ```
 
@@ -22,10 +23,12 @@ queued/notified/retrying -> claimed
 It claims one message. If a wake says there are multiple pending messages, the role should:
 
 ```text
-memory show -> inbox next -> ack -> do work -> memory update only for high-value durable changes -> complete --reply-to-sender -> inbox next again
+memory show -> inbox next -> ack -> optional active todos -> do work -> memory update only for high-value durable changes -> complete todos -> complete --reply-to-sender -> inbox next again
 ```
 
 and repeat until `inbox next` reports no pending messages. This keeps claim leases and completion evidence attached to one task at a time instead of letting a role hoard the whole backlog.
+
+If `inbox next` reports no new pending messages but the role already has claimed or acknowledged work, it points at that active message and any open todos. Use `tmux-team todo recover --role <role>` after context reset to rebuild the active subplan from durable state.
 
 Ordering is by priority first, then creation time:
 
@@ -119,6 +122,8 @@ The wake does include a compact subject line for the highest-priority pending me
 Role panes spawned by bootstrap are bound to team config and role, but Codex tool shells do not always inherit pane-local env. Bootstrap therefore gives each role startup prompt explicit `--role <role>` commands. Short commands are still supported when discovery works. The fast path is `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE`; fallback discovery uses the role worktree `.tmux-team/team.env` pointer, tmux pane role option, and cwd inference when that is unambiguous. Shared worktrees intentionally do not get a single role value in `.tmux-team/team.env`.
 
 Each spawned role also receives a startup prompt that tells it to load the `start-tmux-team` skill, read scratchpad memory, then claim inbox work or park. Scratchpads are top-loaded operational memory, not transport: use them for long-term goals, role boundaries, current task, blocker, stable inputs, owned artifacts, and next action. Use `tmux-team memory append --body "..."` only for high-value durable updates; it records the newest note near the top of the file. Routine startup, parking, no-pending, and "still waiting" notes should not be appended.
+
+Role todos are the durable active-message checklist. They are useful when work has several execution steps that should survive context compression, pane restart, or sleep/resume, but they are not a second inbox and they do not wake other roles. Mark real finished steps with `todo done`; use `todo supersede` when a step is obsolete and replaced by a new one. Open todos block `inbox complete` unless the caller explicitly passes `--allow-open-todos`.
 
 If the wake says `N pending` with `N > 1`, the role follows its loaded tmux-team role loop and drains one durable inbox message at a time until `inbox next` returns no pending work.
 

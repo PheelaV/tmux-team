@@ -6,7 +6,7 @@
 
 It exists because plain `tmux send-keys` does not scale once several agents are active. Messages can collide with your own prompt, panes can be in copy mode, input can be cleared accidentally, and delivery is hard to verify.
 
-`tmux-team` keeps the good part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: database-backed messages, acknowledgments, app-server wakeups, scratchpad memory files, and sleep/resume snapshots.
+`tmux-team` keeps the good part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: database-backed messages, acknowledgments, role-owned todos, app-server wakeups, scratchpad memory files, and sleep/resume snapshots.
 
 Use it when a handful of Codex agents are working in parallel and plain tmux coordination starts breaking down: prompt collisions, `send-keys` races, copy-mode weirdness, lost messages, and too much manual routing.
 
@@ -20,6 +20,14 @@ Install the CLI from GitHub:
 uv tool install git+https://github.com/PheelaV/tmux-team.git
 # or
 pipx install git+https://github.com/PheelaV/tmux-team.git
+```
+
+Install the optional Textual dashboard extra when you want the live operator dashboard:
+
+```bash
+uv tool install "tmux-team[dashboard] @ git+https://github.com/PheelaV/tmux-team.git"
+# or
+pipx install "tmux-team[dashboard] @ git+https://github.com/PheelaV/tmux-team.git"
 ```
 
 Install the Codex plugin/skill from the public marketplace metadata:
@@ -180,20 +188,33 @@ tmux-team inbox reclaimable --role orchestrator
 tmux-team inbox ack <message-id> --role orchestrator
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --body-file result.md --reply-to-sender
 tmux-team inbox complete-replies --role orchestrator
+tmux-team todo add --role collector --message <message-id> "Run focused test"
+tmux-team todo list --role collector --message <message-id>
+tmux-team todo done --role collector <todo-id>
+tmux-team todo supersede --role collector <todo-id> "Run broader regression"
+tmux-team todo recover --role collector
 tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
 tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
 tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
+tmux-team dashboard --once
+tmux-team dashboard --refresh 2
 tmux-team pane list --all
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team pane capture collector --summary --lines 120 --summary-timeout 60 --summary-max-bytes 20000
 tmux-team watchdog
+tmux-team watchdog --json
+tmux-team watchdog run --name default --interval 15m
+tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog list
+tmux-team watchdog status default
+tmux-team watchdog stop default
 tmux-team ext list
 tmux-team ext doctor
 tmux-team sleep
 tmux-team resume
 ```
 
-`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
+`inbox next` claims one message. If a role is woken with multiple pending messages, it should claim, ack, do, and complete one message, then run `inbox next` again until there is no pending work. If there is no new pending work but the role already has claimed or acknowledged work, `inbox next` points at that active message and any open todos instead of only saying the queue is empty. Expired claims are reclaimable through the same `inbox next` path and appear as `stale_claimed` in `status` and `inbox reclaimable`. Use `--summary` for the one-line result and optional `--body` or `--body-file` for detail. `--reply-to-sender` queues a completion note back to the original sender and wakes it when that sender is a managed role.
 
 Completion replies are stored as `completion_notice` messages. After reading and acknowledging them, use `tmux-team inbox complete-replies --role ROLE` to close notice bookkeeping without writing a bespoke completion for each one.
 
@@ -201,7 +222,21 @@ Use `tmux-team status --verbose` when counts are not enough. It prints bounded a
 
 Use `tmux-team inbox next --auto-ack` when a role wants claim and acknowledgement to be one step before it starts work.
 
+Use `tmux-team todo` for role-owned substeps of the active inbox message. Todos are not assignments and they do not wake other roles; they are durable execution state for the role that owns the message. Open todos block `inbox complete` by default, so a role must complete, reopen, supersede, or clear its checklist before finishing the message. Pass `--allow-open-todos` only for an explicit operator or role override.
+
+Supersede obsolete todos instead of marking them done when the plan changes:
+
+```bash
+tmux-team todo supersede --role collector <todo-id> "Verify the fixed test from the approved commit"
+```
+
+Use `tmux-team todo recover --role ROLE` after a context reset or pane restart to see active claimed/acknowledged messages, their todos, and recent completed or superseded todos. `codex session-context` also includes active-message todos when present.
+
 Use `tmux-team watch` for long-running supervision that should not stay as an acknowledged inbox task for hours. Watches have their own heartbeat/update state and appear in `status --verbose` under the owning role. Use inbox messages for assignment and handoff; use watches for ongoing monitoring until the watch is completed, failed, or cancelled.
+
+Use `tmux-team dashboard` for a read-only operator view of role state, active messages, open todos, watches, milestones, memory excerpts, alerts, and optional pane tails. `tmux-team dashboard --once` prints a deterministic text snapshot and works in the base install. The live refreshing dashboard uses Textual and requires the optional `tmux-team[dashboard]` extra.
+
+Dashboard output is observation only. Use inbox, watches, milestones, and memory commands for state changes; use pane capture only to inspect visible progress.
 
 Use `--correlation-key`, `--related-to`, or `--supersedes` on `send` when work belongs to a known thread. Reuse the same correlation key for retries, follow-ups, and verification of the same logical work. `tmux-team` warns when new active work for the same role matches an existing correlation key or normalized summary. The warning does not block delivery; pass `--allow-duplicate` when duplicate work is intentional. Use `status --verbose` and `inbox list --verbose` to inspect relation metadata before sending follow-up work.
 
@@ -215,7 +250,17 @@ Use `pane capture --summary` to ask `codex exec` for a compact JSON summary of b
 
 `pane list --all` shows managed role panes and unmanaged panes in managed role windows. Use it before sleep/resume or layout repair when helper shells may be visually mixed into the team window.
 
-`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. It reports findings without waking or mutating agents. Run it from cron, tmux, or another scheduler if you want repeated checks.
+`watchdog` runs built-in durable-state checks for urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches. Bare `tmux-team watchdog` remains a single-shot checker and reports findings without waking or mutating agents.
+
+Use native watchdog runners when you want repeated checks without ad hoc shell loops:
+
+```bash
+tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog list
+tmux-team watchdog stop default
+```
+
+`watchdog start` opens a visible tmux window named `tt-watchdog-<name>` that runs `watchdog run`. The runner prints a self-describing header with name, interval, scope, delivery label, last run, next run, findings, pane, and safe-close guidance. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
 
 Role panes spawned by bootstrap are bound to team config and role. The startup prompt includes explicit `--role <role>` commands because Codex tool shells do not always inherit pane-local env, and shared worktrees make cwd inference ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine when role discovery works; otherwise keep the explicit `--role` flag from the startup prompt. Explicit `--config` remains available for operator scripts and ad-hoc control commands.
 
@@ -244,7 +289,7 @@ Do not use milestones for command transcripts or routine chatter. Good milestone
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
 
-- `team.sqlite` for durable state;
+- `team.sqlite` for messages, todos, watches, role state, notifications, events, and stable commits;
 - `events.jsonl` for append-only audit;
 - `milestones.jsonl` for append-only operator milestones;
 - `messages/*.md` for message bodies;

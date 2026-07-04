@@ -99,6 +99,42 @@ Every managed role has a scratchpad memory file declared by config.
 - Do not append routine command transcripts or full replacement sections. Append concise notes likely to matter after context reset, sleep/resume, or operator handoff.
 - If an inbox message conflicts with scratchpad boundaries, stop and ask the orchestrator instead of guessing.
 
+## Role Todos
+
+Todos are role-owned checklist state for active inbox work.
+
+- Scope every todo to one role and one inbox message.
+- Use todos for active execution substeps that should survive context compression, pane restart, or sleep/resume while the message is active.
+- Do not use todos as assignments, message transport, milestones, scratchpad memory, chat, or operator timeline.
+- A role should add todos after claiming or acknowledging the active message when the work has several steps or a reset would lose the subplan.
+- Mark real completed steps with `todo done`.
+- If a todo is obsolete because the plan changed, use `todo supersede` with the replacement step instead of marking obsolete work done.
+- `inbox complete` should fail while open todos remain unless the caller explicitly chooses `--allow-open-todos`.
+- Use `todo recover`, `status --verbose`, and `codex session-context` after reset to recover active todo state.
+- The owning role mutates its todos. The orchestrator and operator may inspect todos for supervision.
+
+## Orchestrator Routing
+
+The orchestrator should avoid becoming a serial bottleneck for safe prep work.
+
+- When new operator or role information can unblock another role's setup, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate.
+- Prefer a gated prep message over waiting to finish local review or bookkeeping.
+- State the hold condition in the message body, such as "prepare now; do not launch until stable approval arrives."
+- Continue local validation after routing the prep message, then send an approve, cancel, or update follow-up.
+- Do not block downstream prep on redundant verification already supplied by a worker unless forwarding the handoff would cross a safety boundary.
+- Use a stable `--correlation-key` so the prep message and later approval/cancellation remain linked.
+
+## Watchdog Runners
+
+Watchdog checks are local supervision, not autonomous orchestration.
+
+- Bare `tmux-team watchdog` is a single-shot durable-state checker.
+- Use `tmux-team watchdog start --name <name> --interval <duration>` for repeated checks.
+- Watchdog runners must stay visible in tmux and self-describing in pane output.
+- Runner state must be inspected through `watchdog list`, `watchdog status`, `status --verbose`, `dashboard`, or `pane list --all`.
+- Do not confuse watches with watchdog runners: watches are role-owned expectations; watchdog runners are periodic checkers.
+- Watchdog checks do not wake roles, mutate inbox/watch state, or write milestones by default.
+
 ## Milestone Log
 
 `milestones.jsonl` is the append-only operator timeline.
