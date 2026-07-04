@@ -2,7 +2,7 @@
 
 This repository includes a repeatable real-Codex demo scenario for validating tmux-team against a public codebase snapshot. It is meant to be a dogfood investigation run, not just a passing-test fixture.
 
-The scenario clones `https://github.com/PheelaV/tmux-team.git` at `v0.1.3` / `78602d1497a81f0e8e5026999585a65c1eea19b1`, seeds a small urgent-priority regression in the cloned target, creates separate orchestrator/implementer/collector worktrees, and writes a goal for the orchestrator. The goal describes the behavior and success criteria, but not the faulty function or patch.
+The scenario intentionally clones `https://github.com/PheelaV/tmux-team.git` at the fixed public snapshot `v0.1.3` / `78602d1497a81f0e8e5026999585a65c1eea19b1`, then seeds a small urgent-priority regression in that cloned target. The old tag is the demo target, not the current tmux-team release. The setup creates separate orchestrator/implementer/collector worktrees and writes a goal for the orchestrator. The goal describes the behavior and success criteria, but not the faulty function or patch.
 
 Set it up:
 

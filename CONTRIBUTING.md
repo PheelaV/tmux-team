@@ -29,24 +29,28 @@ Keep user-visible changes easy to migrate.
 
 For a release:
 
-1. Bump both versions to the same value:
+1. Bump all version fields to the same value:
    - `pyproject.toml` -> `[project].version`
+   - `src/tmux_team/__init__.py` -> `__version__`
    - `.codex-plugin/plugin.json` -> `"version"`
-2. Set `.agents/plugins/marketplace.json` plugin source `ref` to the matching tag, for example `v0.1.1`.
-3. Validate:
+   - `uv.lock` -> editable `tmux-team` package version
+2. Update `CHANGELOG.md` for the same version.
+3. If repo-local marketplace metadata is present, set its plugin source `ref` to the matching tag, for example `vX.Y.Z`.
+4. Validate:
 
 ```bash
 make integration-test
 uv run --with pyyaml python /path/to/validate_plugin.py .
 ```
 
-4. Commit, tag, and push:
+5. Open and merge a release PR. `main` is protected; do not push release commits directly to it.
+6. Tag the merged `main` commit and push the tag:
 
 ```bash
-git commit -am "Release v0.1.1"
-git tag v0.1.1
-git push
-git push origin v0.1.1
+git switch main
+git pull --ff-only
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 Users update with:
