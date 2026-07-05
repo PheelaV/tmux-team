@@ -130,6 +130,7 @@ Watchdog checks are local supervision, not autonomous orchestration.
 
 - Bare `tmux-team watchdog` is a single-shot durable-state checker.
 - Use `tmux-team watchdog start --name <name> --interval <duration>` for repeated checks.
+- Use `tmux-team watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown.
 - Watchdog runners must stay visible in tmux and self-describing in pane output.
 - Runner state must be inspected through `watchdog list`, `watchdog status`, `status --verbose`, `dashboard`, or `pane list --all`.
 - Do not confuse watches with watchdog runners: watches are role-owned expectations; watchdog runners are periodic checkers.

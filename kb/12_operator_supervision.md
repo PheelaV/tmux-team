@@ -45,9 +45,11 @@ Long-running monitoring must not be hidden as an indefinitely acknowledged inbox
 
 - `watch start` creates an active watch with a summary and optional next expected update.
 - `watch update` records heartbeat or blocker state as `active` or `blocked`.
+- `watch pause` records intentional deferral with a reason and optional review time without counting as overdue.
+- `watch resume` restores a paused watch with a fresh summary and next expected update.
 - `watch complete` terminalizes the watch as `done`, `failed`, or `cancelled`.
-- `watch list` defaults to active and blocked watches.
-- `status --verbose` shows active watches alongside active inbox messages.
+- `watch list` defaults to active, blocked, and paused watches.
+- `status --verbose` shows visible watches alongside active inbox messages.
 
 Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 
@@ -99,7 +101,8 @@ Bare `tmux-team watchdog` remains a single-shot report. It reports:
 - stale claimed messages;
 - claimed-but-not-acknowledged messages;
 - old acknowledged tasks;
-- overdue watches.
+- overdue watches;
+- review-due paused watches and watchdog runners.
 
 It must not mutate message or watch state, wake roles, or write milestones by default.
 
@@ -107,6 +110,8 @@ Use native runners for repeated checks:
 
 ```bash
 tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog pause default --reason "operator review" --review-in 30m
+tmux-team watchdog resume default
 tmux-team watchdog list
 tmux-team watchdog stop default
 ```
@@ -115,6 +120,7 @@ Runner invariants:
 
 - runners are visible tmux infrastructure, not hidden background processes;
 - runner panes print their purpose, interval, scope, delivery label, last run, next run, last finding, and safe-close guidance;
+- paused runners do not emit repeated findings and keep the previous finding summary plus pause reason and review time;
 - runner state is durable in SQLite and appears in `status --verbose` and `dashboard`;
 - `pane list --all` marks runner panes with `infrastructure=watchdog`;
 - watches are role-owned deadlines, while watchdog runners are periodic checkers.

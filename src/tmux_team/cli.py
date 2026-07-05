@@ -59,7 +59,9 @@ from .store import (
     STALE_CLAIMED_STATE,
     TODO_STATES,
     WATCH_ACTIVE_STATES,
+    WATCH_PAUSED_STATE,
     WATCH_STATES,
+    WATCH_VISIBLE_STATES,
     Store,
     normalize_priority,
     normalize_watchdog_runner_name,
@@ -540,6 +542,20 @@ def build_parser() -> argparse.ArgumentParser:
     watch_update.add_argument("--state", default="active", choices=WATCH_ACTIVE_STATES)
     watch_update.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
 
+    watch_pause = watch_sub.add_parser("pause", help="Pause a supervision watch until explicit resume or review")
+    watch_pause.add_argument("watch_id")
+    watch_pause.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_pause.add_argument("--reason", required=True, help="Why the watch is intentionally paused")
+    watch_pause_review = watch_pause.add_mutually_exclusive_group()
+    watch_pause_review.add_argument("--review-in", help="When to review the pause, e.g. 30m")
+    watch_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
+
+    watch_resume = watch_sub.add_parser("resume", help="Resume a paused supervision watch")
+    watch_resume.add_argument("watch_id")
+    watch_resume.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    watch_resume.add_argument("--summary", required=True, help="Fresh resumed watch state")
+    watch_resume.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+
     watch_complete = watch_sub.add_parser("complete", help="Complete a supervision watch")
     watch_complete.add_argument("watch_id")
     watch_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
@@ -636,6 +652,14 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog_stop.add_argument("name", nargs="?", default="default")
     watchdog_stop.add_argument("--tmux-bin", default="tmux")
     watchdog_stop.add_argument("--no-kill-pane", action="store_true", help="Only mark the runner stopped in state")
+    watchdog_pause = watchdog_sub.add_parser("pause", help="Pause a watchdog runner without terminalizing it")
+    watchdog_pause.add_argument("name", nargs="?", default="default")
+    watchdog_pause.add_argument("--reason", required=True, help="Why the runner is intentionally paused")
+    watchdog_pause_review = watchdog_pause.add_mutually_exclusive_group()
+    watchdog_pause_review.add_argument("--review-in", help="When to review the pause, e.g. 30m")
+    watchdog_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
+    watchdog_resume = watchdog_sub.add_parser("resume", help="Resume a paused watchdog runner")
+    watchdog_resume.add_argument("name", nargs="?", default="default")
     watchdog_list = watchdog_sub.add_parser("list", help="List watchdog runner lifecycle state")
     watchdog_list.add_argument("--json", action="store_true")
     watchdog_list.add_argument("--limit", type=int, default=50)
@@ -1120,7 +1144,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
                     if open_todos:
                         line = f"{line} todos_open={open_todos}"
                     print(f"      {line}")
-            watches = store.list_watches(conn, role=role["name"], states=WATCH_ACTIVE_STATES, limit=args.active_limit)
+            watches = store.list_watches(conn, role=role["name"], states=WATCH_VISIBLE_STATES, limit=args.active_limit)
             if watches:
                 print("    watches:")
                 for watch in watches:
@@ -1381,6 +1405,30 @@ def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
         print(watch_one_line(row))
         return 0
 
+    if args.watch_command == "pause":
+        row = store.pause_watch(
+            conn,
+            role=args.role,
+            watch_id=args.watch_id,
+            reason=args.reason,
+            review_at=review_at_from_args(args.review_in, args.review_at),
+            actor=args.actor or "operator",
+        )
+        print(watch_one_line(row))
+        return 0
+
+    if args.watch_command == "resume":
+        row = store.resume_watch(
+            conn,
+            role=args.role,
+            watch_id=args.watch_id,
+            summary=args.summary,
+            next_update_at=watch_next_update_at(args.next_update_in),
+            actor=args.actor or "operator",
+        )
+        print(watch_one_line(row))
+        return 0
+
     if args.watch_command == "complete":
         row = store.complete_watch(
             conn,
@@ -1394,7 +1442,7 @@ def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
         return 0
 
     if args.watch_command == "list":
-        states = tuple(args.state) if args.state else WATCH_ACTIVE_STATES
+        states = tuple(args.state) if args.state else WATCH_VISIBLE_STATES
         rows = store.list_watches(conn, role=args.role, states=states, limit=args.limit)
         if not rows:
             role = args.role or "all roles"
@@ -1737,6 +1785,10 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
         return cmd_watchdog_start(args, store, conn)
     if args.watchdog_command == "stop":
         return cmd_watchdog_stop(args, store, conn)
+    if args.watchdog_command == "pause":
+        return cmd_watchdog_pause(args, store, conn)
+    if args.watchdog_command == "resume":
+        return cmd_watchdog_resume(args, store, conn)
     if args.watchdog_command in ("list", "status"):
         return cmd_watchdog_list(args, store, conn)
 
@@ -1770,6 +1822,25 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
     iteration = 0
     try:
         while True:
+            try:
+                existing = store.get_watchdog_runner(conn, name)
+            except KeyError:
+                existing = None
+            if existing is not None and existing["state"] == "paused":
+                print_watchdog_runner_header(existing, stale_grace_seconds=0)
+                print("watchdog paused")
+                sys.stdout.flush()
+                if not sleep_watchdog_interval(
+                    store,
+                    conn,
+                    name=name,
+                    interval_seconds=paused_watchdog_sleep_seconds(existing, interval_seconds),
+                    wake_on_pause=False,
+                ):
+                    print(f"watchdog runner {name} stopped by durable state")
+                    return 0
+                continue
+
             now = datetime.now(UTC).replace(microsecond=0)
             next_run = (now + timedelta(seconds=interval_seconds)).isoformat()
             findings = watchdog_findings(
@@ -1796,6 +1867,11 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
                 finding_summary=summary,
                 actor=name,
             )
+            if row["state"] == "paused":
+                print_watchdog_runner_header(row, stale_grace_seconds=0)
+                print("watchdog paused")
+                sys.stdout.flush()
+                continue
             print_watchdog_runner_header(row, stale_grace_seconds=0)
             if findings:
                 for finding in findings:
@@ -1939,6 +2015,24 @@ def cmd_watchdog_stop(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
+def cmd_watchdog_pause(args: argparse.Namespace, store: Store, conn) -> int:
+    row = store.pause_watchdog_runner(
+        conn,
+        name=args.name,
+        reason=args.reason,
+        review_at=review_at_from_args(args.review_in, args.review_at),
+        actor=args.actor or "operator",
+    )
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
+    return 0
+
+
+def cmd_watchdog_resume(args: argparse.Namespace, store: Store, conn) -> int:
+    row = store.resume_watchdog_runner(conn, name=args.name, actor=args.actor or "operator")
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
+    return 0
+
+
 def cmd_watchdog_list(args: argparse.Namespace, store: Store, conn) -> int:
     name = args.name if args.watchdog_command == "status" else None
     limit = getattr(args, "limit", 50)
@@ -1970,7 +2064,14 @@ def stop_watchdog_runner_if_exists(
         return
 
 
-def sleep_watchdog_interval(store: Store, conn, *, name: str, interval_seconds: int) -> bool:
+def sleep_watchdog_interval(
+    store: Store,
+    conn,
+    *,
+    name: str,
+    interval_seconds: int,
+    wake_on_pause: bool = True,
+) -> bool:
     deadline = time.monotonic() + interval_seconds
     while True:
         remaining = deadline - time.monotonic()
@@ -1981,8 +2082,20 @@ def sleep_watchdog_interval(store: Store, conn, *, name: str, interval_seconds: 
             row = store.get_watchdog_runner(conn, name)
         except KeyError:
             return False
-        if row["state"] != "running":
+        if row["state"] == "paused" and wake_on_pause:
+            return True
+        if row["state"] not in ("running", "paused"):
             return False
+
+
+def paused_watchdog_sleep_seconds(row, default_interval_seconds: int) -> int:
+    review_at = row["review_at"]
+    if review_at:
+        remaining = parse_utc_datetime(str(review_at)) - datetime.now(UTC)
+        seconds = int(remaining.total_seconds())
+        if seconds > 0:
+            return min(default_interval_seconds, seconds)
+    return default_interval_seconds
 
 
 def parse_positive_duration_seconds(value: str, flag: str) -> int:
@@ -2025,6 +2138,11 @@ def print_watchdog_runner_header(row, *, stale_grace_seconds: int) -> None:
     print(f"last run: {row['last_run_at'] or '-'}")
     print(f"next run: {row['next_run_at'] or '-'}")
     print(f"last finding: {row['last_finding_summary'] or '-'}")
+    if row["state"] == "paused":
+        print(f"paused reason: {row['paused_reason'] or '-'}")
+        print(f"paused at: {row['paused_at'] or '-'}")
+        print(f"paused by: {row['paused_by'] or '-'}")
+        print(f"review at: {row['review_at'] or '-'}")
     print(f"backing pane: {row['pane'] or '-'}")
     print(f"safe to close: {watchdog_runner_safe_to_close(row, stale_grace_seconds)}")
 
@@ -2046,6 +2164,13 @@ def watchdog_runner_one_line(row, *, stale_grace_seconds: int) -> str:
         f"pid={row['process_id'] or '-'}",
         f"safe_to_close={watchdog_runner_safe_to_close(row, stale_grace_seconds)}",
     ]
+    if row["state"] == "paused":
+        if row["review_at"]:
+            parts.append(f"review_at={row['review_at']}")
+        if row["paused_by"]:
+            parts.append(f"paused_by={row['paused_by']}")
+        if row["paused_reason"]:
+            parts.append(f"reason={row['paused_reason']}")
     if row["last_error"]:
         parts.append(f"error={row['last_error']}")
     return " ".join(parts)
@@ -2069,6 +2194,10 @@ def watchdog_runner_dict(row, stale_grace_seconds: int) -> dict[str, object]:
         "last_finding_count": int(row["last_finding_count"]),
         "last_finding_summary": row["last_finding_summary"],
         "last_error": row["last_error"],
+        "paused_reason": row["paused_reason"],
+        "paused_at": row["paused_at"],
+        "paused_by": row["paused_by"],
+        "review_at": row["review_at"],
         "safe_to_close": watchdog_runner_safe_to_close(row, stale_grace_seconds),
     }
 
@@ -2590,6 +2719,49 @@ def watchdog_findings(
                     "summary": row["current_summary"],
                 }
             )
+
+        for row in conn.execute(
+            """
+            SELECT * FROM watches
+            WHERE role = ?
+              AND status = 'paused'
+              AND review_at IS NOT NULL
+              AND review_at <= ?
+            ORDER BY review_at
+            """,
+            (role_name, now.isoformat()),
+        ):
+            findings.append(
+                {
+                    "severity": "warning",
+                    "kind": "watch_review_due",
+                    "role": row["role"],
+                    "ref": row["id"],
+                    "summary": row["paused_reason"] or row["current_summary"],
+                }
+            )
+    runner_clauses = ["state = 'paused'", "review_at IS NOT NULL", "review_at <= ?"]
+    runner_params: list[str] = [now.isoformat()]
+    if role:
+        runner_clauses.append("scope_role = ?")
+        runner_params.append(role)
+    for row in conn.execute(
+        f"""
+        SELECT * FROM watchdog_runners
+        WHERE {" AND ".join(runner_clauses)}
+        ORDER BY review_at
+        """,
+        tuple(runner_params),
+    ):
+        findings.append(
+            {
+                "severity": "warning",
+                "kind": "watchdog_runner_review_due",
+                "role": row["scope_role"] or "team",
+                "ref": row["name"],
+                "summary": row["paused_reason"] or row["last_finding_summary"] or "paused watchdog runner review due",
+            }
+        )
     return findings
 
 
@@ -2691,6 +2863,15 @@ def watch_one_line(row) -> str:
     ]
     if row["next_update_at"]:
         parts.append(f"next_update_at={row['next_update_at']}")
+    if row["status"] == WATCH_PAUSED_STATE:
+        if row["review_at"]:
+            parts.append(f"review_at={row['review_at']}")
+        if row["paused_by"]:
+            parts.append(f"paused_by={row['paused_by']}")
+        if row["paused_at"]:
+            parts.append(f"paused_at={row['paused_at']}")
+        if row["paused_reason"]:
+            parts.append(f"reason={row['paused_reason']}")
     parts.append(f"summary={row['current_summary']}")
     return " ".join(parts)
 
@@ -2732,6 +2913,25 @@ def watch_next_update_at(value: str | None) -> str | None:
     if duration is None or duration.total_seconds() <= 0:
         raise ValueError("--next-update-in must be a positive duration such as 15m, 1h, or 2d")
     return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
+
+
+def review_at_from_args(review_in: str | None, review_at: str | None) -> str | None:
+    if review_in:
+        raw = review_in.strip()
+        if not raw:
+            return None
+        if raw[0] not in ("-", "+"):
+            raw = f"+{raw}"
+        duration = parse_duration(raw)
+        if duration is None or duration.total_seconds() <= 0:
+            raise ValueError("--review-in must be a positive duration such as 30m, 1h, or 2d")
+        return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
+    if review_at:
+        parsed = parse_time_arg(review_at)
+        if parsed is None:
+            raise ValueError("--review-at must be an ISO timestamp or relative duration")
+        return parsed.replace(microsecond=0).isoformat()
+    return None
 
 
 def pane_window_target(tmux_bin: str, pane: str) -> str | None:

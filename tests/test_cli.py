@@ -940,6 +940,168 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("summary=run terminalized", out)
 
+    def test_watch_pause_resume_and_review_due(self) -> None:
+        code, out, err = self.run_cli(
+            "watch",
+            "start",
+            "--role",
+            "collector",
+            "--summary",
+            "monitor slow verification",
+            "--next-update-in",
+            "1m",
+        )
+        self.assertEqual(code, 0, err)
+        watch_id = out.split()[0]
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            conn.execute(
+                "UPDATE watches SET next_update_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", watch_id),
+            )
+            conn.commit()
+
+        code, out, err = self.run_cli("watchdog", "--watch-grace-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=watch_overdue role=collector ref={watch_id}", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "pause",
+            watch_id,
+            "--role",
+            "collector",
+            "--reason",
+            "blocked by prerequisite",
+            "--review-at",
+            "2099-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=paused", out)
+        self.assertIn("reason=blocked by prerequisite", out)
+        self.assertIn("review_at=2099-01-01T00:00:00+00:00", out)
+
+        code, out, err = self.run_cli("watchdog", "--watch-grace-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("kind=watch_overdue", out)
+        self.assertNotIn("kind=watch_review_due", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "pause",
+            watch_id,
+            "--role",
+            "collector",
+            "--reason",
+            "review now",
+            "--review-at",
+            "2000-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("watchdog", "--watch-grace-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=watch_review_due role=collector ref={watch_id}", out)
+        self.assertNotIn("kind=watch_overdue", out)
+
+        code, out, err = self.run_cli(
+            "watch",
+            "resume",
+            watch_id,
+            "--role",
+            "collector",
+            "--summary",
+            "prerequisite resolved",
+            "--next-update-in",
+            "5m",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=active", out)
+        self.assertIn("summary=prerequisite resolved", out)
+        self.assertNotIn("reason=", out)
+
+    def test_watchdog_pause_resume_and_dashboard_render_paused_state(self) -> None:
+        fake_dir = self.root / "watchdog-pause-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "default",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=running", out)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "pause",
+            "default",
+            "--reason",
+            "operator review",
+            "--review-at",
+            "2000-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=paused", out)
+        self.assertIn("reason=operator review", out)
+        self.assertIn("safe_to_close=no", out)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            row = store.record_watchdog_runner_run(
+                conn,
+                name="default",
+                interval_seconds=60,
+                scope_role=None,
+                delivery_method="report-only",
+                pane="%9",
+                window="tt-test:tt-watchdog-default",
+                process_id=123,
+                last_run_at="2026-01-01T00:00:00+00:00",
+                next_run_at="2026-01-01T00:01:00+00:00",
+                finding_count=1,
+                finding_summary="should not overwrite pause",
+            )
+        self.assertEqual(row["state"], "paused")
+        self.assertEqual(row["paused_reason"], "operator review")
+
+        code, out, err = self.run_cli("watchdog")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kind=watchdog_runner_review_due role=team ref=default", out)
+
+        code, out, err = self.run_cli("dashboard", "--once", "--no-pane-preview")
+        self.assertEqual(code, 0, err)
+        self.assertIn("default paused interval=1m scope=team", out)
+        self.assertIn("reason=operator review", out)
+
+        code, out, err = self.run_cli("watchdog", "resume", "default")
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=running", out)
+        self.assertNotIn("reason=operator review", out)
+
     def test_send_correlation_warns_about_active_duplicates(self) -> None:
         code, out, err = self.run_cli(
             "send",

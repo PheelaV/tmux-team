@@ -162,7 +162,7 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             return
         raise PolicyError(f"actor {actor!r} is not authorized to list watches for role {role!r}")
 
-    if action in ("watch.start", "watch.update", "watch.complete"):
+    if action in ("watch.start", "watch.update", "watch.pause", "watch.resume", "watch.complete"):
         role = _required_resource(action, resource, "role")
         if actor == "orchestrator" or role == actor:
             return

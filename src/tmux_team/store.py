@@ -20,11 +20,13 @@ STALE_CLAIMED_STATE = "stale_claimed"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 WATCH_ACTIVE_STATES = ("active", "blocked")
-WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
+WATCH_PAUSED_STATE = "paused"
+WATCH_VISIBLE_STATES = WATCH_ACTIVE_STATES + (WATCH_PAUSED_STATE,)
+WATCH_STATES = WATCH_VISIBLE_STATES + ("done", "failed", "cancelled")
 TODO_STATES = ("open", "done", "superseded")
-WATCHDOG_RUNNER_STATES = ("running", "stopped", "failed")
+WATCHDOG_RUNNER_STATES = ("running", "paused", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,11 @@ class Store:
               updated_at TEXT NOT NULL,
               last_update_at TEXT NOT NULL,
               next_update_at TEXT,
-              completed_at TEXT
+              completed_at TEXT,
+              paused_reason TEXT,
+              paused_at TEXT,
+              paused_by TEXT,
+              review_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_watches_role_status_updated
@@ -200,7 +206,11 @@ class Store:
               next_run_at TEXT,
               last_finding_count INTEGER NOT NULL DEFAULT 0,
               last_finding_summary TEXT,
-              last_error TEXT
+              last_error TEXT,
+              paused_reason TEXT,
+              paused_at TEXT,
+              paused_by TEXT,
+              review_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_watchdog_runners_state_updated
@@ -211,6 +221,9 @@ class Store:
         self._ensure_column(conn, "messages", "related_to", "TEXT")
         self._ensure_column(conn, "messages", "supersedes", "TEXT")
         self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
+        for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
+            self._ensure_column(conn, "watches", column, "TEXT")
+            self._ensure_column(conn, "watchdog_runners", column, "TEXT")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
 
@@ -866,6 +879,103 @@ class Store:
         conn.commit()
         return updated
 
+    def pause_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        watch_id: str,
+        reason: str,
+        review_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        row = self._watch_for_role(conn, role, watch_id)
+        if row["status"] not in WATCH_VISIBLE_STATES:
+            raise ValueError(f"Cannot pause watch {watch_id} in state {row['status']}")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watches
+            SET status = 'paused',
+                updated_at = ?,
+                next_update_at = NULL,
+                paused_reason = ?,
+                paused_at = ?,
+                paused_by = ?,
+                review_at = ?
+            WHERE id = ? AND role = ?
+            RETURNING *
+            """,
+            (now, reason, now, actor, review_at, watch_id, role),
+        ).fetchone()
+        if updated is None:
+            raise KeyError(f"Unknown watch: {watch_id}")
+        self.record_event(
+            conn,
+            "watch.paused",
+            actor,
+            watch_id,
+            {
+                "role": role,
+                "reason": reason,
+                "review_at": review_at,
+                "previous_status": row["status"],
+                "previous_summary": row["current_summary"],
+            },
+        )
+        conn.commit()
+        return updated
+
+    def resume_watch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        watch_id: str,
+        summary: str,
+        next_update_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        row = self._watch_for_role(conn, role, watch_id)
+        if row["status"] != WATCH_PAUSED_STATE:
+            raise ValueError(f"Cannot resume watch {watch_id} in state {row['status']}")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watches
+            SET status = 'active',
+                current_summary = ?,
+                updated_at = ?,
+                last_update_at = ?,
+                next_update_at = ?,
+                completed_at = NULL,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL
+            WHERE id = ? AND role = ? AND status = 'paused'
+            RETURNING *
+            """,
+            (summary, now, now, next_update_at, watch_id, role),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot resume watch {watch_id} in state {row['status']}")
+        self.record_event(
+            conn,
+            "watch.resumed",
+            actor,
+            watch_id,
+            {
+                "role": role,
+                "summary": summary,
+                "next_update_at": next_update_at,
+                "paused_reason": row["paused_reason"],
+                "paused_at": row["paused_at"],
+            },
+        )
+        conn.commit()
+        return updated
+
     def complete_watch(
         self,
         conn: sqlite3.Connection,
@@ -888,8 +998,12 @@ class Store:
                 updated_at = ?,
                 last_update_at = ?,
                 completed_at = ?,
-                next_update_at = NULL
-            WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
+                next_update_at = NULL,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL
+            WHERE id = ? AND role = ? AND status IN ('active', 'blocked', 'paused')
             RETURNING *
             """,
             (status, summary, now, now, now, watch_id, role),
@@ -936,10 +1050,11 @@ class Store:
                 ORDER BY
                   CASE status
                     WHEN 'blocked' THEN 0
-                    WHEN 'active' THEN 1
-                    WHEN 'failed' THEN 2
-                    WHEN 'done' THEN 3
-                    ELSE 4
+                    WHEN 'paused' THEN 1
+                    WHEN 'active' THEN 2
+                    WHEN 'failed' THEN 3
+                    WHEN 'done' THEN 4
+                    ELSE 5
                   END,
                   updated_at DESC
                 LIMIT ?
@@ -988,7 +1103,11 @@ class Store:
               process_id = COALESCE(excluded.process_id, watchdog_runners.process_id),
               updated_at = excluded.updated_at,
               next_run_at = excluded.next_run_at,
-              last_error = NULL
+              last_error = NULL,
+              paused_reason = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.paused_reason ELSE NULL END,
+              paused_at = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.paused_at ELSE NULL END,
+              paused_by = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.paused_by ELSE NULL END,
+              review_at = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.review_at ELSE NULL END
             """,
             (
                 normalized_name,
@@ -1043,6 +1162,9 @@ class Store:
         normalized_name = normalize_watchdog_runner_name(name)
         if interval_seconds <= 0:
             raise ValueError("watchdog runner interval_seconds must be positive")
+        existing = conn.execute("SELECT * FROM watchdog_runners WHERE name = ?", (normalized_name,)).fetchone()
+        if existing is not None and existing["state"] == "paused":
+            return existing
         if scope_role and self.get_role(conn, scope_role) is None:
             raise KeyError(f"Unknown role: {scope_role}")
         now = utc_now()
@@ -1067,7 +1189,11 @@ class Store:
               next_run_at = excluded.next_run_at,
               last_finding_count = excluded.last_finding_count,
               last_finding_summary = excluded.last_finding_summary,
-              last_error = NULL
+              last_error = NULL,
+              paused_reason = NULL,
+              paused_at = NULL,
+              paused_by = NULL,
+              review_at = NULL
             """,
             (
                 normalized_name,
@@ -1121,7 +1247,11 @@ class Store:
             SET state = ?,
                 updated_at = ?,
                 next_run_at = NULL,
-                last_error = ?
+                last_error = ?,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL
             WHERE name = ?
             RETURNING *
             """,
@@ -1135,6 +1265,99 @@ class Store:
             actor,
             normalized_name,
             {"previous_state": row["state"], "state": state, "error": empty_to_none(error)},
+        )
+        conn.commit()
+        return updated
+
+    def pause_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        reason: str,
+        review_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = self.get_watchdog_runner(conn, normalized_name)
+        if row["state"] in ("stopped", "failed"):
+            raise ValueError(f"Cannot pause watchdog runner {normalized_name} in state {row['state']}")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET state = 'paused',
+                updated_at = ?,
+                next_run_at = ?,
+                paused_reason = ?,
+                paused_at = ?,
+                paused_by = ?,
+                review_at = ?,
+                last_error = NULL
+            WHERE name = ?
+            RETURNING *
+            """,
+            (now, review_at, reason, now, actor, review_at, normalized_name),
+        ).fetchone()
+        if updated is None:
+            raise KeyError(f"Unknown watchdog runner: {normalized_name}")
+        self.record_event(
+            conn,
+            "watchdog.runner_paused",
+            actor,
+            normalized_name,
+            {
+                "previous_state": row["state"],
+                "reason": reason,
+                "review_at": review_at,
+                "last_finding_summary": row["last_finding_summary"],
+            },
+        )
+        conn.commit()
+        return updated
+
+    def resume_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = self.get_watchdog_runner(conn, normalized_name)
+        if row["state"] != "paused":
+            raise ValueError(f"Cannot resume watchdog runner {normalized_name} in state {row['state']}")
+        now_dt = datetime.now(UTC).replace(microsecond=0)
+        next_run_at = (now_dt + timedelta(seconds=int(row["interval_seconds"]))).isoformat()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET state = 'running',
+                updated_at = ?,
+                next_run_at = ?,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL,
+                last_error = NULL
+            WHERE name = ? AND state = 'paused'
+            RETURNING *
+            """,
+            (now_dt.isoformat(), next_run_at, normalized_name),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot resume watchdog runner {normalized_name} in state {row['state']}")
+        self.record_event(
+            conn,
+            "watchdog.runner_resumed",
+            actor,
+            normalized_name,
+            {
+                "previous_state": row["state"],
+                "paused_reason": row["paused_reason"],
+                "paused_at": row["paused_at"],
+                "next_run_at": next_run_at,
+            },
         )
         conn.commit()
         return updated
@@ -1165,8 +1388,9 @@ class Store:
                 ORDER BY
                   CASE state
                     WHEN 'running' THEN 0
-                    WHEN 'failed' THEN 1
-                    ELSE 2
+                    WHEN 'paused' THEN 1
+                    WHEN 'failed' THEN 2
+                    ELSE 3
                   END,
                   updated_at DESC
                 LIMIT ?

@@ -170,8 +170,12 @@ Use `watch` for long-running supervision that should not stay as an acknowledged
 ```bash
 tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
 tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
+tmux-team watch pause <watch-id> --role collector --reason "Blocked by prerequisite" --review-in 30m
+tmux-team watch resume <watch-id> --role collector --summary "Prerequisite resolved" --next-update-in 15m
 tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
 ```
+
+Paused watches keep their previous summary, store a pause reason and optional review time, and do not count as overdue. When the review time passes, `watchdog` reports `watch_review_due`. Use `watch complete --status cancelled` when the watch is truly terminal.
 
 Use `watchdog` for built-in durable-state checks.
 
@@ -179,12 +183,16 @@ Use `watchdog` for built-in durable-state checks.
 tmux-team watchdog
 tmux-team watchdog --json
 tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog pause default --reason "Operator review" --review-in 30m
+tmux-team watchdog resume default
 tmux-team watchdog list
 tmux-team watchdog status default
 tmux-team watchdog stop default
 ```
 
 `watchdog start` opens a visible tmux window named `tt-watchdog-<name>` that runs `watchdog run`. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
+
+Paused watchdog runners remain non-terminal, preserve the last finding summary, suppress repeated findings from that runner, and surface review-due reminders through single-shot `tmux-team watchdog`. Use `watchdog stop` when the runner should end.
 
 ## Pane Supervision
 

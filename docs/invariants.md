@@ -203,6 +203,8 @@ Long-running monitoring work must not be hidden as an indefinitely acknowledged 
 
 - Use `tmux-team watch start/update/complete` for ongoing supervision with heartbeat-style updates.
 - Watches are durable role-owned state with a current summary, last update, optional next expected update, and terminal status.
+- Use `tmux-team watch pause/resume` for non-terminal deferral. A paused watch preserves its previous summary, stores a pause reason, optional review time, paused timestamp, and actor, and must not count as overdue while paused.
+- When a paused watch review time passes, `tmux-team watchdog` reports `watch_review_due`. Use `watch complete --status cancelled` for terminal cancellation.
 - Watches appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
 - Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 - A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
@@ -211,11 +213,12 @@ Long-running monitoring work must not be hidden as an indefinitely acknowledged 
 
 Watchdog checks are local supervision, not autonomous orchestration.
 
-- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches.
+- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, overdue watches, and review-due paused watches/runners.
 - Watchdog checks must not mutate message/watch state, wake roles, or write milestones by default.
 - Bare `tmux-team watchdog` remains a single-shot report command for debugging and scripts.
-- Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog stop`, `watchdog list`, and `watchdog status`.
+- Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog pause`, `watchdog resume`, `watchdog stop`, `watchdog list`, and `watchdog status`.
 - `watchdog start` must create visible tmux infrastructure, not a hidden background process.
+- Paused watchdog runners must not emit repeated findings or wake roles while paused. They preserve the last finding summary plus pause reason, review time, paused timestamp, and actor. Use `watchdog stop` for terminal shutdown.
 - Watchdog runner panes must be self-describing: name, interval, scope, delivery label, last run, next run, last finding, backing pane, and safe-close guidance are visible in pane output.
 - Watchdog runner state is durable SQLite state and must appear in `status --verbose` and `dashboard`.
 - `tmux-team pane list --all` must mark watchdog panes as watchdog infrastructure, not as ordinary unmanaged shells.

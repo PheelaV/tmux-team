@@ -225,6 +225,8 @@ tmux-team todo recover --role collector
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team watchdog
 tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog pause default --reason "blocked by prerequisite" --review-in 30m
+tmux-team watchdog resume default
 tmux-team milestone list --today
 tmux-team sleep
 tmux-team resume

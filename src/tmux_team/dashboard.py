@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from .config import TeamConfig, role_scratchpad_path
-from .store import CLAIMABLE_STATES, STALE_CLAIMED_STATE, Store, parse_utc_datetime
+from .store import CLAIMABLE_STATES, STALE_CLAIMED_STATE, WATCH_VISIBLE_STATES, Store, parse_utc_datetime
 
 
 class DashboardDependencyError(RuntimeError):
@@ -107,10 +107,16 @@ def collect_dashboard_snapshot(
                 }
             )
 
-        for watch in store.list_watches(conn, role=role_name, states=("active", "blocked"), limit=active_limit):
-            overdue = is_overdue(watch["next_update_at"])
+        for watch in store.list_watches(conn, role=role_name, states=WATCH_VISIBLE_STATES, limit=active_limit):
+            paused = watch["status"] == "paused"
+            overdue = not paused and is_overdue(watch["next_update_at"])
+            review_due = paused and is_overdue(watch["review_at"])
             if overdue:
                 alerts.append(f"{role_name}: watch overdue {watch['id']} {watch['current_summary']}")
+            if review_due:
+                alerts.append(
+                    f"{role_name}: watch review due {watch['id']} {watch['paused_reason'] or watch['current_summary']}"
+                )
             watch_rows.append(
                 {
                     "role": role_name,
@@ -119,7 +125,10 @@ def collect_dashboard_snapshot(
                     "summary": str(watch["current_summary"]),
                     "updated": format_age(str(watch["updated_at"])),
                     "next_update": str(watch["next_update_at"] or "-"),
+                    "paused_reason": str(watch["paused_reason"] or "-"),
+                    "review_at": str(watch["review_at"] or "-"),
                     "overdue": overdue,
+                    "review_due": review_due,
                 }
             )
 
@@ -142,8 +151,11 @@ def collect_dashboard_snapshot(
 
     for runner in store.list_watchdog_runners(conn, limit=active_limit):
         display_state = watchdog_runner_display_state(runner, stale_grace_seconds=60)
+        review_due = runner["state"] == "paused" and is_overdue(runner["review_at"])
         if display_state in ("stale", "failed"):
             alerts.append(f"watchdog {runner['name']}: {display_state} {runner['last_finding_summary'] or ''}".rstrip())
+        if review_due:
+            alerts.append(f"watchdog {runner['name']}: review due {runner['paused_reason'] or ''}".rstrip())
         watchdog_rows.append(
             {
                 "name": str(runner["name"]),
@@ -155,6 +167,8 @@ def collect_dashboard_snapshot(
                 "next_run": str(runner["next_run_at"] or "-"),
                 "findings": int(runner["last_finding_count"]),
                 "summary": str(runner["last_finding_summary"] or "-"),
+                "paused_reason": str(runner["paused_reason"] or "-"),
+                "review_at": str(runner["review_at"] or "-"),
                 "pane": str(runner["pane"] or "-"),
                 "safe_to_close": "yes" if display_state in ("stopped", "failed") else "no",
             }
@@ -388,11 +402,21 @@ def watch_lines(rows: Iterable[dict[str, object]], *, rich: bool = False) -> lis
     seen = False
     for row in rows:
         seen = True
-        marker = "[red]OVERDUE[/red]" if rich and bool(row.get("overdue")) else "OVERDUE"
-        marker = marker if bool(row.get("overdue")) else row_text(row, "state")
+        if bool(row.get("overdue")):
+            marker = "[red]OVERDUE[/red]" if rich else "OVERDUE"
+        elif bool(row.get("review_due")):
+            marker = "[yellow]REVIEW[/yellow]" if rich else "REVIEW"
+        elif row_text(row, "state") == "paused":
+            marker = "[yellow]PAUSED[/yellow]" if rich else "paused"
+        else:
+            marker = row_text(row, "state")
+        pause = ""
+        if row_text(row, "state") == "paused":
+            pause = f" review={row_text(row, 'review_at')} reason={row_text(row, 'paused_reason')}"
         lines.append(
             f"{row_text(row, 'role')} {row_text(row, 'watch_id')} {marker} "
-            f"updated={row_text(row, 'updated')} next={row_text(row, 'next_update')} {row_text(row, 'summary')}"
+            f"updated={row_text(row, 'updated')} next={row_text(row, 'next_update')}{pause} "
+            f"{row_text(row, 'summary')}"
         )
     if not seen:
         lines.append("none")
@@ -407,12 +431,17 @@ def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False) -> 
         state = row_text(row, "state")
         if rich and state in ("stale", "failed"):
             state = f"[red]{state}[/red]"
+        elif rich and state == "paused":
+            state = f"[yellow]{state}[/yellow]"
+        pause = ""
+        if row_text(row, "state") == "paused":
+            pause = f" review={row_text(row, 'review_at')} reason={row_text(row, 'paused_reason')}"
         lines.append(
             f"{row_text(row, 'name')} {state} interval={row_text(row, 'interval')} "
             f"scope={row_text(row, 'scope')} delivery={row_text(row, 'delivery')} "
             f"last={row_text(row, 'last_run')} next={row_text(row, 'next_run')} "
             f"findings={row_text(row, 'findings')} safe_to_close={row_text(row, 'safe_to_close')} "
-            f"pane={row_text(row, 'pane')} {row_text(row, 'summary')}"
+            f"pane={row_text(row, 'pane')}{pause} {row_text(row, 'summary')}"
         )
     if not seen:
         lines.append("none")

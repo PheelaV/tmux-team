@@ -5,7 +5,13 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 ## Unreleased
 
 - Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
-- Updated repo-local marketplace metadata to install the current `v0.3.1` plugin tag.
+- Updated repo-local marketplace metadata to install the upcoming `v0.4.0` plugin tag.
+- Added non-terminal pause/resume lifecycle commands for watches and watchdog runners, with review-due findings in `tmux-team watchdog`.
+- Surfaced paused watches/runners in `status --verbose`, `watch list`, `watchdog list/status`, and `dashboard`.
+
+Migration notes:
+
+- Existing `team.sqlite` stores migrate additively to schema version 7 when opened; pause reason, paused timestamp, paused actor, and review timestamp columns are added to watches and watchdog runners.
 
 ## 0.3.1 - 2026-07-04
 
