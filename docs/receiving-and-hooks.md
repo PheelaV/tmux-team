@@ -178,12 +178,12 @@ Do not rely on `PostCompact` for role-contract injection. Current Codex hook beh
 Milestones are the broad operator timeline, separate from the inbox and scratchpads. Record only durable achievements or state changes:
 
 ```bash
-tmux-team milestone add --kind result --summary "Targeted tests passed" --tag test
+tmux-team milestone add --kind result --summary "Targeted tests passed" --subject-role implementer --tag test
 tmux-team milestone list --today
 tmux-team milestone list --since -4h
 ```
 
-By default, non-orchestrator roles do not write milestones. They complete their inbox message with evidence; the orchestrator records a milestone only if the result is important enough for the operator timeline.
+By default, non-orchestrator roles do not write milestones. They complete their inbox message with evidence; the orchestrator records a milestone only if the result is important enough for the operator timeline. Use `--subject-role` for role-scoped events and `--team` for team-wide events so dashboard filtering can distinguish writer from subject.
 
 The task body is not pasted into the pane or into tmux history. It remains in the durable message body file until the agent claims it.
 

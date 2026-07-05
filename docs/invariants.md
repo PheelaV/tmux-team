@@ -100,6 +100,8 @@ The milestone log is the operator-facing timeline.
 - Use milestones to answer questions like "what happened today?", "what changed in the last 4h?", and "what did this team accomplish while I was away?"
 - Record team start, task routing, evidence accepted, blockers found/resolved, tests passing, stable commit approval, sleep/resume, and team resize.
 - Keep milestones concise. They are not command transcripts, chat logs, scratchpad replacements, or message transport.
+- New milestones should separate writer from subject: `recorded_by` is who wrote the entry, while `--subject-role` or `--team` describes what the milestone is about. Legacy `--role` remains a single-subject compatibility alias.
+- Role-filtered milestone views must filter by subject role, not only by writer.
 - Only the operator/control plane and orchestrator record milestones by default. Other roles report evidence or blockers through inbox completion; the orchestrator decides whether the result is milestone-worthy.
 - Query from the control plane with `tmux-team milestone list --today` or `tmux-team milestone list --since -4h`.
 
@@ -136,6 +138,9 @@ The operator and orchestrator may inspect managed role panes.
 - Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
 - Use `tmux-team dashboard --once` for a deterministic read-only snapshot of roles, active messages, todos, watches, milestones, memory excerpts, alerts, and optional pane tails.
 - Use `tmux-team dashboard` for the live Textual operator dashboard only when the optional `tmux-team[dashboard]` extra is installed.
+- Dashboard sections must label provenance. Runtime database rows are authoritative, memory excerpts are prose, and pane previews are best-effort tmux captures with screen-text heuristic status only.
+- Textual dashboard rendering must escape arbitrary memory and pane text as plain text. Captured terminal output must not be treated as trusted Rich markup.
+- The live dashboard should remain keyboard-first: refresh/help, role filter shortcuts, team overview, and direct section jumps must work without mouse input.
 - Dashboard views are observation surfaces. They must not mutate inbox, todo, watch, milestone, memory, or role state.
 - Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.

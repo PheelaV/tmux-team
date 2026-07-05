@@ -2012,15 +2012,24 @@ class Store:
         summary: str,
         body: str = "",
         role: str | None = None,
+        subject_roles: tuple[str, ...] = (),
+        scope: str | None = None,
         kind: str = "milestone",
         ref_id: str | None = None,
         tags: tuple[str, ...] = (),
         metadata: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        normalized_subjects = tuple(dict.fromkeys(role.strip() for role in subject_roles if role.strip()))
+        if role and not normalized_subjects:
+            normalized_subjects = (role,)
+        normalized_scope = scope or ("team" if not normalized_subjects else "role")
         milestone = {
             "created_at": utc_now(),
             "actor": actor,
+            "recorded_by": actor,
             "role": role,
+            "scope": normalized_scope,
+            "subject_roles": list(normalized_subjects),
             "kind": kind,
             "summary": summary,
             "body": body,
@@ -2036,7 +2045,15 @@ class Store:
             "milestone.recorded",
             actor,
             ref_id,
-            {"summary": summary, "role": role, "kind": kind, "tags": list(tags)},
+            {
+                "summary": summary,
+                "role": role,
+                "recorded_by": actor,
+                "scope": normalized_scope,
+                "subject_roles": list(normalized_subjects),
+                "kind": kind,
+                "tags": list(tags),
+            },
         )
         conn.commit()
         return milestone
@@ -2047,6 +2064,8 @@ class Store:
         since: datetime | None = None,
         until: datetime | None = None,
         role: str | None = None,
+        subject_role: str | None = None,
+        scope: str | None = None,
         kind: str | None = None,
         tags: tuple[str, ...] = (),
         limit: int = 50,
@@ -2064,7 +2083,12 @@ class Store:
                 continue
             if until is not None and created_at > until:
                 continue
-            if role is not None and row.get("role") != role:
+            subject_roles = tuple(str(item) for item in row.get("subject_roles") or ())
+            if role is not None and row.get("role") != role and role not in subject_roles:
+                continue
+            if subject_role is not None and subject_role not in subject_roles and row.get("role") != subject_role:
+                continue
+            if scope is not None and row.get("scope") != scope:
                 continue
             if kind is not None and row.get("kind") != kind:
                 continue

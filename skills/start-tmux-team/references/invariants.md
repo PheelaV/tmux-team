@@ -143,6 +143,7 @@ Watchdog checks are local supervision, not autonomous orchestration.
 - Record broad achievements and state changes with `tmux-team milestone add`.
 - Only the operator/control plane and orchestrator record milestones by default. Other roles report evidence or blockers through inbox completion; the orchestrator decides whether the result is milestone-worthy.
 - Good milestones: team start, task routed, evidence accepted, blocker found/resolved, tests passing, stable commit approved, sleep/resume, and team resize.
+- Use `--subject-role ROLE` for role-scoped milestones and `--team` for team-wide milestones. `recorded_by` is the writer; subject roles are what the milestone is about.
 - Do not store chat logs, command transcripts, reasoning dumps, or task bodies in milestones.
 - Query from the control plane with `tmux-team milestone list --today` or `tmux-team milestone list --since -4h`.
 

@@ -8,10 +8,13 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Updated repo-local marketplace metadata to install the upcoming `v0.4.0` plugin tag.
 - Added non-terminal pause/resume lifecycle commands for watches and watchdog runners, with review-due findings in `tmux-team watchdog`.
 - Surfaced paused watches/runners in `status --verbose`, `watch list`, `watchdog list/status`, and `dashboard`.
+- Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, section jump keys, and a help overlay.
+- Added milestone subject classification with `recorded_by`, `scope`, `subject_roles`, `milestone add --subject-role/--team`, and matching list filters.
 
 Migration notes:
 
 - Existing `team.sqlite` stores migrate additively to schema version 7 when opened; pause reason, paused timestamp, paused actor, and review timestamp columns are added to watches and watchdog runners.
+- Existing `milestones.jsonl` entries remain readable. New entries include `recorded_by`, `scope`, and `subject_roles`; legacy `role` remains as a single-subject compatibility field.
 
 ## 0.3.1 - 2026-07-04
 

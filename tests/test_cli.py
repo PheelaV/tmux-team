@@ -174,20 +174,50 @@ runtime_dir = "{other_runtime}"
                 "romanize_syllable returned broken-a",
             )
             self.assertEqual(code, 0, err)
-            self.assertIn("evidence role=collector targeted test failed", out)
+            self.assertIn("evidence recorded_by=orchestrator subject=collector targeted test failed", out)
 
             code, out, err = self.run_main("milestone", "list", "--since", "-4h")
 
         self.assertEqual(code, 0, err)
         self.assertIn("targeted test failed", out)
+        self.assertIn("recorded_by=orchestrator subject=collector", out)
         self.assertIn("romanize_syllable returned broken-a", out)
         milestone_path = self.root / "runtime" / "milestones.jsonl"
         rows = [json.loads(line) for line in milestone_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(rows[0]["actor"], "orchestrator")
+        self.assertEqual(rows[0]["recorded_by"], "orchestrator")
         self.assertEqual(rows[0]["role"], "collector")
+        self.assertEqual(rows[0]["subject_roles"], ["collector"])
+        self.assertEqual(rows[0]["scope"], "role")
         self.assertEqual(rows[0]["kind"], "evidence")
         self.assertEqual(rows[0]["ref_id"], "msg_123")
         self.assertEqual(rows[0]["tags"], ["test"])
+
+    def test_milestone_subject_roles_and_team_scope(self) -> None:
+        code, out, err = self.run_cli(
+            "milestone",
+            "add",
+            "--summary",
+            "collector and trainer checkpointed",
+            "--subject-role",
+            "collector,trainer",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("recorded_by=operator subject=collector,trainer", out)
+
+        code, out, err = self.run_cli("milestone", "add", "--summary", "team checkpoint", "--team")
+        self.assertEqual(code, 0, err)
+        self.assertIn("recorded_by=operator subject=team", out)
+
+        code, out, err = self.run_cli("milestone", "list", "--subject-role", "trainer")
+        self.assertEqual(code, 0, err)
+        self.assertIn("collector and trainer checkpointed", out)
+        self.assertNotIn("team checkpoint", out)
+
+        code, out, err = self.run_cli("milestone", "list", "--team")
+        self.assertEqual(code, 0, err)
+        self.assertIn("team checkpoint", out)
+        self.assertNotIn("collector and trainer checkpointed", out)
 
     def test_milestone_list_today_can_print_json(self) -> None:
         code, out, err = self.run_cli("milestone", "add", "--summary", "goal completed", "--role", "orchestrator")
@@ -204,12 +234,14 @@ runtime_dir = "{other_runtime}"
             code, out, err = self.run_main("milestone", "add", "--summary", "orchestrator checkpoint")
 
         self.assertEqual(code, 0, err)
-        self.assertIn("role=orchestrator", out)
+        self.assertIn("subject=orchestrator", out)
 
         milestone_path = self.root / "runtime" / "milestones.jsonl"
         rows = [json.loads(line) for line in milestone_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(rows[0]["actor"], "orchestrator")
+        self.assertEqual(rows[0]["recorded_by"], "orchestrator")
         self.assertEqual(rows[0]["role"], "orchestrator")
+        self.assertEqual(rows[0]["subject_roles"], ["orchestrator"])
 
     def test_non_orchestrator_actor_cannot_record_milestone(self) -> None:
         with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
@@ -527,7 +559,9 @@ runtime_dir = "{other_runtime}"
 
         self.assertEqual(code, 0, err)
         self.assertIn("tmux-team dashboard", out)
-        self.assertIn("Roles", out)
+        self.assertIn("Roles [source=runtime-db]", out)
+        self.assertIn("Active Work [source=runtime-db todo]", out)
+        self.assertIn("Memory Excerpts [source=memory-excerpt prose]", out)
         self.assertIn("collector", out)
         self.assertIn("todos", out)
         self.assertIn("collect dashboard evidence", out)
@@ -535,6 +569,10 @@ runtime_dir = "{other_runtime}"
         self.assertIn("monitor fixture", out)
         self.assertIn("Active task: dashboard", out)
         self.assertNotIn("Pane Preview", out)
+
+        code, out, err = self.run_cli("dashboard", "--once", "--role", "collector", "--no-pane-preview", "--provenance")
+        self.assertEqual(code, 0, err)
+        self.assertIn("source=runtime-db confidence=authoritative", out)
 
     def test_textual_pane_preview_body_handles_enabled_previews(self) -> None:
         snapshot = DashboardSnapshot(
@@ -552,7 +590,13 @@ runtime_dir = "{other_runtime}"
                 {
                     "role": "collector",
                     "pane": "%7",
-                    "text": "first\nsecond\nthird",
+                    "source": "pane-capture",
+                    "screen_source": "screen-text-heuristic",
+                    "confidence": "best-effort",
+                    "dead": False,
+                    "in_mode": True,
+                    "current_command": "codex",
+                    "text": "first\n[red]second[/red]\nthird",
                 },
             ),
             alerts=(),
@@ -560,7 +604,16 @@ runtime_dir = "{other_runtime}"
 
         lines = textual_pane_preview_body(snapshot, include_pane_preview=True)
 
-        self.assertEqual(lines, ["collector %7:", "  first", "  second", "  third"])
+        self.assertEqual(
+            lines,
+            [
+                "collector %7 [best-effort] command=codex dead=False copy_mode=True "
+                "screen_source=screen-text-heuristic source=pane-capture confidence=best-effort:",
+                "  first",
+                r"  \[red\]second\[/red\]",
+                "  third",
+            ],
+        )
         self.assertEqual(textual_pane_preview_body(snapshot, include_pane_preview=False), ["disabled"])
 
     def test_expired_claim_is_visible_and_reclaimable(self) -> None:

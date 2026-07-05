@@ -58,11 +58,12 @@ Use `dashboard` for an operator snapshot. `dashboard --once` works in the base i
 
 ```bash
 tmux-team dashboard --once
+tmux-team dashboard --once --provenance
 tmux-team dashboard --refresh 2
 tmux-team dashboard --no-pane-preview
 ```
 
-Dashboard output is read-only. Use inbox, watches, milestones, and memory commands to mutate durable state.
+Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. The live dashboard supports `r` refresh, `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, and direct jumps such as `a` alerts, `t` roles, `w` watches, `d` watchdogs, `m` milestones, and `p` panes. Use inbox, watches, milestones, and memory commands to mutate durable state.
 
 ## Messages And Routing
 
@@ -156,12 +157,15 @@ Append only high-value durable updates near the top. Avoid routine startup, park
 Use milestones for the operator timeline.
 
 ```bash
-tmux-team milestone add --kind result --summary "Targeted test fixed and passed" --tag test
+tmux-team milestone add --kind result --summary "Targeted test fixed and passed" --subject-role implementer --tag test
+tmux-team milestone add --kind routing --summary "Team started" --team
 tmux-team milestone list --today
+tmux-team milestone list --subject-role implementer
+tmux-team milestone list --team
 tmux-team milestone list --since -4h
 ```
 
-By default, the operator/control plane and orchestrator record milestones. Other roles report evidence through inbox completion and let the orchestrator decide what deserves a milestone.
+By default, the operator/control plane and orchestrator record milestones. Other roles report evidence through inbox completion and let the orchestrator decide what deserves a milestone. New milestones separate the writer (`recorded_by`) from the subject (`--subject-role`, repeated or comma-separated, or `--team`). The older `--role` flag remains as a legacy single-subject alias.
 
 ## Watches And Watchdogs
 

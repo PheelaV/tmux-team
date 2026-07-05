@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import ClassVar
 
 from .config import TeamConfig, role_scratchpad_path
-from .store import CLAIMABLE_STATES, STALE_CLAIMED_STATE, WATCH_VISIBLE_STATES, Store, parse_utc_datetime
+from .store import (
+    CLAIMABLE_STATES,
+    STALE_CLAIMED_STATE,
+    WATCH_VISIBLE_STATES,
+    Store,
+    inspect_tmux_pane,
+    parse_utc_datetime,
+)
 
 
 class DashboardDependencyError(RuntimeError):
@@ -25,7 +32,7 @@ class DashboardSnapshot:
     active_messages: tuple[dict[str, object], ...]
     watches: tuple[dict[str, object], ...]
     watchdog_runners: tuple[dict[str, object], ...]
-    milestones: tuple[str, ...]
+    milestones: tuple[dict[str, object], ...]
     memories: tuple[dict[str, object], ...]
     pane_previews: tuple[dict[str, object], ...]
     alerts: tuple[str, ...]
@@ -70,6 +77,8 @@ def collect_dashboard_snapshot(
         role_rows.append(
             {
                 "name": role_name,
+                "source": "runtime-db",
+                "confidence": "authoritative",
                 "state": str(role["state"]),
                 "mode": str(role["mode"]),
                 "pane": str(role["pane"] or "-"),
@@ -97,6 +106,9 @@ def collect_dashboard_snapshot(
             active_rows.append(
                 {
                     "role": role_name,
+                    "source": "runtime-db",
+                    "todo_source": "todo",
+                    "confidence": "authoritative",
                     "message_id": str(row["id"]),
                     "state": str(row_value(row, "display_state", row["state"])),
                     "priority": str(row["priority"]),
@@ -120,6 +132,8 @@ def collect_dashboard_snapshot(
             watch_rows.append(
                 {
                     "role": role_name,
+                    "source": "runtime-db",
+                    "confidence": "authoritative",
                     "watch_id": str(watch["id"]),
                     "state": str(watch["status"]),
                     "summary": str(watch["current_summary"]),
@@ -136,16 +150,22 @@ def collect_dashboard_snapshot(
         memory_rows.append(
             {
                 "role": role_name,
+                "source": "memory-excerpt",
+                "confidence": "operator-authored-prose",
                 "excerpt": read_excerpt(memory_path, memory_chars) or "(missing or empty)",
             }
         )
 
         if include_pane_preview and role["pane"]:
+            pane_preview = capture_pane_preview(tmux_bin, str(role["pane"]), pane_lines)
             pane_rows.append(
                 {
                     "role": role_name,
                     "pane": str(role["pane"]),
-                    "text": capture_pane_tail(tmux_bin, str(role["pane"]), pane_lines),
+                    "source": "pane-capture",
+                    "screen_source": "screen-text-heuristic",
+                    "confidence": "best-effort",
+                    **pane_preview,
                 }
             )
 
@@ -159,6 +179,8 @@ def collect_dashboard_snapshot(
         watchdog_rows.append(
             {
                 "name": str(runner["name"]),
+                "source": "watchdog",
+                "confidence": "runtime-db",
                 "state": display_state,
                 "interval": format_seconds_duration(int(runner["interval_seconds"])),
                 "scope": str(runner["scope_role"] or "team"),
@@ -174,7 +196,7 @@ def collect_dashboard_snapshot(
             }
         )
 
-    milestone_lines = tuple(format_milestone_line(row) for row in store.list_milestones(limit=milestone_limit))
+    milestone_rows = store.list_milestones(role=role_filter, limit=milestone_limit)
     recent_failures = conn.execute(
         """
         SELECT role, method, state, details
@@ -196,23 +218,23 @@ def collect_dashboard_snapshot(
         active_messages=tuple(active_rows),
         watches=tuple(watch_rows),
         watchdog_runners=tuple(watchdog_rows),
-        milestones=milestone_lines,
+        milestones=tuple(milestone_rows),
         memories=tuple(memory_rows),
         pane_previews=tuple(pane_rows),
         alerts=tuple(alerts),
     )
 
 
-def render_dashboard_snapshot(snapshot: DashboardSnapshot) -> str:
+def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool = False) -> str:
     lines = [
         f"tmux-team dashboard  team={snapshot.team}  at={snapshot.collected_at}",
         f"config={snapshot.config_path}",
         f"runtime={snapshot.runtime_dir}",
         "",
-        "Alerts",
+        "Alerts [source=runtime-db/watchdog]",
     ]
     lines.extend(f"  ! {alert}" for alert in snapshot.alerts) if snapshot.alerts else lines.append("  none")
-    lines.extend(["", "Roles"])
+    lines.extend(["", "Roles [source=runtime-db]"])
     lines.extend(
         format_table(
             ("role", "state", "pane", "pending", "claimed", "ack", "stale", "todos", "active"),
@@ -232,20 +254,28 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot) -> str:
             ),
         )
     )
-    lines.extend(["", "Active Work"])
-    lines.extend(indent_lines(active_lines(snapshot.active_messages), "  "))
-    lines.extend(["", "Watches"])
-    lines.extend(indent_lines(watch_lines(snapshot.watches), "  "))
-    lines.extend(["", "Watchdog Runners"])
-    lines.extend(indent_lines(watchdog_lines(snapshot.watchdog_runners), "  "))
-    lines.extend(["", "Milestones"])
-    lines.extend(f"  {line}" for line in snapshot.milestones) if snapshot.milestones else lines.append("  none")
-    lines.extend(["", "Memory"])
-    lines.extend(indent_lines(memory_lines(snapshot.memories), "  "))
+    lines.extend(["", "Active Work [source=runtime-db todo]"])
+    lines.extend(indent_lines(active_lines(snapshot.active_messages, provenance=provenance), "  "))
+    lines.extend(["", "Watches [source=runtime-db]"])
+    lines.extend(indent_lines(watch_lines(snapshot.watches, provenance=provenance), "  "))
+    lines.extend(["", "Watchdog Runners [source=watchdog/runtime-db]"])
+    lines.extend(indent_lines(watchdog_lines(snapshot.watchdog_runners, provenance=provenance), "  "))
+    lines.extend(["", "Milestones [source=milestone-jsonl]"])
+    if snapshot.milestones:
+        lines.extend(f"  {format_milestone_line(row, provenance=provenance)}" for row in snapshot.milestones)
+    else:
+        lines.append("  none")
+    lines.extend(["", "Memory Excerpts [source=memory-excerpt prose]"])
+    lines.extend(indent_lines(memory_lines(snapshot.memories, provenance=provenance), "  "))
     if snapshot.pane_previews:
-        lines.extend(["", "Pane Preview"])
+        lines.extend(["", "Pane Preview [source=pane-capture best-effort screen-text-heuristic]"])
         lines.extend(
-            indent_lines(format_pane_preview_lines(snapshot.pane_previews, tail_count=6, truncate_at=None), "  ")
+            indent_lines(
+                format_pane_preview_lines(
+                    snapshot.pane_previews, tail_count=6, truncate_at=None, provenance=provenance
+                ),
+                "  ",
+            )
         )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -258,6 +288,7 @@ def run_textual_dashboard(
     include_pane_preview: bool,
     pane_line_count: int,
     tmux_bin: str,
+    provenance: bool = False,
 ) -> int:
     try:
         from textual.app import App, ComposeResult
@@ -272,13 +303,39 @@ def run_textual_dashboard(
 
     class DashboardApp(App):
         TITLE = "tmux-team dashboard"
-        BINDINGS: ClassVar = [("q", "quit", "Quit"), ("r", "refresh_now", "Refresh")]
+        BINDINGS: ClassVar = [
+            ("q", "quit", "Quit"),
+            ("r", "refresh_now", "Refresh"),
+            ("h", "toggle_help", "Help"),
+            ("tab", "focus_next", "Next"),
+            ("shift+tab", "focus_previous", "Previous"),
+            ("escape", "clear_filter", "Team"),
+            ("f", "filter_focused_role", "Filter role"),
+            ("a", "show_section('alerts')", "Alerts"),
+            ("t", "show_section('roles')", "Roles"),
+            ("w", "show_section('watches')", "Watches"),
+            ("d", "show_section('watchdogs')", "Watchdogs"),
+            ("m", "show_section('milestones')", "Milestones"),
+            ("p", "show_section('panes')", "Panes"),
+            ("1", "filter_role_1", "Role 1"),
+            ("2", "filter_role_2", "Role 2"),
+            ("3", "filter_role_3", "Role 3"),
+            ("4", "filter_role_4", "Role 4"),
+            ("5", "filter_role_5", "Role 5"),
+            ("6", "filter_role_6", "Role 6"),
+            ("7", "filter_role_7", "Role 7"),
+            ("8", "filter_role_8", "Role 8"),
+            ("9", "filter_role_9", "Role 9"),
+            ("0", "filter_role_10", "Role 10"),
+        ]
         CSS = """
         Screen { layout: vertical; }
         #top { height: 8; }
         #summary, #alerts { width: 1fr; border: solid $primary; padding: 0 1; }
         DataTable { height: 10; border: solid $accent; }
         .panel { border: solid $secondary; padding: 0 1; margin: 1 0 0 0; }
+        #help { height: 8; border: heavy $warning; padding: 0 1; display: none; }
+        #help.visible { display: block; }
         """
 
         def compose(self) -> ComposeResult:
@@ -287,6 +344,7 @@ def run_textual_dashboard(
                 yield Static(id="summary")
                 yield Static(id="alerts")
             yield DataTable(id="roles")
+            yield Static(id="help")
             with VerticalScroll():
                 yield Static(id="active", classes="panel")
                 yield Static(id="watches", classes="panel")
@@ -297,6 +355,10 @@ def run_textual_dashboard(
             yield Footer()
 
         def on_mount(self) -> None:
+            self.role_filter = role_filter
+            self.role_order = tuple(config.roles)
+            self.visible_roles = self.role_order
+            self.help_visible = False
             table = self.query_one("#roles", DataTable)
             table.zebra_stripes = True
             table.cursor_type = "row"
@@ -307,21 +369,82 @@ def run_textual_dashboard(
         def action_refresh_now(self) -> None:
             self.refresh_dashboard()
 
+        def action_toggle_help(self) -> None:
+            self.help_visible = not self.help_visible
+            help_panel = self.query_one("#help", Static)
+            help_panel.set_class(self.help_visible, "visible")
+            help_panel.update(help_text())
+
+        def action_clear_filter(self) -> None:
+            self.role_filter = None
+            self.refresh_dashboard()
+
+        def action_show_section(self, section_id: str) -> None:
+            try:
+                self.query_one(f"#{section_id}").scroll_visible()
+            except Exception:
+                pass
+
+        def action_filter_focused_role(self) -> None:
+            table = self.query_one("#roles", DataTable)
+            row_index = getattr(table, "cursor_row", 0)
+            if 0 <= row_index < len(self.visible_roles):
+                self.role_filter = self.visible_roles[row_index]
+                self.refresh_dashboard()
+
+        def _filter_role_number(self, number: int) -> None:
+            index = number - 1
+            if 0 <= index < len(self.role_order):
+                self.role_filter = self.role_order[index]
+                self.refresh_dashboard()
+
+        def action_filter_role_1(self) -> None:
+            self._filter_role_number(1)
+
+        def action_filter_role_2(self) -> None:
+            self._filter_role_number(2)
+
+        def action_filter_role_3(self) -> None:
+            self._filter_role_number(3)
+
+        def action_filter_role_4(self) -> None:
+            self._filter_role_number(4)
+
+        def action_filter_role_5(self) -> None:
+            self._filter_role_number(5)
+
+        def action_filter_role_6(self) -> None:
+            self._filter_role_number(6)
+
+        def action_filter_role_7(self) -> None:
+            self._filter_role_number(7)
+
+        def action_filter_role_8(self) -> None:
+            self._filter_role_number(8)
+
+        def action_filter_role_9(self) -> None:
+            self._filter_role_number(9)
+
+        def action_filter_role_10(self) -> None:
+            self._filter_role_number(10)
+
         def refresh_dashboard(self) -> None:
             store = Store(config)
             with store.connect() as conn:
                 snapshot = collect_dashboard_snapshot(
                     store,
                     conn,
-                    role_filter=role_filter,
+                    role_filter=self.role_filter,
                     include_pane_preview=include_pane_preview,
                     pane_lines=pane_line_count,
                     tmux_bin=tmux_bin,
                 )
-            self.query_one("#summary", Static).update(summary_panel(snapshot, refresh))
+            self.query_one("#summary", Static).update(summary_panel(snapshot, refresh, self.role_filter))
             self.query_one("#alerts", Static).update(alerts_panel(snapshot.alerts))
             table = self.query_one("#roles", DataTable)
+            cursor_row = getattr(table, "cursor_row", 0)
             table.clear(columns=False)
+            self.visible_roles = tuple(row_text(row, "name") for row in snapshot.roles)
             for row in snapshot.roles:
                 table.add_row(
                     row_text(row, "name"),
@@ -334,34 +457,56 @@ def run_textual_dashboard(
                     row_text(row, "open_todos"),
                     truncate(row_text(row, "active_summary"), 64),
                 )
+            if snapshot.roles:
+                try:
+                    table.move_cursor(row=min(cursor_row, len(snapshot.roles) - 1))
+                except Exception:
+                    pass
             self.query_one("#active", Static).update(
-                section_panel("Active Work", active_lines(snapshot.active_messages))
+                section_panel(
+                    "Active Work [runtime-db + todo]",
+                    active_lines(snapshot.active_messages, rich=True, provenance=provenance),
+                )
             )
             self.query_one("#watches", Static).update(
-                section_panel("Watches", watch_lines(snapshot.watches, rich=True))
+                section_panel("Watches [runtime-db]", watch_lines(snapshot.watches, rich=True, provenance=provenance))
             )
             self.query_one("#watchdogs", Static).update(
-                section_panel("Watchdog Runners", watchdog_lines(snapshot.watchdog_runners, rich=True))
+                section_panel(
+                    "Watchdog Runners [watchdog/runtime-db]",
+                    watchdog_lines(snapshot.watchdog_runners, rich=True, provenance=provenance),
+                )
             )
-            self.query_one("#milestones", Static).update(lines_panel("Milestones", snapshot.milestones))
+            self.query_one("#milestones", Static).update(
+                lines_panel(
+                    "Milestones [milestone-jsonl]",
+                    (format_milestone_line(row, provenance=provenance) for row in snapshot.milestones),
+                    rich=True,
+                )
+            )
             self.query_one("#memory", Static).update(
-                section_panel("Memory", memory_lines(snapshot.memories, truncate_at=140))
+                section_panel(
+                    "Memory Excerpts [memory-excerpt prose]",
+                    memory_lines(snapshot.memories, truncate_at=140, rich=True, provenance=provenance),
+                )
             )
             pane_body = textual_pane_preview_body(snapshot, include_pane_preview=include_pane_preview)
-            self.query_one("#panes", Static).update(section_panel("Pane Preview", pane_body))
+            self.query_one("#panes", Static).update(section_panel("Pane Preview [best-effort pane-capture]", pane_body))
 
     DashboardApp().run()
     return 0
 
 
-def summary_panel(snapshot: DashboardSnapshot, refresh: float) -> str:
+def summary_panel(snapshot: DashboardSnapshot, refresh: float, role_filter: str | None = None) -> str:
+    scope = role_filter or "team"
     return "\n".join(
         [
-            f"[b]team[/b] {snapshot.team}",
-            f"[b]collected[/b] {snapshot.collected_at}",
+            f"[b]team[/b] {rich_escape(snapshot.team)}",
+            f"[b]scope[/b] {rich_escape(scope)}",
+            f"[b]collected[/b] {rich_escape(snapshot.collected_at)}",
             f"[b]refresh[/b] {refresh:g}s",
-            f"[b]runtime[/b] {snapshot.runtime_dir}",
-            f"[b]config[/b] {snapshot.config_path}",
+            f"[b]runtime[/b] {rich_escape(snapshot.runtime_dir)}",
+            f"[b]config[/b] {rich_escape(snapshot.config_path)}",
         ]
     )
 
@@ -370,7 +515,19 @@ def alerts_panel(alerts: Iterable[str]) -> str:
     rows = list(alerts)
     if not rows:
         return "[b]alerts[/b]\nnone"
-    return "[b]alerts[/b]\n" + "\n".join(f"[red]![/red] {truncate(row, 120)}" for row in rows[:8])
+    return "[b]alerts[/b]\n" + "\n".join(f"[red]![/red] {rich_escape(truncate(row, 120))}" for row in rows[:8])
+
+
+def help_text() -> str:
+    return "\n".join(
+        [
+            "[b]tmux-team dashboard keys[/b]",
+            "r refresh  q quit  h help  tab/shift-tab focus  escape team overview",
+            "f filter to focused role row  1-9 role rows 1-9  0 role row 10",
+            "jumps: a alerts  t roles  w watches  d watchdogs  m milestones  p panes",
+            "Sources: runtime-db is authoritative; memory-excerpt is prose; pane-capture is best-effort screen text.",
+        ]
+    )
 
 
 def section_panel(title: str, rows: Iterable[str]) -> str:
@@ -380,24 +537,27 @@ def section_panel(title: str, rows: Iterable[str]) -> str:
     return f"[b]{title}[/b]\n" + "\n".join(values)
 
 
-def active_lines(rows: Iterable[dict[str, object]]) -> list[str]:
+def active_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
         seen = True
+        source = provenance_suffix(row, provenance)
         lines.append(
-            f"{row_text(row, 'role')} {row_text(row, 'message_id')} {row_text(row, 'state')} "
-            f"{row_text(row, 'priority')} from={row_text(row, 'sender')} age={row_text(row, 'age')} "
-            f"{row_text(row, 'summary')}"
+            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'message_id', rich)} "
+            f"{safe_row_text(row, 'state', rich)} {safe_row_text(row, 'priority', rich)} "
+            f"from={safe_row_text(row, 'sender', rich)} age={safe_row_text(row, 'age', rich)} "
+            f"{safe_row_text(row, 'summary', rich)}{source}"
         )
         for todo in row_strings(row, "todos"):
-            lines.append(f"  [ ] {todo}")
+            marker = r"\[ ]" if rich else "[ ]"
+            lines.append(f"  {marker} {rich_escape(todo) if rich else todo}")
     if not seen:
         lines.append("none")
     return lines
 
 
-def watch_lines(rows: Iterable[dict[str, object]], *, rich: bool = False) -> list[str]:
+def watch_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
@@ -412,18 +572,20 @@ def watch_lines(rows: Iterable[dict[str, object]], *, rich: bool = False) -> lis
             marker = row_text(row, "state")
         pause = ""
         if row_text(row, "state") == "paused":
-            pause = f" review={row_text(row, 'review_at')} reason={row_text(row, 'paused_reason')}"
+            pause = (
+                f" review={safe_row_text(row, 'review_at', rich)} reason={safe_row_text(row, 'paused_reason', rich)}"
+            )
         lines.append(
-            f"{row_text(row, 'role')} {row_text(row, 'watch_id')} {marker} "
-            f"updated={row_text(row, 'updated')} next={row_text(row, 'next_update')}{pause} "
-            f"{row_text(row, 'summary')}"
+            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'watch_id', rich)} {marker} "
+            f"updated={safe_row_text(row, 'updated', rich)} next={safe_row_text(row, 'next_update', rich)}{pause} "
+            f"{safe_row_text(row, 'summary', rich)}{provenance_suffix(row, provenance)}"
         )
     if not seen:
         lines.append("none")
     return lines
 
 
-def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False) -> list[str]:
+def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
@@ -435,36 +597,46 @@ def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False) -> 
             state = f"[yellow]{state}[/yellow]"
         pause = ""
         if row_text(row, "state") == "paused":
-            pause = f" review={row_text(row, 'review_at')} reason={row_text(row, 'paused_reason')}"
+            pause = (
+                f" review={safe_row_text(row, 'review_at', rich)} reason={safe_row_text(row, 'paused_reason', rich)}"
+            )
         lines.append(
-            f"{row_text(row, 'name')} {state} interval={row_text(row, 'interval')} "
-            f"scope={row_text(row, 'scope')} delivery={row_text(row, 'delivery')} "
-            f"last={row_text(row, 'last_run')} next={row_text(row, 'next_run')} "
-            f"findings={row_text(row, 'findings')} safe_to_close={row_text(row, 'safe_to_close')} "
-            f"pane={row_text(row, 'pane')}{pause} {row_text(row, 'summary')}"
+            f"{safe_row_text(row, 'name', rich)} {state} interval={safe_row_text(row, 'interval', rich)} "
+            f"scope={safe_row_text(row, 'scope', rich)} delivery={safe_row_text(row, 'delivery', rich)} "
+            f"last={safe_row_text(row, 'last_run', rich)} next={safe_row_text(row, 'next_run', rich)} "
+            f"findings={safe_row_text(row, 'findings', rich)} safe_to_close={safe_row_text(row, 'safe_to_close', rich)} "
+            f"pane={safe_row_text(row, 'pane', rich)}{pause} {safe_row_text(row, 'summary', rich)}"
+            f"{provenance_suffix(row, provenance)}"
         )
     if not seen:
         lines.append("none")
     return lines
 
 
-def lines_panel(title: str, rows: Iterable[str]) -> str:
+def lines_panel(title: str, rows: Iterable[str], *, rich: bool = False) -> str:
     values = list(rows)
     if not values:
         values = ["none"]
-    return f"[b]{title}[/b]\n" + "\n".join(truncate(row, 140) for row in values)
+    rendered = [rich_escape(truncate(row, 140)) if rich else truncate(row, 140) for row in values]
+    return f"[b]{title}[/b]\n" + "\n".join(rendered)
 
 
 def textual_pane_preview_body(snapshot: DashboardSnapshot, *, include_pane_preview: bool) -> list[str]:
     if not include_pane_preview:
         return ["disabled"]
-    return format_pane_preview_lines(snapshot.pane_previews, tail_count=5, truncate_at=140)
+    return format_pane_preview_lines(snapshot.pane_previews, tail_count=5, truncate_at=140, rich=True, provenance=True)
 
 
-def memory_lines(rows: Iterable[dict[str, object]], *, truncate_at: int | None = None) -> list[str]:
+def memory_lines(
+    rows: Iterable[dict[str, object]], *, truncate_at: int | None = None, rich: bool = False, provenance: bool = False
+) -> list[str]:
     lines: list[str] = []
     for row in rows:
-        line = f"{row_text(row, 'role')}: {first_content_line(row_text(row, 'excerpt'))}"
+        line = (
+            f"{safe_row_text(row, 'role', rich)}: "
+            f"{rich_escape(first_content_line(row_text(row, 'excerpt'))) if rich else first_content_line(row_text(row, 'excerpt'))}"
+            f"{provenance_suffix(row, provenance)}"
+        )
         lines.append(truncate(line, truncate_at) if truncate_at else line)
     return lines or ["none"]
 
@@ -474,16 +646,27 @@ def format_pane_preview_lines(
     *,
     tail_count: int,
     truncate_at: int | None,
+    rich: bool = False,
+    provenance: bool = False,
 ) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
         seen = True
-        lines.append(f"{row_text(row, 'role')} {row_text(row, 'pane')}:")
+        meta = (
+            f"command={safe_row_text(row, 'current_command', rich)} "
+            f"dead={safe_row_text(row, 'dead', rich)} "
+            f"copy_mode={safe_row_text(row, 'in_mode', rich)} "
+            f"screen_source={safe_row_text(row, 'screen_source', rich)}"
+        )
+        lines.append(
+            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'pane', rich)} "
+            f"[best-effort] {meta}{provenance_suffix(row, provenance)}:"
+        )
         tail = row_text(row, "text").splitlines()[-tail_count:] or ["(empty)"]
         for line in tail:
             rendered = truncate(line, truncate_at) if truncate_at else line
-            lines.append(f"  {rendered}")
+            lines.append(f"  {rich_escape(rendered) if rich else rendered}")
     if not seen:
         lines.append("none")
     return lines
@@ -503,6 +686,27 @@ def capture_pane_tail(tmux_bin: str, pane: str, lines: int) -> str:
         details = (result.stderr or result.stdout or f"{tmux_bin} exited {result.returncode}").strip()
         return f"(pane capture failed: {details})"
     return result.stdout.strip()
+
+
+def capture_pane_preview(tmux_bin: str, pane: str, lines: int) -> dict[str, object]:
+    ok, state = inspect_tmux_pane(tmux_bin, pane)
+    if ok and not isinstance(state, str):
+        dead = state.dead
+        in_mode = state.in_mode
+        current_command = state.current_command or "-"
+        inspection_error = None
+    else:
+        dead = "-"
+        in_mode = "-"
+        current_command = "-"
+        inspection_error = state if isinstance(state, str) else "pane inspection failed"
+    return {
+        "text": capture_pane_tail(tmux_bin, pane, lines),
+        "dead": dead,
+        "in_mode": in_mode,
+        "current_command": current_command,
+        "inspection_error": inspection_error,
+    }
 
 
 def read_excerpt(path: Path, max_chars: int) -> str:
@@ -530,10 +734,23 @@ def first_content_line(value: str) -> str:
     return first_line(value)
 
 
-def format_milestone_line(row: dict) -> str:
-    role = row.get("role") or "-"
+def format_milestone_line(row: dict, *, provenance: bool = False) -> str:
     kind = row.get("kind") or "milestone"
-    return f"{row.get('created_at')} [{kind}] role={role} {row.get('summary')}"
+    recorded_by = row.get("recorded_by") or row.get("actor") or "-"
+    return (
+        f"{row.get('created_at')} [{kind}] recorded_by={recorded_by} "
+        f"subject={milestone_subject_label(row)} {row.get('summary')}"
+        f"{provenance_suffix({'source': 'milestone-jsonl', 'confidence': 'operator-recorded'}, provenance)}"
+    )
+
+
+def milestone_subject_label(row: dict) -> str:
+    if row.get("scope") == "team":
+        return "team"
+    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
+    if subject_roles:
+        return ",".join(subject_roles)
+    return str(row.get("role") or "-")
 
 
 def format_table(headers: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> list[str]:
@@ -607,6 +824,24 @@ def truncate(value: str, limit: int | None) -> str:
 def row_text(row: dict[str, object], key: str) -> str:
     value = row.get(key)
     return "-" if value is None else str(value)
+
+
+def safe_row_text(row: dict[str, object], key: str, rich: bool) -> str:
+    value = row_text(row, key)
+    return rich_escape(value) if rich else value
+
+
+def provenance_suffix(row: dict[str, object], enabled: bool) -> str:
+    if not enabled:
+        return ""
+    source = row.get("source") or "-"
+    confidence = row.get("confidence") or "-"
+    return f" source={source} confidence={confidence}"
+
+
+def rich_escape(value: object) -> str:
+    text = str(value)
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
 def row_strings(row: dict[str, object], key: str) -> tuple[str, ...]:

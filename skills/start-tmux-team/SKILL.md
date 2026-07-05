@@ -172,10 +172,13 @@ Do not use scratchpad memory as a full chat log, command transcript, reasoning d
 Milestones are the broad operator timeline. The orchestrator should record concise milestones for team start, task routing, accepted evidence, blocker found/resolved, tests passing, stable commit approval, sleep/resume, and role resize:
 
 ```bash
-tmux-team milestone add --kind result --summary "Targeted tests passed after implementer fix" --tag test
+tmux-team milestone add --kind result --summary "Targeted tests passed after implementer fix" --subject-role implementer --tag test
+tmux-team milestone add --kind routing --summary "Team started" --team
 tmux-team milestone list --today
 tmux-team milestone list --since -4h
 ```
+
+Milestones should separate writer from subject. Use `--subject-role ROLE` when the event is about one or more roles, and `--team` when it is team-wide. The writer is recorded separately as `recorded_by`.
 
 Do not use milestones as chat, scratchpad memory, task transport, or command transcripts. Use them for "what happened today?" and "what changed while I was away?" operator summaries.
 

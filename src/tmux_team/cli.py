@@ -236,6 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--role", help="Limit the dashboard to one role")
     dashboard.add_argument("--no-pane-preview", action="store_true", help="Do not capture role pane tails")
     dashboard.add_argument("--pane-lines", type=int, default=8, help="Pane tail lines to show when preview is enabled")
+    dashboard.add_argument(
+        "--provenance", action="store_true", help="Show row-level dashboard source/confidence labels"
+    )
     dashboard.add_argument("--tmux-bin", default="tmux")
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
@@ -509,7 +512,18 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_sub = milestone.add_subparsers(dest="milestone_command", required=True)
     milestone_add = milestone_sub.add_parser("add", help="Append a milestone to runtime milestones.jsonl")
     milestone_add.add_argument("--summary", required=True, help="Concise milestone summary")
-    milestone_add.add_argument("--role", help=f"Role associated with the milestone; defaults to --actor or ${ROLE_ENV}")
+    milestone_add.add_argument(
+        "--role",
+        help=f"Legacy single subject role; defaults to --actor or ${ROLE_ENV} when no --subject-role/--team is set",
+    )
+    milestone_subject = milestone_add.add_mutually_exclusive_group()
+    milestone_subject.add_argument(
+        "--subject-role",
+        action="append",
+        default=[],
+        help="Role the milestone is about; repeatable or comma-separated",
+    )
+    milestone_subject.add_argument("--team", action="store_true", help="Record a team-wide milestone")
     milestone_add.add_argument("--kind", default="milestone", help="Milestone kind, e.g. result, blocker, routing")
     milestone_add.add_argument("--ref", dest="ref_id", help="Related message id, commit, job id, or artifact id")
     milestone_add.add_argument("--tag", action="append", default=[], help="Tag for filtering; repeatable")
@@ -522,7 +536,9 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_list.add_argument("--since", help="Start time: ISO timestamp or relative duration like -4h, 30m, 2d")
     milestone_list.add_argument("--until", help="End time: ISO timestamp or relative duration")
     milestone_list.add_argument("--today", action="store_true", help="Show milestones since local midnight")
-    milestone_list.add_argument("--role", help="Filter by role")
+    milestone_list.add_argument("--role", help="Filter by legacy role or subject role")
+    milestone_list.add_argument("--subject-role", help="Filter by subject role")
+    milestone_list.add_argument("--team", action="store_true", help="Show team-wide milestones")
     milestone_list.add_argument("--kind", help="Filter by kind")
     milestone_list.add_argument("--tag", action="append", default=[], help="Require tag; repeatable")
     milestone_list.add_argument("--limit", type=int, default=50)
@@ -949,7 +965,7 @@ def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext
         if args.role is None:
             raise ValueError(f"todo --role is required unless --actor or ${ROLE_ENV} is set")
     if args.command == "milestone" and args.milestone_command == "add":
-        if args.role is None:
+        if args.role is None and not args.subject_role and not args.team:
             args.role = policy_context.actor
         if args.actor is None:
             args.actor = policy_context.actor or "operator"
@@ -1176,7 +1192,7 @@ def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
             pane_lines=args.pane_lines,
             tmux_bin=args.tmux_bin,
         )
-        print(render_dashboard_snapshot(snapshot), end="")
+        print(render_dashboard_snapshot(snapshot, provenance=args.provenance), end="")
         return 0
 
     try:
@@ -1187,6 +1203,7 @@ def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
             include_pane_preview=include_pane_preview,
             pane_line_count=args.pane_lines,
             tmux_bin=args.tmux_bin,
+            provenance=args.provenance,
         )
     except DashboardDependencyError as exc:
         raise ValueError(str(exc)) from exc
@@ -1342,10 +1359,14 @@ def cmd_todo_recover(args: argparse.Namespace, store: Store, conn) -> int:
 def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
     if args.milestone_command == "add":
         body = read_optional_body(args)
+        subject_roles = milestone_subject_roles(args)
+        scope = "team" if args.team else None
         milestone = store.record_milestone(
             conn,
             actor=args.actor or "operator",
             role=args.role,
+            subject_roles=subject_roles,
+            scope=scope,
             kind=args.kind,
             summary=args.summary,
             body=body,
@@ -1353,7 +1374,11 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
             tags=tuple(args.tag),
             metadata=parse_metadata(args.meta),
         )
-        print(f"{milestone['created_at']} {milestone['kind']} role={milestone['role'] or '-'} {milestone['summary']}")
+        print(
+            f"{milestone['created_at']} {milestone['kind']} "
+            f"recorded_by={milestone['recorded_by']} subject={milestone_subject_label(milestone)} "
+            f"{milestone['summary']}"
+        )
         print(f"path: {store.milestones_path}")
         return 0
 
@@ -1363,6 +1388,8 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
             since=since,
             until=until,
             role=args.role,
+            subject_role=args.subject_role,
+            scope="team" if args.team else None,
             kind=args.kind,
             tags=tuple(args.tag),
             limit=args.limit,
@@ -2569,6 +2596,17 @@ def parse_metadata(values: Sequence[str]) -> dict[str, str]:
     return metadata
 
 
+def milestone_subject_roles(args: argparse.Namespace) -> tuple[str, ...]:
+    roles = split_csv_values(args.subject_role or ())
+    if roles:
+        return roles
+    if args.team:
+        return ()
+    if args.role:
+        return (args.role,)
+    return ()
+
+
 def milestone_time_window(args: argparse.Namespace) -> tuple[datetime | None, datetime | None]:
     if args.today and args.since:
         raise ValueError("milestone list accepts either --today or --since, not both")
@@ -2627,16 +2665,29 @@ def json_dumps(value) -> str:
 
 
 def format_milestone(row: dict) -> str:
-    role = row.get("role") or "-"
     kind = row.get("kind") or "milestone"
     ref_id = row.get("ref_id") or "-"
     tags = ",".join(row.get("tags") or []) or "-"
-    line = f"{row.get('created_at')} [{kind}] role={role} ref={ref_id} tags={tags} {row.get('summary')}"
+    recorded_by = row.get("recorded_by") or row.get("actor") or "-"
+    line = (
+        f"{row.get('created_at')} [{kind}] recorded_by={recorded_by} "
+        f"subject={milestone_subject_label(row)} ref={ref_id} tags={tags} {row.get('summary')}"
+    )
     body = str(row.get("body") or "").strip()
     if body:
         first_line = body.splitlines()[0]
         line += f"\n  {first_line}"
     return line
+
+
+def milestone_subject_label(row: dict) -> str:
+    scope = row.get("scope")
+    if scope == "team":
+        return "team"
+    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
+    if subject_roles:
+        return ",".join(subject_roles)
+    return str(row.get("role") or "-")
 
 
 def watchdog_findings(

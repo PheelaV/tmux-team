@@ -35,6 +35,10 @@ The dashboard should combine existing supervision surfaces rather than inventing
 - bounded pane tails from tmux when preview is enabled;
 - recent notification failures/deferred notices as alerts.
 
+Dashboard sections must label provenance. SQLite-backed rows are authoritative runtime state. Scratchpad excerpts are prose snapshots, not current-state truth. Pane previews are best-effort tmux captures and any screen-derived status is only a UI hint. Textual rendering must escape arbitrary pane and memory text as plain text.
+
+The live dashboard should stay keyboard-first: refresh/help, role-filter shortcuts, team overview, and section jump keys must be available without mouse input.
+
 It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete watch, or inspect full message body can be added later behind explicit commands.
 
 ## Watches
