@@ -256,14 +256,15 @@ If a role pane target changes, config must change with it.
 
 `tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
 
-- It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, operator mapping metadata, and configured Codex launch settings before teardown.
+- It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, running watchdog runners, operator mapping metadata, and configured Codex launch settings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
-- It tears down managed role/app-server windows by default and leaves `tt-control` alive.
+- It tears down managed role, app-server, and watchdog windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
-- Resume reads the latest or specified sleep snapshot, recreates the app-server/role panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
+- Resume reads the latest or specified sleep snapshot, recreates the app-server, role, and running watchdog panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
 - Resume restores configured model, reasoning effort, profile, raw Codex config overrides, and YOLO mode when present. TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown and must be verified manually if important.
 - Resume must update config/runtime pane and app-server bindings after recreating panes.
 - Resume reactivates roles by default; use `--no-reactivate-roles` when the operator wants to inspect before accepting work.
+- If no graceful sleep snapshot exists after an abrupt host or tmux shutdown, resume must build a recovery snapshot from durable `team.toml` and SQLite runtime state when role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.
 
 ## Resizing
 

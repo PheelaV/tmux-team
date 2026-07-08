@@ -247,14 +247,14 @@ Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime
 
 ## Sleep And Resume
 
-Use `sleep` to snapshot and stop managed role/app-server windows without killing `tt-control`.
+Use `sleep` to snapshot and stop managed role, app-server, and watchdog windows without killing `tt-control`.
 
 ```bash
 tmux-team sleep
 tmux-team sleep --dry-run
 ```
 
-Use `resume` to restore from `.tmux-team/runtime/sleeps/latest.toml` or a chosen snapshot.
+Use `resume` to restore from `.tmux-team/runtime/sleeps/latest.toml` or a chosen snapshot. If no graceful sleep snapshot exists, `resume` builds a recovery snapshot from durable `team.toml` and SQLite runtime state when the role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.
 
 ```bash
 tmux-team resume
@@ -263,7 +263,7 @@ tmux-team resume --snapshot .tmux-team/runtime/sleeps/<snapshot>.toml
 tmux-team resume --no-reactivate-roles
 ```
 
-Resume replays configured role Codex launch settings from the sleep snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `status --verbose`, `dashboard`, and `resume` report fast state as unknown.
+Resume replays configured role Codex launch settings from the sleep or recovery snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. It also reinstantiates running watchdog runner panes from durable runner state. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `status --verbose`, `dashboard`, and `resume` report fast state as unknown.
 
 Record or inspect operator recovery metadata:
 

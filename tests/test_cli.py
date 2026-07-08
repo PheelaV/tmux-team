@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -19,7 +20,7 @@ from tmux_team.bootstrap import (
     role_startup_prompt,
     write_role_env_files,
 )
-from tmux_team.cli import infer_role_from_tmux_pane, main
+from tmux_team.cli import infer_role_from_tmux_pane, main, sleep_watchdog_interval
 from tmux_team.config import RoleConfig, TeamConfig, load_config
 from tmux_team.dashboard import DashboardSnapshot, textual_pane_preview_body
 from tmux_team.store import Store
@@ -1039,6 +1040,27 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("pressure state=running interval=2m scope=collector", out)
         self.assertIn("notify_role=collector", out)
+
+    def test_watchdog_interval_sleep_wakes_on_interval_update(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.upsert_watchdog_runner(conn, name="default", state="running", interval_seconds=60)
+
+            result: list[bool] = []
+
+            def wait_for_interval() -> None:
+                with store.connect() as thread_conn:
+                    result.append(sleep_watchdog_interval(store, thread_conn, name="default", interval_seconds=60))
+
+            thread = threading.Thread(
+                target=wait_for_interval,
+            )
+            thread.start()
+            store.update_watchdog_runner(conn, name="default", interval_seconds=5)
+            thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [True])
 
     def test_watchdog_start_refuses_duplicate_running_runner(self) -> None:
         fake_dir = self.root / "watchdog-duplicate-bin"
@@ -3075,6 +3097,23 @@ can_notify = ["orchestrator"]
 
     def test_sleep_snapshots_and_tears_down_managed_windows(self) -> None:
         self.write_remote_tui_config()
+        config = load_config(self.config)
+        store = Store(config)
+        with store.connect() as conn:
+            store.sync_roles(conn, config.roles.values())
+            store.upsert_watchdog_runner(
+                conn,
+                name="live",
+                state="running",
+                interval_seconds=60,
+                scope_role="implementer",
+                description="Live recovery watchdog",
+                goal="Keep collector pressure alive",
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+                pane="tt:tt-watchdog-live.0",
+                window="tt:tt-watchdog-live",
+            )
         fake_dir, log_path = self.write_fake_lifecycle_tmux()
 
         with patch.dict(os.environ, {"PATH": f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"}):
@@ -3082,10 +3121,12 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("snapshot:", out)
+        self.assertIn("watchdogs: 1", out)
         self.assertIn("paused_roles: yes", out)
         log = log_path.read_text(encoding="utf-8")
         self.assertIn("kill-window -t @2", log)
         self.assertIn("kill-window -t @3", log)
+        self.assertIn("kill-window -t @4", log)
         self.assertNotIn("kill-window -t @1", log)
 
         latest = self.root / "runtime" / "sleeps" / "latest.toml"
@@ -3097,6 +3138,9 @@ can_notify = ["orchestrator"]
         self.assertTrue(snapshot["roles"]["orchestrator"]["capabilities"]["codex_yolo"])
         self.assertEqual(snapshot["roles"]["orchestrator"]["capabilities"]["codex_model"], "gpt-5.5")
         self.assertEqual(snapshot["roles"]["implementer"]["tmux"]["window_id"], "@3")
+        self.assertEqual(snapshot["watchdogs"]["live"]["interval_seconds"], 60)
+        self.assertEqual(snapshot["watchdogs"]["live"]["notify_role"], "orchestrator")
+        self.assertEqual(snapshot["watchdogs"]["live"]["tmux"]["window_id"], "@4")
 
         code, out, err = self.run_cli("status")
         self.assertEqual(code, 0, err)
@@ -3138,6 +3182,51 @@ can_notify = ["orchestrator"]
         self.assertIn("tmux new-window -t tt -n tt-agents", out)
         self.assertIn("tmux split-window -t tt:tt-agents", out)
         self.assertIn("dry-run: no tmux panes created", out)
+
+    def test_resume_dry_run_reinstantiates_watchdogs_from_sleep_snapshot(self) -> None:
+        self.write_remote_tui_config()
+        self.write_sleep_snapshot(include_watchdog=True)
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("watchdogs: 1", out)
+        self.assertIn("watchdog_panes:", out)
+        self.assertIn("live: pane=tt:tt-watchdog-live.0", out)
+        self.assertIn("-n tt-watchdog-live", out)
+        self.assertIn("watchdog run --name live --interval 1m", out)
+        self.assertIn("--delivery app-server-turn", out)
+        self.assertIn("--notify-role orchestrator", out)
+
+    def test_resume_dry_run_recovers_from_runtime_state_without_sleep_snapshot(self) -> None:
+        self.write_remote_tui_config()
+        config = load_config(self.config)
+        store = Store(config)
+        with store.connect() as conn:
+            store.sync_roles(conn, config.roles.values())
+            store.upsert_watchdog_runner(
+                conn,
+                name="pressure",
+                state="running",
+                interval_seconds=5,
+                goal="Recover pressure after abrupt shutdown",
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+                pane="tt:tt-watchdog-pressure.0",
+                window="tt:tt-watchdog-pressure",
+            )
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("snapshot:", out)
+        self.assertIn("recovery_latest.toml", out)
+        self.assertIn("roles: 2", out)
+        self.assertIn("watchdogs: 1", out)
+        self.assertIn("orchestrator: thread_id=thread-orch", out)
+        self.assertIn("implementer: thread_id=thread-impl", out)
+        self.assertIn("watchdog run --name pressure --interval 5s", out)
+        self.assertIn("Recover pressure after abrupt shutdown", out)
 
     def test_app_server_wake_prompt_tells_role_to_drain_multiple_messages(self) -> None:
         store = Store(TeamConfig(name="test", runtime_dir=self.root / "runtime", roles={}))
@@ -3289,11 +3378,36 @@ codex_config = ['model_reasoning_effort="high"']
             encoding="utf-8",
         )
 
-    def write_sleep_snapshot(self) -> Path:
+    def write_sleep_snapshot(self, *, include_watchdog: bool = False) -> Path:
         sleep_dir = self.root / "runtime" / "sleeps"
         sleep_dir.mkdir(parents=True)
         orchestrator = self.root / "orchestrator"
         implementer = self.root / "implementer"
+        watchdog_block = ""
+        if include_watchdog:
+            watchdog_block = """
+[watchdogs.live]
+state = "running"
+interval_seconds = 60
+scope_role = "implementer"
+description = "Live recovery watchdog"
+goal = "Keep collector pressure alive"
+notify_role = "orchestrator"
+delivery_method = "app-server-turn"
+pane = "tt:tt-watchdog-live.0"
+window = "tt:tt-watchdog-live"
+
+[watchdogs.live.tmux]
+target = "tt:tt-watchdog-live.0"
+session = "tt"
+window_id = "@4"
+window_name = "tt-watchdog-live"
+pane_id = "%12"
+pane_title = "tt-watchdog-live"
+pane_dead = false
+current_command = "python"
+live = true
+"""
         snapshot = sleep_dir / "latest.toml"
         snapshot.write_text(
             f"""schema_version = 1
@@ -3370,6 +3484,7 @@ pane_title = "tt-implementer"
 pane_dead = false
 current_command = "codex"
 live = true
+{watchdog_block}
 """,
             encoding="utf-8",
         )
@@ -3387,12 +3502,13 @@ if [ "$1" = "display-message" ] && [ "$2" = "-p" ]; then
   case "$4" in
     tt:tt-agents.0) printf 'tt\\t@3\\ttt-agents\\t%%10\\ttt-orchestrator\\t0\\tbash\\n'; exit 0 ;;
     tt:tt-agents.1) printf 'tt\\t@3\\ttt-agents\\t%%11\\ttt-implementer\\t0\\tbash\\n'; exit 0 ;;
+    tt:tt-watchdog-live.0) printf 'tt\\t@4\\ttt-watchdog-live\\t%%12\\ttt-watchdog-live\\t0\\tbash\\n'; exit 0 ;;
   esac
   printf 'unknown target %s\\n' "$4" >&2
   exit 1
 fi
 if [ "$1" = "list-windows" ]; then
-  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n'
+  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n@4\\ttt-watchdog-live\\n'
   exit 0
 fi
 if [ "$1" = "kill-window" ]; then

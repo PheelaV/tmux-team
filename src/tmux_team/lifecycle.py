@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -31,6 +32,7 @@ from .store import Store, utc_now
 
 APP_SERVER_WINDOW = "tt-app-server"
 CONTROL_PLANE_WINDOW = "tt-control"
+WATCHDOG_PANE_OPTION = "@tmux-team-watchdog"
 SLEEP_SCHEMA_VERSION = 1
 
 
@@ -60,6 +62,7 @@ class SleepResult:
     session: str | None
     commands: list[list[str]]
     role_count: int
+    watchdog_count: int
     managed_windows: list[dict[str, Any]]
 
 
@@ -72,6 +75,7 @@ class ResumeResult:
     role_count: int
     role_panes: dict[str, str]
     role_threads: dict[str, str]
+    watchdog_panes: dict[str, str]
     reactivated_roles: bool
     restored_launch_roles: tuple[str, ...]
 
@@ -96,9 +100,11 @@ def sleep_team(
 
     sleep_id = f"sleep_{utc_now().replace(':', '').replace('+', 'Z')}"
     role_targets = inspect_role_targets(config, tmux_bin, dry_run=dry_run)
+    watchdog_targets = inspect_watchdog_targets(store, conn, tmux_bin, dry_run=dry_run)
     resolved_session = session or first_session(role_targets) or infer_session_from_config(config)
     managed_windows = managed_window_targets(
         role_targets,
+        watchdog_targets,
         tmux_bin,
         resolved_session,
         dry_run=dry_run,
@@ -112,6 +118,7 @@ def sleep_team(
         conn=conn,
         session=resolved_session,
         role_targets=role_targets,
+        watchdog_targets=watchdog_targets,
         managed_windows=managed_windows,
         commands=commands,
         kill_session=kill_session,
@@ -159,6 +166,7 @@ def sleep_team(
         session=resolved_session,
         commands=commands,
         role_count=len(config.roles),
+        watchdog_count=len(watchdog_targets),
         managed_windows=managed_windows,
     )
 
@@ -189,10 +197,17 @@ def resume_team(
     if shutil.which(codex_bin) is None and not dry_run:
         raise LifecycleError(f"codex binary not found: {codex_bin}")
 
-    snapshot_path = (snapshot_path or store.runtime_dir / "sleeps" / "latest.toml").expanduser()
-    if not snapshot_path.exists():
-        raise LifecycleError(f"sleep snapshot does not exist: {snapshot_path}")
-    snapshot = tomllib.loads(snapshot_path.read_text(encoding="utf-8"))
+    requested_snapshot = (snapshot_path or store.runtime_dir / "sleeps" / "latest.toml").expanduser()
+    snapshot_path, snapshot = load_resume_snapshot(
+        config,
+        store,
+        conn,
+        requested_snapshot=requested_snapshot,
+        explicit_snapshot=snapshot_path is not None,
+        session=session,
+        tmux_bin=tmux_bin,
+        dry_run=dry_run,
+    )
     validate_sleep_snapshot(snapshot)
 
     explicit_role_launch_options = role_launch_options or {}
@@ -237,6 +252,16 @@ def resume_team(
             role_launch_options,
         )
     )
+    watchdogs_data = snapshot_watchdog_runners(snapshot)
+    commands.extend(
+        resume_watchdog_tmux_commands(
+            tmux_bin,
+            session,
+            config.config_path,
+            config.project_root or Path.cwd(),
+            watchdogs_data,
+        )
+    )
 
     if dry_run:
         return ResumeResult(
@@ -247,6 +272,7 @@ def resume_team(
             role_count=len(roles),
             role_panes={role: binding.pane for role, binding in role_bindings.items()},
             role_threads={role: binding.thread_id for role, binding in role_bindings.items()},
+            watchdog_panes={name: str(data.get("pane") or "") for name, data in watchdogs_data.items()},
             reactivated_roles=reactivate_roles,
             restored_launch_roles=tuple(sorted(role for role, options in role_launch_options.items() if options)),
         )
@@ -314,12 +340,43 @@ def resume_team(
         store.bind_role_app_server(conn, role, endpoint, binding.thread_id)
         if reactivate_roles:
             store.set_role_state(conn, role, "active", actor="resume")
+    resumed_watchdog_panes: dict[str, str] = {}
+    for name, data in watchdogs_data.items():
+        pane = start_resumed_watchdog_runner(
+            tmux_bin,
+            session,
+            config.config_path,
+            config.project_root or Path.cwd(),
+            name,
+            data,
+        )
+        resumed_watchdog_panes[name] = pane
+        store.upsert_watchdog_runner(
+            conn,
+            name=name,
+            state=str(data.get("state") or "running"),
+            interval_seconds=int(data["interval_seconds"]),
+            scope_role=optional_string(data.get("scope_role")),
+            description=optional_string(data.get("description")),
+            goal=optional_string(data.get("goal")),
+            notify_role=optional_string(data.get("notify_role")),
+            delivery_method=str(data.get("delivery_method") or "report-only"),
+            pane=pane,
+            window=f"{session}:tt-watchdog-{name}",
+            actor="resume",
+        )
     store.record_event(
         conn,
         "team.resume",
         "operator",
         str(snapshot_path),
-        {"session": session, "endpoint": endpoint, "roles": list(roles), "reactivated": reactivate_roles},
+        {
+            "session": session,
+            "endpoint": endpoint,
+            "roles": list(roles),
+            "watchdogs": list(watchdogs_data),
+            "reactivated": reactivate_roles,
+        },
     )
     conn.commit()
 
@@ -331,6 +388,7 @@ def resume_team(
         role_count=len(roles),
         role_panes={role: binding.pane for role, binding in resumed_bindings.items()},
         role_threads={role: binding.thread_id for role, binding in resumed_bindings.items()},
+        watchdog_panes=resumed_watchdog_panes,
         reactivated_roles=reactivate_roles,
         restored_launch_roles=tuple(sorted(role for role, options in role_launch_options.items() if options)),
     )
@@ -341,6 +399,76 @@ def validate_sleep_snapshot(snapshot: dict[str, Any]) -> None:
         raise LifecycleError(f"unsupported sleep snapshot schema_version: {snapshot.get('schema_version')}")
     if not isinstance(snapshot.get("roles"), dict):
         raise LifecycleError("sleep snapshot is missing roles")
+
+
+def load_resume_snapshot(
+    config: TeamConfig,
+    store: Store,
+    conn: sqlite3.Connection,
+    *,
+    requested_snapshot: Path,
+    explicit_snapshot: bool,
+    session: str | None,
+    tmux_bin: str,
+    dry_run: bool,
+) -> tuple[Path, dict[str, Any]]:
+    if requested_snapshot.exists():
+        return requested_snapshot, tomllib.loads(requested_snapshot.read_text(encoding="utf-8"))
+    if explicit_snapshot:
+        raise LifecycleError(f"sleep snapshot does not exist: {requested_snapshot}")
+
+    snapshot = build_recovery_snapshot(
+        config,
+        store,
+        conn,
+        session=session,
+        tmux_bin=tmux_bin,
+    )
+    recovery_path = store.runtime_dir / "sleeps" / "recovery_latest.toml"
+    if not dry_run:
+        recovery_path.parent.mkdir(parents=True, exist_ok=True)
+        recovery_path.write_text(tomli_w.dumps(drop_none(snapshot)), encoding="utf-8")
+        store.record_event(
+            conn,
+            "team.resume.recovery_snapshot",
+            "operator",
+            snapshot["sleep_id"],
+            {"snapshot_path": str(recovery_path), "role_count": len(snapshot["roles"])},
+        )
+    return recovery_path, snapshot
+
+
+def build_recovery_snapshot(
+    config: TeamConfig,
+    store: Store,
+    conn: sqlite3.Connection,
+    *,
+    session: str | None,
+    tmux_bin: str,
+) -> dict[str, Any]:
+    role_targets = inspect_role_targets(config, tmux_bin, dry_run=True)
+    watchdog_targets = inspect_watchdog_targets(store, conn, tmux_bin, dry_run=True)
+    resolved_session = session or first_session(role_targets) or infer_session_from_config(config)
+    snapshot = build_sleep_snapshot(
+        sleep_id=f"recovery_{utc_now().replace(':', '').replace('+', 'Z')}",
+        config=config,
+        store=store,
+        conn=conn,
+        session=resolved_session,
+        role_targets=role_targets,
+        watchdog_targets=watchdog_targets,
+        managed_windows=[],
+        commands=[],
+        kill_session=False,
+        pause_roles=False,
+        dry_run=True,
+        tmux_bin=tmux_bin,
+    )
+    snapshot["recovery"] = {
+        "source": "runtime-state",
+        "reason": "no sleep snapshot found",
+    }
+    return snapshot
 
 
 def saved_role_launch_options(
@@ -458,6 +586,21 @@ def snapshot_role_bindings(snapshot: dict[str, Any]) -> dict[str, RoleBinding]:
     return bindings
 
 
+def snapshot_watchdog_runners(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    watchdogs = snapshot.get("watchdogs")
+    if not isinstance(watchdogs, dict):
+        return {}
+    runners: dict[str, dict[str, Any]] = {}
+    for name, data in watchdogs.items():
+        if not isinstance(data, dict):
+            continue
+        state = str(data.get("state") or "")
+        if state != "running":
+            continue
+        runners[str(name)] = data
+    return runners
+
+
 def resume_role_tmux_commands(
     tmux_bin: str,
     codex_bin: str,
@@ -512,6 +655,94 @@ def resume_role_tmux_commands(
     return commands
 
 
+def resume_watchdog_tmux_commands(
+    tmux_bin: str,
+    session: str,
+    config_path: Path,
+    project_root: Path,
+    watchdogs: dict[str, dict[str, Any]],
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for name, data in watchdogs.items():
+        commands.append(
+            watchdog_new_window_command(
+                tmux_bin,
+                session,
+                config_path,
+                project_root,
+                name,
+                data,
+            )
+        )
+        commands.append([tmux_bin, "set-option", "-p", "-t", "<pane-id>", WATCHDOG_PANE_OPTION, name])
+        commands.append([tmux_bin, "select-pane", "-t", "<pane-id>", "-T", f"tt-watchdog-{name}"])
+    return commands
+
+
+def start_resumed_watchdog_runner(
+    tmux_bin: str,
+    session: str,
+    config_path: Path,
+    project_root: Path,
+    name: str,
+    data: dict[str, Any],
+) -> str:
+    command = watchdog_new_window_command(tmux_bin, session, config_path, project_root, name, data)
+    result = subprocess_run_lifecycle(command)
+    pane = result.stdout.strip()
+    if not pane:
+        raise LifecycleError(f"could not resume watchdog runner {name}: tmux did not return a pane id")
+    subprocess_run_lifecycle([tmux_bin, "set-option", "-p", "-t", pane, WATCHDOG_PANE_OPTION, name])
+    subprocess_run_lifecycle([tmux_bin, "select-pane", "-t", pane, "-T", f"tt-watchdog-{name}"])
+    return pane
+
+
+def watchdog_new_window_command(
+    tmux_bin: str,
+    session: str,
+    config_path: Path,
+    project_root: Path,
+    name: str,
+    data: dict[str, Any],
+) -> list[str]:
+    command = [
+        "tmux-team",
+        "--config",
+        str(config_path),
+        "watchdog",
+        "run",
+        "--name",
+        name,
+        "--interval",
+        format_seconds_duration(int(data["interval_seconds"])),
+        "--delivery",
+        str(data.get("delivery_method") or "report-only"),
+    ]
+    if data.get("scope_role"):
+        command.extend(["--role", str(data["scope_role"])])
+    if data.get("description"):
+        command.extend(["--description", str(data["description"])])
+    if data.get("goal"):
+        command.extend(["--goal", str(data["goal"])])
+    if data.get("notify_role"):
+        command.extend(["--notify-role", str(data["notify_role"])])
+    return [
+        tmux_bin,
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        session,
+        "-n",
+        f"tt-watchdog-{name}",
+        "-c",
+        str(project_root),
+        shlex.join(command),
+    ]
+
+
 def subprocess_run_lifecycle(command: list[str]) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode != 0:
@@ -533,6 +764,26 @@ def inspect_role_targets(config: TeamConfig, tmux_bin: str, *, dry_run: bool) ->
         else:
             target = infer_tmux_target(pane)
         targets[role_name] = target
+    return targets
+
+
+def inspect_watchdog_targets(
+    store: Store,
+    conn: sqlite3.Connection,
+    tmux_bin: str,
+    *,
+    dry_run: bool,
+) -> dict[str, TmuxTarget]:
+    targets: dict[str, TmuxTarget] = {}
+    for row in store.list_watchdog_runners(conn):
+        if row["state"] not in ("running", "paused"):
+            continue
+        pane = row["pane"] or ""
+        if pane and not dry_run:
+            target = inspect_tmux_target(tmux_bin, pane)
+        else:
+            target = infer_tmux_target(pane)
+        targets[str(row["name"])] = target
     return targets
 
 
@@ -627,6 +878,7 @@ def infer_session_from_config(config: TeamConfig) -> str | None:
 
 def managed_window_targets(
     role_targets: dict[str, TmuxTarget],
+    watchdog_targets: dict[str, TmuxTarget],
     tmux_bin: str,
     session: str | None,
     *,
@@ -642,16 +894,39 @@ def managed_window_targets(
             raise LifecycleError(
                 f"refusing to manage {CONTROL_PLANE_WINDOW} window for role {role}; rerun with --force if intended"
             )
-        windows.setdefault(
+        entry = windows.setdefault(
             key,
             {
                 "target": value,
                 "window_id": target.window_id,
                 "window_name": target.window_name,
                 "roles": [],
+                "watchdogs": [],
                 "kind": "roles",
             },
-        )["roles"].append(role)
+        )
+        entry.setdefault("roles", []).append(role)
+
+    for name, target in watchdog_targets.items():
+        key, value = target_window_key(target, session)
+        if not key or not value:
+            continue
+        if target.window_name == CONTROL_PLANE_WINDOW and not force:
+            raise LifecycleError(
+                f"refusing to manage {CONTROL_PLANE_WINDOW} window for watchdog {name}; rerun with --force if intended"
+            )
+        entry = windows.setdefault(
+            key,
+            {
+                "target": value,
+                "window_id": target.window_id,
+                "window_name": target.window_name,
+                "roles": [],
+                "watchdogs": [],
+                "kind": "watchdog",
+            },
+        )
+        entry.setdefault("watchdogs", []).append(name)
 
     app_server = app_server_window_target(tmux_bin, session, dry_run=dry_run)
     if app_server is not None:
@@ -663,6 +938,7 @@ def managed_window_targets(
                 "window_id": value if value.startswith("@") else None,
                 "window_name": APP_SERVER_WINDOW,
                 "roles": [],
+                "watchdogs": [],
                 "kind": "app-server",
             },
         )
@@ -724,6 +1000,7 @@ def build_sleep_snapshot(
     conn: sqlite3.Connection,
     session: str | None,
     role_targets: dict[str, TmuxTarget],
+    watchdog_targets: dict[str, TmuxTarget],
     managed_windows: list[dict[str, Any]],
     commands: list[list[str]],
     kill_session: bool,
@@ -761,6 +1038,7 @@ def build_sleep_snapshot(
             },
         }
     operator = build_operator_snapshot(config, tmux_bin=tmux_bin, session=session, dry_run=dry_run)
+    watchdogs = build_watchdog_snapshot(store, conn, watchdog_targets)
 
     snapshot: dict[str, Any] = {
         "schema_version": SLEEP_SCHEMA_VERSION,
@@ -780,11 +1058,53 @@ def build_sleep_snapshot(
             "teardown_commands": commands,
         },
         "roles": roles,
+        "watchdogs": watchdogs,
         "pause_roles": pause_roles,
     }
     if operator:
         snapshot["operator"] = operator
     return snapshot
+
+
+def build_watchdog_snapshot(
+    store: Store,
+    conn: sqlite3.Connection,
+    watchdog_targets: dict[str, TmuxTarget],
+) -> dict[str, Any]:
+    watchdogs: dict[str, Any] = {}
+    for row in store.list_watchdog_runners(conn):
+        if row["state"] not in ("running", "paused"):
+            continue
+        target = watchdog_targets.get(str(row["name"])) or infer_tmux_target(row["pane"] or "")
+        watchdogs[str(row["name"])] = {
+            "state": row["state"],
+            "interval_seconds": int(row["interval_seconds"]),
+            "scope_role": row["scope_role"],
+            "description": row["description"],
+            "goal": row["goal"],
+            "notify_role": row["notify_role"],
+            "delivery_method": row["delivery_method"],
+            "pane": row["pane"],
+            "window": row["window"],
+            "process_id": row["process_id"],
+            "last_run_at": row["last_run_at"],
+            "next_run_at": row["next_run_at"],
+            "last_finding_count": row["last_finding_count"],
+            "last_finding_summary": row["last_finding_summary"],
+            "tmux": {
+                "target": target.target,
+                "session": target.session,
+                "window_id": target.window_id,
+                "window_name": target.window_name,
+                "pane_id": target.pane_id,
+                "pane_title": target.pane_title,
+                "pane_dead": target.pane_dead,
+                "current_command": target.current_command,
+                "live": target.live,
+                "details": target.details,
+            },
+        }
+    return watchdogs
 
 
 def build_operator_snapshot(
@@ -847,3 +1167,19 @@ def drop_none(value: Any) -> Any:
     if isinstance(value, list):
         return [drop_none(item) for item in value if item is not None]
     return value
+
+
+def optional_string(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def format_seconds_duration(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"

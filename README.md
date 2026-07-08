@@ -46,7 +46,7 @@ verifier: LIVE DEMO VERIFY OK
 - App-server wake turns instead of production `tmux send-keys`.
 - Per-role scratchpad memory for long-lived state and active-message todos for reset-safe substeps.
 - Operator timelines, obligations, watchdog runners, pane capture, and an optional Textual dashboard.
-- Sleep/resume snapshots so a team can stop and come back without losing role bindings.
+- Sleep/resume snapshots so a team can stop and come back without losing role bindings or watchdog runners.
 
 ## Install
 
@@ -172,7 +172,7 @@ For advanced Codex config, pass repeatable per-role `-c` overrides:
 tmux-team bootstrap --project-root . --role-codex-config collector='model_reasoning_effort="high"'
 ```
 
-Configured role Codex launch settings are recorded in `team.toml`, included in sleep snapshots, and replayed by `tmux-team resume`. Live TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown; verify it manually after recovery if it matters.
+Configured role Codex launch settings are recorded in `team.toml`, included in sleep snapshots, and replayed by `tmux-team resume`. Running watchdog runners are also reinstantiated on resume. If a host or tmux session ends before a graceful sleep, resume can build a recovery snapshot from `team.toml` and SQLite runtime state. Live TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown; verify it manually after recovery if it matters.
 
 The default agent layout is grouped:
 

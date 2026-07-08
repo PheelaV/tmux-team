@@ -213,9 +213,9 @@ Use native watchdog runners for repeated durable-state checks. Bare `tmux-team w
 
 For freeze, checkpoint, restart, or do-not-continue instructions, send an urgent message. App-server wakes include the highest-priority pending sender, priority, and summary; urgent wakes tell the role to stop at the current safe point and claim the urgent message before continuing other work. Keep the full instruction in the durable message body.
 
-Use `tmux-team sleep` to snapshot role/app-server bindings and tear down managed role/app-server windows. It leaves `tt-control` alive by default and pauses active/draining roles unless `--no-pause-roles` is used.
+Use `tmux-team sleep` to snapshot role/app-server bindings, running watchdog runners, operator metadata, and configured Codex launch settings before tearing down managed role, app-server, and watchdog windows. It leaves `tt-control` alive by default and pauses active/draining roles unless `--no-pause-roles` is used.
 
-Use `tmux-team resume` to restore a slept team from `.tmux-team/runtime/sleeps/latest.toml` or `--snapshot PATH`. Resume recreates managed role panes and launches each with `codex resume <saved-session>` so the Codex conversations captured in the sleep snapshot continue instead of starting fresh sessions. Use `--dry-run` first when inspecting a migration or remote host.
+Use `tmux-team resume` to restore a slept team from `.tmux-team/runtime/sleeps/latest.toml` or `--snapshot PATH`. Resume recreates managed role panes and launches each with `codex resume <saved-session>` so the Codex conversations captured in the sleep snapshot continue instead of starting fresh sessions, then reinstantiates running watchdog runner panes from durable runner state. If no graceful sleep snapshot exists, resume can build a recovery snapshot from `team.toml` and SQLite runtime state. Use `--dry-run` first when inspecting a migration or remote host.
 
 ## Safety Rules
 

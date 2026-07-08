@@ -2401,6 +2401,7 @@ def sleep_watchdog_interval(
     wake_on_pause: bool = True,
 ) -> bool:
     deadline = time.monotonic() + interval_seconds
+    started_interval = interval_seconds
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -2414,6 +2415,8 @@ def sleep_watchdog_interval(
             return True
         if row["state"] not in ("running", "paused"):
             return False
+        if int(row["interval_seconds"]) != started_interval:
+            return True
 
 
 def paused_watchdog_sleep_seconds(row, default_interval_seconds: int) -> int:
@@ -2583,6 +2586,7 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
     print(f"sleep_id: {result.sleep_id}")
     print(f"session: {result.session or '-'}")
     print(f"roles: {result.role_count}")
+    print(f"watchdogs: {result.watchdog_count}")
     if result.snapshot_path:
         print(f"snapshot: {result.snapshot_path}")
         print(f"latest: {result.latest_path}")
@@ -2592,8 +2596,10 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
     if result.managed_windows:
         for window in result.managed_windows:
             roles = ",".join(window.get("roles") or []) or "-"
+            watchdogs = ",".join(window.get("watchdogs") or []) or "-"
             print(
-                f"  {window['kind']}: target={window['target']} window={window.get('window_name') or '-'} roles={roles}"
+                f"  {window['kind']}: target={window['target']} window={window.get('window_name') or '-'} "
+                f"roles={roles} watchdogs={watchdogs}"
             )
     else:
         print("  none")
@@ -2639,6 +2645,7 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     print(f"session: {result.session}")
     print(f"endpoint: {result.endpoint}")
     print(f"roles: {result.role_count}")
+    print(f"watchdogs: {len(result.watchdog_panes)}")
     print(f"reactivated_roles: {'yes' if result.reactivated_roles else 'no'}")
     restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
     print(f"codex_launch_settings: restored={restored} fast=unknown")
@@ -2646,6 +2653,10 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     for role, thread_id in result.role_threads.items():
         pane = result.role_panes.get(role) or "-"
         print(f"  {role}: thread_id={thread_id} pane={pane}")
+    if result.watchdog_panes:
+        print("watchdog_panes:")
+        for name, pane in result.watchdog_panes.items():
+            print(f"  {name}: pane={pane or '-'}")
     print("commands:")
     if result.commands:
         for command in result.commands:
