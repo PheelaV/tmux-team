@@ -1993,6 +1993,9 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, service: TeamServic
                 actor=name,
             )
             if row["state"] == "paused":
+                # The runner may be paused between the preflight read above and
+                # the run write; the store returns the paused row without
+                # mutating it back to running.
                 print_watchdog_runner_header(row, stale_grace_seconds=0)
                 print("watchdog paused")
                 sys.stdout.flush()

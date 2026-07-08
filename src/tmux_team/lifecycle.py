@@ -346,6 +346,7 @@ def resume_team(
         if reactivate_roles:
             store.set_role_state(conn, role, "active", actor="resume")
     resumed_watchdog_panes: dict[str, str] = {}
+    watchdog_window_present = bool(watchdogs_data) and tmux_window_exists(tmux_bin, session, watchdog_window_name())
     for index, (name, data) in enumerate(watchdogs_data.items()):
         pane = start_resumed_watchdog_runner(
             tmux_bin,
@@ -354,8 +355,9 @@ def resume_team(
             config.project_root or Path.cwd(),
             name,
             data,
-            use_existing_window=index > 0,
+            use_existing_window=watchdog_window_present or index > 0,
         )
+        watchdog_window_present = True
         resumed_watchdog_panes[name] = pane
         store.upsert_watchdog_runner(
             conn,
@@ -738,6 +740,19 @@ def resumed_watchdog_new_window_command(
         notify_role=str(data["notify_role"]) if data.get("notify_role") else None,
         use_existing_window=use_existing_window,
     )
+
+
+def tmux_window_exists(tmux_bin: str, session: str, window_name: str) -> bool:
+    result = subprocess.run(
+        [tmux_bin, "list-windows", "-t", session, "-F", "#{window_name}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return any(line.strip() == window_name for line in result.stdout.splitlines())
 
 
 def subprocess_run_lifecycle(command: list[str]) -> subprocess.CompletedProcess[str]:

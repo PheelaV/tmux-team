@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -28,6 +29,7 @@ from tmux_team.dashboard import (
     role_shortcut_target,
     textual_pane_preview_body,
 )
+from tmux_team.lifecycle import start_resumed_watchdog_runner, tmux_window_exists
 from tmux_team.store import Store
 
 
@@ -1239,6 +1241,68 @@ exit 9
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertIn("watchdog runner default is already running; stop it first", err)
+
+    def test_schema_migrates_legacy_watches_to_obligations(self) -> None:
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        db_path = runtime / "team.sqlite"
+        legacy = sqlite3.connect(db_path)
+        try:
+            legacy.execute(
+                """
+                CREATE TABLE watches (
+                  id TEXT PRIMARY KEY,
+                  role TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  summary TEXT NOT NULL,
+                  current_summary TEXT NOT NULL,
+                  created_by TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  last_update_at TEXT NOT NULL,
+                  next_update_at TEXT,
+                  completed_at TEXT
+                )
+                """
+            )
+            legacy.execute(
+                """
+                INSERT INTO watches(
+                  id, role, status, summary, current_summary, created_by,
+                  created_at, updated_at, last_update_at, next_update_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "watch_legacy",
+                    "collector",
+                    "blocked",
+                    "legacy watch",
+                    "waiting for verifier",
+                    "operator",
+                    "2026-07-01T00:00:00+00:00",
+                    "2026-07-01T00:05:00+00:00",
+                    "2026-07-01T00:05:00+00:00",
+                    "2026-07-01T00:10:00+00:00",
+                    None,
+                ),
+            )
+            legacy.execute("PRAGMA user_version = 4")
+            legacy.commit()
+        finally:
+            legacy.close()
+
+        code, out, err = self.run_cli("obligation", "list", "--role", "collector", "--state", "blocked")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("watch_legacy role=collector state=blocked", out)
+        self.assertIn("next_update_at=2026-07-01T00:10:00+00:00", out)
+        self.assertIn("summary=waiting for verifier", out)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            count = conn.execute("SELECT COUNT(*) AS n FROM obligations WHERE id = 'watch_legacy'").fetchone()["n"]
+        self.assertEqual(count, 1)
 
     def test_dashboard_renders_watchdog_runner_state(self) -> None:
         code, out, err = self.run_cli(
@@ -3325,6 +3389,52 @@ can_notify = ["orchestrator"]
         self.assertIn("watchdog run --name live --interval 1m", out)
         self.assertIn("--delivery app-server-turn", out)
         self.assertIn("--notify-role orchestrator", out)
+
+    def test_resumed_watchdog_reuses_existing_watchdog_window(self) -> None:
+        fake_dir = self.root / "resume-watchdog-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "resume-watchdog-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "list-windows" ]; then
+  printf 'tt-control\\ntt-watchdogs\\n'
+  exit 0
+fi
+if [ "$1" = "split-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "new-window" ]; then
+  printf '%%8\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "select-layout" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        use_existing = tmux_window_exists(str(tmux), "tt", "tt-watchdogs")
+        pane = start_resumed_watchdog_runner(
+            str(tmux),
+            "tt",
+            self.config,
+            self.root,
+            "live",
+            {"interval_seconds": 60, "delivery_method": "report-only"},
+            use_existing_window=use_existing,
+        )
+
+        self.assertEqual(pane, "%9")
+        log = log_path.read_text(encoding="utf-8")
+        self.assertIn("list-windows -t tt -F #{window_name}", log)
+        self.assertIn("split-window -d -P -F #{pane_id} -t tt:tt-watchdogs", log)
+        self.assertNotIn("new-window", log)
 
     def test_resume_dry_run_recovers_from_runtime_state_without_sleep_snapshot(self) -> None:
         self.write_remote_tui_config()
