@@ -55,13 +55,13 @@ from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
 from .store import (
     CLAIMABLE_STATES,
-    ROLE_STATES,
-    STALE_CLAIMED_STATE,
-    TODO_STATES,
     OBLIGATION_ACTIVE_STATES,
     OBLIGATION_PAUSED_STATE,
     OBLIGATION_STATES,
     OBLIGATION_VISIBLE_STATES,
+    ROLE_STATES,
+    STALE_CLAIMED_STATE,
+    TODO_STATES,
     Store,
     normalize_priority,
     normalize_watchdog_runner_name,
@@ -136,7 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "notify":
                 return cmd_notify(args, service, conn)
             if args.command == "watchdog":
-                return cmd_watchdog(args, store, conn)
+                return cmd_watchdog(args, store, service, conn)
             if args.command == "sleep":
                 return cmd_sleep(args, store, conn, config)
             if args.command == "resume":
@@ -648,15 +648,22 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog_run.add_argument("--name", default="default", help="Runner name")
     watchdog_run.add_argument("--interval", default=DEFAULT_WATCHDOG_INTERVAL, help="Run interval such as 15m")
     watchdog_run.add_argument("--role", help="Limit checks to one role")
+    watchdog_run.add_argument("--description", help="Human-readable runner purpose")
+    watchdog_run.add_argument("--goal", help="Pressure goal or done condition")
+    watchdog_run.add_argument("--notify-role", help="Role to receive durable escalation messages")
     watchdog_run.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
     watchdog_run.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog_run.add_argument("--ack-warn-seconds", type=int, default=3600)
     watchdog_run.add_argument("--obligation-grace-seconds", type=int, default=0)
+    watchdog_run.add_argument("--once", action="store_true", help="Run once, record state, deliver pressure, and stop")
     watchdog_run.add_argument("--iterations", type=int, help="Exit after this many iterations; useful for tests")
     watchdog_start = watchdog_sub.add_parser("start", help="Start a watchdog runner in a visible tmux window")
     watchdog_start.add_argument("--name", default="default", help="Runner name")
     watchdog_start.add_argument("--interval", default=DEFAULT_WATCHDOG_INTERVAL, help="Run interval such as 15m")
     watchdog_start.add_argument("--role", help="Limit checks to one role")
+    watchdog_start.add_argument("--description", help="Human-readable runner purpose")
+    watchdog_start.add_argument("--goal", help="Pressure goal or done condition")
+    watchdog_start.add_argument("--notify-role", help="Role to receive durable escalation messages")
     watchdog_start.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
     watchdog_start.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog_start.add_argument("--ack-warn-seconds", type=int, default=3600)
@@ -677,6 +684,16 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
     watchdog_resume = watchdog_sub.add_parser("resume", help="Resume a paused watchdog runner")
     watchdog_resume.add_argument("name", nargs="?", default="default")
+    watchdog_update = watchdog_sub.add_parser("update", help="Update a running or paused watchdog runner")
+    watchdog_update.add_argument("name", nargs="?", default="default")
+    watchdog_update.add_argument("--interval", help="Run interval such as 15m")
+    watchdog_update.add_argument("--role", help="Limit checks to one role")
+    watchdog_update.add_argument("--team", action="store_true", help="Clear role scope and inspect the whole team")
+    watchdog_update.add_argument("--description", help="Human-readable runner purpose")
+    watchdog_update.add_argument("--goal", help="Pressure goal or done condition")
+    watchdog_update.add_argument("--notify-role", help="Role to receive durable escalation messages")
+    watchdog_update.add_argument("--no-notify-role", action="store_true", help="Clear the explicit notify target")
+    watchdog_update.add_argument("--delivery", help="Delivery method label or app-server-turn for pressure")
     watchdog_list = watchdog_sub.add_parser("list", help="List watchdog runner lifecycle state")
     watchdog_list.add_argument("--json", action="store_true")
     watchdog_list.add_argument("--limit", type=int, default=50)
@@ -1811,9 +1828,9 @@ def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
     return 1
 
 
-def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_watchdog(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
     if args.watchdog_command == "run":
-        return cmd_watchdog_run(args, store, conn)
+        return cmd_watchdog_run(args, store, service, conn)
     if args.watchdog_command == "start":
         return cmd_watchdog_start(args, store, conn)
     if args.watchdog_command == "stop":
@@ -1822,6 +1839,8 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
         return cmd_watchdog_pause(args, store, conn)
     if args.watchdog_command == "resume":
         return cmd_watchdog_resume(args, store, conn)
+    if args.watchdog_command == "update":
+        return cmd_watchdog_update(args, store, conn)
     if args.watchdog_command in ("list", "status"):
         return cmd_watchdog_list(args, store, conn)
 
@@ -1843,11 +1862,14 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
-def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_watchdog_run(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
     name = normalize_watchdog_runner_name(args.name)
     interval_seconds = parse_positive_duration_seconds(args.interval, "--interval")
+    if args.once and args.iterations is not None:
+        raise ValueError("watchdog run accepts either --once or --iterations, not both")
     if args.iterations is not None and args.iterations <= 0:
         raise ValueError("watchdog run --iterations must be greater than 0")
+    max_iterations = 1 if args.once else args.iterations
 
     pane = os.environ.get("TMUX_PANE")
     window = current_tmux_window()
@@ -1858,6 +1880,8 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
             try:
                 existing = store.get_watchdog_runner(conn, name)
             except KeyError:
+                existing = None
+            if existing is not None and existing["state"] in ("stopped", "failed"):
                 existing = None
             if existing is not None and existing["state"] == "paused":
                 print_watchdog_runner_header(existing, stale_grace_seconds=0)
@@ -1873,13 +1897,18 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
                     print(f"watchdog runner {name} stopped by durable state")
                     return 0
                 continue
-
+            effective_interval = int(existing["interval_seconds"]) if existing is not None else interval_seconds
+            effective_role = existing["scope_role"] if existing is not None else args.role
+            effective_description = existing["description"] if existing is not None else args.description
+            effective_goal = existing["goal"] if existing is not None else args.goal
+            effective_notify_role = existing["notify_role"] if existing is not None else args.notify_role
+            effective_delivery = existing["delivery_method"] if existing is not None else args.delivery
             now = datetime.now(UTC).replace(microsecond=0)
-            next_run = (now + timedelta(seconds=interval_seconds)).isoformat()
+            next_run = None if args.once else (now + timedelta(seconds=effective_interval)).isoformat()
             findings = watchdog_findings(
                 store,
                 conn,
-                role=args.role,
+                role=effective_role,
                 unacked_warn_seconds=args.unacked_warn_seconds,
                 ack_warn_seconds=args.ack_warn_seconds,
                 obligation_grace_seconds=args.obligation_grace_seconds,
@@ -1888,9 +1917,12 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
             row = store.record_watchdog_runner_run(
                 conn,
                 name=name,
-                interval_seconds=interval_seconds,
-                scope_role=args.role,
-                delivery_method=args.delivery,
+                interval_seconds=effective_interval,
+                scope_role=effective_role,
+                description=effective_description,
+                goal=effective_goal,
+                notify_role=effective_notify_role,
+                delivery_method=effective_delivery,
                 pane=pane,
                 window=window,
                 process_id=process_id,
@@ -1909,15 +1941,28 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
             if findings:
                 for finding in findings:
                     print(format_watchdog_finding(finding))
+                pressure = deliver_watchdog_pressure(
+                    service,
+                    conn,
+                    name=name,
+                    findings=findings,
+                    scope_role=effective_role,
+                    notify_role=effective_notify_role,
+                    delivery_method=effective_delivery,
+                    description=effective_description,
+                    goal=effective_goal,
+                )
+                if pressure:
+                    print(pressure)
             else:
                 print("watchdog ok")
             sys.stdout.flush()
 
             iteration += 1
-            if args.iterations is not None and iteration >= args.iterations:
+            if max_iterations is not None and iteration >= max_iterations:
                 store.stop_watchdog_runner(conn, name=name, actor=name)
                 return 0
-            if not sleep_watchdog_interval(store, conn, name=name, interval_seconds=interval_seconds):
+            if not sleep_watchdog_interval(store, conn, name=name, interval_seconds=effective_interval):
                 print(f"watchdog runner {name} stopped by durable state")
                 return 0
     except KeyboardInterrupt:
@@ -1929,11 +1974,148 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
         raise
 
 
+def deliver_watchdog_pressure(
+    service: TeamService,
+    conn,
+    *,
+    name: str,
+    findings: list[dict[str, str]],
+    scope_role: str | None,
+    notify_role: str | None,
+    delivery_method: str,
+    description: str | None,
+    goal: str | None,
+) -> str:
+    if not findings or not watchdog_delivery_enabled(delivery_method):
+        return ""
+    recipient = watchdog_notify_target(service.store, conn, scope_role=scope_role, notify_role=notify_role)
+    correlation_key = watchdog_pressure_correlation_key(name, scope_role, recipient)
+    duplicates = service.store.find_duplicate_messages(
+        conn,
+        recipient=recipient,
+        summary="",
+        correlation_key=correlation_key,
+    )
+    if duplicates:
+        duplicate = duplicates[0]
+        return (
+            f"pressure_skipped: active message {duplicate['id']} "
+            f"state={duplicate['state']} to={recipient} correlation_key={correlation_key}"
+        )
+
+    sender = f"watchdog:{name}"
+    summary = watchdog_pressure_summary(findings)
+    result = service.send_message(
+        conn,
+        sender=sender,
+        recipient=recipient,
+        priority=watchdog_pressure_priority(findings),
+        summary=summary,
+        body=watchdog_pressure_body(
+            name=name,
+            findings=findings,
+            scope_role=scope_role,
+            description=description,
+            goal=goal,
+        ),
+        force=True,
+        wake=True,
+        notify_method=delivery_method,
+        correlation_key=correlation_key,
+        actor=sender,
+    )
+    line = (
+        f"pressure: {result.message.id} state={result.message.state} "
+        f"to={recipient} priority={result.message.priority} correlation_key={correlation_key}"
+    )
+    if result.notification is not None:
+        if result.notification.ok:
+            line = f"{line} notify={result.notification.details}"
+        else:
+            line = f"{line} notify_failed={result.notification.details}"
+    return line
+
+
+def watchdog_delivery_enabled(delivery_method: str) -> bool:
+    return delivery_method.strip().lower() not in ("", "none", "report-only")
+
+
+def watchdog_notify_target(store: Store, conn, *, scope_role: str | None, notify_role: str | None) -> str:
+    if notify_role:
+        if store.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
+        return notify_role
+    if scope_role:
+        if store.get_role(conn, scope_role) is None:
+            raise KeyError(f"Unknown role: {scope_role}")
+        return scope_role
+    if store.get_role(conn, "orchestrator") is not None:
+        return "orchestrator"
+    roles = store.list_roles(conn)
+    if not roles:
+        raise KeyError("No roles configured for watchdog pressure delivery")
+    return str(roles[0]["name"])
+
+
+def watchdog_pressure_correlation_key(name: str, scope_role: str | None, recipient: str) -> str:
+    scope = scope_role or "team"
+    return f"watchdog:{name}:{scope}:to:{recipient}"
+
+
+def watchdog_pressure_priority(findings: list[dict[str, str]]) -> str:
+    return "urgent" if any(finding["severity"] == "urgent" for finding in findings) else "high"
+
+
+def watchdog_pressure_summary(findings: list[dict[str, str]]) -> str:
+    first = findings[0]
+    extra = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+    return f"Watchdog findings: {first['kind']} {first['role']} {first['ref']}{extra}"
+
+
+def watchdog_pressure_body(
+    *,
+    name: str,
+    findings: list[dict[str, str]],
+    scope_role: str | None,
+    description: str | None,
+    goal: str | None,
+) -> str:
+    lines = [
+        f"Watchdog: {name}",
+        f"Scope: {scope_role or 'team'}",
+    ]
+    if description:
+        lines.append(f"Description: {description}")
+    if goal:
+        lines.append(f"Goal: {goal}")
+    lines.extend(
+        [
+            "",
+            "Findings:",
+        ]
+    )
+    for finding in findings:
+        lines.append(
+            f"- severity={finding['severity']} kind={finding['kind']} "
+            f"role={finding['role']} ref={finding['ref']} summary={finding['summary']}"
+        )
+    lines.extend(
+        [
+            "",
+            "Reconcile these findings from durable state. Update or complete the relevant obligation/message, "
+            "or update/pause/stop this watchdog runner if the pressure is no longer useful.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
     name = normalize_watchdog_runner_name(args.name)
     interval_seconds = parse_positive_duration_seconds(args.interval, "--interval")
     if args.role and store.get_role(conn, args.role) is None:
         raise KeyError(f"Unknown role: {args.role}")
+    if args.notify_role and store.get_role(conn, args.notify_role) is None:
+        raise KeyError(f"Unknown notify role: {args.notify_role}")
     existing = store.list_watchdog_runners(conn, name=name)
     if existing and watchdog_runner_display_state(existing[0], stale_grace_seconds=60) == "running":
         raise ValueError(f"watchdog runner {name} is already running; stop it first")
@@ -1966,6 +2148,12 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
     )
     if args.role:
         command.extend(["--role", args.role])
+    if args.description:
+        command.extend(["--description", args.description])
+    if args.goal:
+        command.extend(["--goal", args.goal])
+    if args.notify_role:
+        command.extend(["--notify-role", args.notify_role])
     tmux_command = [
         args.tmux_bin,
         "new-window",
@@ -2000,6 +2188,9 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
             state="failed",
             interval_seconds=interval_seconds,
             scope_role=args.role,
+            description=args.description,
+            goal=args.goal,
+            notify_role=args.notify_role,
             delivery_method=args.delivery,
             window=f"{session}:{window_name}",
             actor=args.actor or "operator",
@@ -2018,6 +2209,9 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
         state="running",
         interval_seconds=interval_seconds,
         scope_role=args.role,
+        description=args.description,
+        goal=args.goal,
+        notify_role=args.notify_role,
         delivery_method=args.delivery,
         pane=pane,
         window=f"{session}:{window_name}",
@@ -2062,6 +2256,29 @@ def cmd_watchdog_pause(args: argparse.Namespace, store: Store, conn) -> int:
 
 def cmd_watchdog_resume(args: argparse.Namespace, store: Store, conn) -> int:
     row = store.resume_watchdog_runner(conn, name=args.name, actor=args.actor or "operator")
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
+    return 0
+
+
+def cmd_watchdog_update(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.role and args.team:
+        raise ValueError("watchdog update accepts either --role or --team, not both")
+    if args.notify_role and args.no_notify_role:
+        raise ValueError("watchdog update accepts either --notify-role or --no-notify-role, not both")
+    interval_seconds = parse_positive_duration_seconds(args.interval, "--interval") if args.interval else None
+    row = store.update_watchdog_runner(
+        conn,
+        name=args.name,
+        interval_seconds=interval_seconds,
+        scope_role=args.role,
+        clear_scope_role=args.team,
+        description=args.description,
+        goal=args.goal,
+        notify_role=args.notify_role,
+        clear_notify_role=args.no_notify_role,
+        delivery_method=args.delivery,
+        actor=args.actor or "operator",
+    )
     print(watchdog_runner_one_line(row, stale_grace_seconds=60))
     return 0
 
@@ -2167,6 +2384,9 @@ def print_watchdog_runner_header(row, *, stale_grace_seconds: int) -> None:
     print(f"state: {watchdog_runner_display_state(row, stale_grace_seconds)}")
     print(f"interval: {format_seconds_duration(int(row['interval_seconds']))}")
     print(f"scope: {row['scope_role'] or 'team'}")
+    print(f"description: {row['description'] or '-'}")
+    print(f"goal: {row['goal'] or '-'}")
+    print(f"notify role: {row['notify_role'] or '-'}")
     print(f"delivery: {row['delivery_method']}")
     print(f"last run: {row['last_run_at'] or '-'}")
     print(f"next run: {row['next_run_at'] or '-'}")
@@ -2187,6 +2407,7 @@ def watchdog_runner_one_line(row, *, stale_grace_seconds: int) -> str:
         f"state={state}",
         f"interval={format_seconds_duration(int(row['interval_seconds']))}",
         f"scope={row['scope_role'] or 'team'}",
+        f"notify_role={row['notify_role'] or '-'}",
         f"delivery={row['delivery_method']}",
         f"last_run={row['last_run_at'] or '-'}",
         f"next_run={row['next_run_at'] or '-'}",
@@ -2197,6 +2418,10 @@ def watchdog_runner_one_line(row, *, stale_grace_seconds: int) -> str:
         f"pid={row['process_id'] or '-'}",
         f"safe_to_close={watchdog_runner_safe_to_close(row, stale_grace_seconds)}",
     ]
+    if row["description"]:
+        parts.append(f"description={row['description']}")
+    if row["goal"]:
+        parts.append(f"goal={row['goal']}")
     if row["state"] == "paused":
         if row["review_at"]:
             parts.append(f"review_at={row['review_at']}")
@@ -2216,6 +2441,9 @@ def watchdog_runner_dict(row, stale_grace_seconds: int) -> dict[str, object]:
         "display_state": watchdog_runner_display_state(row, stale_grace_seconds),
         "interval_seconds": int(row["interval_seconds"]),
         "scope_role": row["scope_role"],
+        "description": row["description"],
+        "goal": row["goal"],
+        "notify_role": row["notify_role"],
         "delivery_method": row["delivery_method"],
         "pane": row["pane"],
         "window": row["window"],

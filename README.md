@@ -225,7 +225,9 @@ tmux-team todo recover --role collector
 tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team watchdog
-tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team watchdog start --name default --interval 15m --notify-role orchestrator --delivery app-server-turn
+tmux-team watchdog update default --interval 10m --goal "Escalate stale work"
 tmux-team watchdog pause default --reason "blocked by prerequisite" --review-in 30m
 tmux-team watchdog resume default
 tmux-team milestone add --team --kind routing --summary "Team started"

@@ -10,8 +10,8 @@ from typing import ClassVar
 from .config import TeamConfig, role_scratchpad_path
 from .store import (
     CLAIMABLE_STATES,
-    STALE_CLAIMED_STATE,
     OBLIGATION_VISIBLE_STATES,
+    STALE_CLAIMED_STATE,
     Store,
     inspect_tmux_pane,
     parse_utc_datetime,
@@ -187,6 +187,9 @@ def collect_dashboard_snapshot(
                 "state": display_state,
                 "interval": format_seconds_duration(int(runner["interval_seconds"])),
                 "scope": str(runner["scope_role"] or "team"),
+                "description": str(runner["description"] or "-"),
+                "goal": str(runner["goal"] or "-"),
+                "notify_role": str(runner["notify_role"] or "-"),
                 "delivery": str(runner["delivery_method"]),
                 "last_run": str(runner["last_run_at"] or "-"),
                 "next_run": str(runner["next_run_at"] or "-"),
@@ -608,10 +611,12 @@ def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, pro
             )
         lines.append(
             f"{safe_row_text(row, 'name', rich)} {state} interval={safe_row_text(row, 'interval', rich)} "
-            f"scope={safe_row_text(row, 'scope', rich)} delivery={safe_row_text(row, 'delivery', rich)} "
+            f"scope={safe_row_text(row, 'scope', rich)} notify={safe_row_text(row, 'notify_role', rich)} "
+            f"delivery={safe_row_text(row, 'delivery', rich)} "
             f"last={safe_row_text(row, 'last_run', rich)} next={safe_row_text(row, 'next_run', rich)} "
             f"findings={safe_row_text(row, 'findings', rich)} safe_to_close={safe_row_text(row, 'safe_to_close', rich)} "
-            f"pane={safe_row_text(row, 'pane', rich)}{pause} {safe_row_text(row, 'summary', rich)}"
+            f"pane={safe_row_text(row, 'pane', rich)}{pause} {safe_row_text(row, 'summary', rich)} "
+            f"goal={safe_row_text(row, 'goal', rich)}"
             f"{provenance_suffix(row, provenance)}"
         )
     if not seen:

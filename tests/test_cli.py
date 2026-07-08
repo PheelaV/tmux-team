@@ -812,6 +812,83 @@ runtime_dir = "{other_runtime}"
         self.assertIn("findings=1", out)
         self.assertIn("safe_to_close=yes", out)
 
+    def test_watchdog_once_delivery_creates_pressure_message_and_suppresses_duplicate(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--priority",
+            "urgent",
+            "--summary",
+            "collector pressure source",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        urgent_id = out.split()[0]
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "run",
+            "--name",
+            "pressure",
+            "--once",
+            "--role",
+            "collector",
+            "--notify-role",
+            "orchestrator",
+            "--delivery",
+            "app-server-turn",
+            "--description",
+            "Collector pressure loop",
+            "--goal",
+            "Escalate stale collector state",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=urgent_pending role=collector ref={urgent_id}", out)
+        self.assertIn("pressure: ", out)
+        self.assertIn("to=orchestrator priority=urgent", out)
+        self.assertIn("correlation_key=watchdog:pressure:collector:to:orchestrator", out)
+        self.assertIn("notify_failed=role has no app-server endpoint/thread binding", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("from=watchdog:pressure to=orchestrator priority=urgent", out)
+        self.assertIn("summary=Watchdog findings: urgent_pending collector", out)
+        self.assertIn("correlation_key=watchdog:pressure:collector:to:orchestrator", out)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "run",
+            "--name",
+            "pressure",
+            "--once",
+            "--role",
+            "collector",
+            "--notify-role",
+            "orchestrator",
+            "--delivery",
+            "app-server-turn",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("pressure_skipped: active message", out)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            count = conn.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE sender = 'watchdog:pressure'
+                  AND recipient = 'orchestrator'
+                  AND correlation_key = 'watchdog:pressure:collector:to:orchestrator'
+                """
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
     def test_watchdog_start_stop_and_status_use_visible_tmux_window(self) -> None:
         fake_dir = self.root / "watchdog-bin"
         fake_dir.mkdir()
@@ -867,6 +944,73 @@ exit 9
         self.assertIn("safe_to_close=yes", out)
         logged = log_path.read_text(encoding="utf-8")
         self.assertIn("kill-pane -t %9", logged)
+
+    def test_watchdog_update_changes_runner_config(self) -> None:
+        fake_dir = self.root / "watchdog-update-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "pressure",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+            "--description",
+            "old purpose",
+            "--goal",
+            "old goal",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "update",
+            "pressure",
+            "--interval",
+            "2m",
+            "--role",
+            "collector",
+            "--notify-role",
+            "collector",
+            "--delivery",
+            "app-server-turn",
+            "--description",
+            "collector pressure",
+            "--goal",
+            "escalate collector obligations",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("pressure state=running interval=2m scope=collector", out)
+        self.assertIn("notify_role=collector", out)
+        self.assertIn("delivery=app-server-turn", out)
+        self.assertIn("description=collector pressure", out)
+        self.assertIn("goal=escalate collector obligations", out)
+
+        code, out, err = self.run_cli("watchdog", "status", "pressure")
+        self.assertEqual(code, 0, err)
+        self.assertIn("pressure state=running interval=2m scope=collector", out)
+        self.assertIn("notify_role=collector", out)
 
     def test_watchdog_start_refuses_duplicate_running_runner(self) -> None:
         fake_dir = self.root / "watchdog-duplicate-bin"
@@ -1129,6 +1273,9 @@ exit 9
                 name="default",
                 interval_seconds=60,
                 scope_role=None,
+                description=None,
+                goal=None,
+                notify_role=None,
                 delivery_method="report-only",
                 pane="%9",
                 window="tt-test:tt-watchdog-default",

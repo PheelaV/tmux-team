@@ -181,12 +181,14 @@ tmux-team obligation complete <obligation-id> --role collector --summary "Run te
 
 Paused obligations keep their previous summary, store a pause reason and optional review time, and do not count as overdue. When the review time passes, `watchdog` reports `obligation_review_due`. Use `obligation complete --status cancelled` when the obligation is truly terminal.
 
-Use `watchdog` for built-in durable-state checks.
+Use `watchdog` for built-in durable-state checks and optional pressure delivery.
 
 ```bash
 tmux-team watchdog
 tmux-team watchdog --json
-tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team watchdog start --name default --interval 15m --description "Keep team state fresh" --goal "Escalate stale work" --notify-role orchestrator --delivery app-server-turn
+tmux-team watchdog update default --interval 10m --goal "Escalate stale collector obligations"
 tmux-team watchdog pause default --reason "Operator review" --review-in 30m
 tmux-team watchdog resume default
 tmux-team watchdog list
@@ -195,6 +197,8 @@ tmux-team watchdog stop default
 ```
 
 `watchdog start` opens a visible tmux window named `tt-watchdog-<name>` that runs `watchdog run`. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
+
+Bare `watchdog` is report-only. `watchdog run --once` and `watchdog start` create durable inbox pressure only when `--delivery` is not `report-only`. Use `--notify-role` to pick the escalation target; otherwise tmux-team uses the scoped `--role`, then `orchestrator`, then the first configured role. Duplicate pressure is suppressed while an active watchdog escalation with the same correlation key is still queued, notified, claimed, or acknowledged.
 
 Paused watchdog runners remain non-terminal, preserve the last finding summary, suppress repeated findings from that runner, and surface review-due reminders through single-shot `tmux-team watchdog`. Use `watchdog stop` when the runner should end.
 

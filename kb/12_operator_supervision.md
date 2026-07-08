@@ -108,12 +108,14 @@ Bare `tmux-team watchdog` remains a single-shot report. It reports:
 - overdue obligations;
 - review-due paused obligations and watchdog runners.
 
-It must not mutate message or obligation state, wake roles, or write milestones by default.
+Bare checks are report-only. Delivery-enabled runners may create one durable inbox escalation and wake the target role. They must not mutate existing message or obligation state, and they do not write milestones by default.
 
 Use native runners for repeated checks:
 
 ```bash
-tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team watchdog start --name default --interval 15m --description "Keep team state fresh" --goal "Escalate stale work" --notify-role orchestrator --delivery app-server-turn
+tmux-team watchdog update default --interval 10m --goal "Escalate stale collector obligations"
 tmux-team watchdog pause default --reason "operator review" --review-in 30m
 tmux-team watchdog resume default
 tmux-team watchdog list
@@ -123,7 +125,8 @@ tmux-team watchdog stop default
 Runner invariants:
 
 - runners are visible tmux infrastructure, not hidden background processes;
-- runner panes print their purpose, interval, scope, delivery label, last run, next run, last finding, and safe-close guidance;
+- runner panes print their purpose, interval, scope, delivery label, notify target, last run, next run, last finding, and safe-close guidance;
+- delivery-enabled runners create durable inbox pressure and suppress duplicate active escalation messages by correlation key;
 - paused runners do not emit repeated findings and keep the previous finding summary plus pause reason and review time;
 - runner state is durable in SQLite and appears in `status --verbose` and `dashboard`;
 - `pane list --all` marks runner panes with `infrastructure=watchdog`;

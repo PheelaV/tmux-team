@@ -17,7 +17,7 @@ Use this as agent-facing project memory. Human docs live in [../docs/index.md](.
 - Scratchpad memory and append-only milestones.
 - Obligations for long-running role-owned commitments.
 - `status --verbose`, dashboard snapshots/live TUI, pane listing, and pane capture/summary.
-- Single-shot watchdog checks and visible watchdog runners.
+- Single-shot watchdog checks, pressure delivery, and visible watchdog runners.
 - `tmux-team sleep` TOML snapshots and managed-window teardown.
 - First-pass role policy with permissive breakglass.
 - Project-local executable hooks through `TeamService`.

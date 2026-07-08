@@ -128,13 +128,15 @@ The orchestrator should avoid becoming a serial bottleneck for safe prep work.
 
 Watchdog checks are local supervision, not autonomous orchestration.
 
-- Bare `tmux-team watchdog` is a single-shot durable-state checker.
+- Bare `tmux-team watchdog` is a single-shot report-only durable-state checker.
+- Use `tmux-team watchdog run --once --delivery app-server-turn --notify-role <role>` for one-shot durable pressure.
 - Use `tmux-team watchdog start --name <name> --interval <duration>` for repeated checks.
+- Use `tmux-team watchdog update <name>` to change interval, goal, scope, delivery, or notify target.
 - Use `tmux-team watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown.
 - Watchdog runners must stay visible in tmux and self-describing in pane output.
 - Runner state must be inspected through `watchdog list`, `watchdog status`, `status --verbose`, `dashboard`, or `pane list --all`.
 - Do not confuse obligations with watchdog runners: obligations are role-owned commitments; watchdog runners are periodic checkers.
-- Watchdog checks do not wake roles, mutate inbox/obligation state, or write milestones by default.
+- Delivery-enabled watchdog runners may create durable inbox pressure and wake the target role. Bare checks do not wake roles. Watchdog checks must not mutate existing inbox/obligation state or write milestones by default.
 
 ## Milestone Log
 

@@ -219,10 +219,13 @@ Long-running monitoring work must not be hidden as an indefinitely acknowledged 
 Watchdog checks are local supervision, not autonomous orchestration.
 
 - `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, overdue obligations, and review-due paused obligations/runners.
-- Watchdog checks must not mutate message/obligation state, wake roles, or write milestones by default.
+- Bare watchdog checks are report-only. Delivery-enabled runners may create one durable inbox escalation and wake the target role; they must not mutate existing message/obligation state or write milestones.
 - Bare `tmux-team watchdog` remains a single-shot report command for debugging and scripts.
-- Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog pause`, `watchdog resume`, `watchdog stop`, `watchdog list`, and `watchdog status`.
+- Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog update`, `watchdog pause`, `watchdog resume`, `watchdog stop`, `watchdog list`, and `watchdog status`.
+- `watchdog run --once` may be used as a one-shot pressure/checker surface for scripts.
 - `watchdog start` must create visible tmux infrastructure, not a hidden background process.
+- Watchdog runners must carry inspectable description, goal, scope, delivery method, and notify target when configured.
+- Watchdog delivery must suppress duplicate escalation while a prior active watchdog message with the same correlation key is queued, notified, claimed, or acknowledged.
 - Paused watchdog runners must not emit repeated findings or wake roles while paused. They preserve the last finding summary plus pause reason, review time, paused timestamp, and actor. Use `watchdog stop` for terminal shutdown.
 - Watchdog runner panes must be self-describing: name, interval, scope, delivery label, last run, next run, last finding, backing pane, and safe-close guidance are visible in pane output.
 - Watchdog runner state is durable SQLite state and must appear in `status --verbose` and `dashboard`.

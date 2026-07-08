@@ -7,6 +7,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
 - Updated repo-local marketplace metadata to install the upcoming `v0.4.0` plugin tag.
 - Replaced the long-running supervision `watch` command surface with `obligation`, including optional `--goal` metadata and obligation labels in status/dashboard/docs.
+- Added watchdog pressure delivery: delivery-enabled `watchdog run --once` and watchdog runners create durable inbox escalation messages, wake the target role, and suppress duplicate active escalations by correlation key.
+- Added watchdog runner `--description`, `--goal`, `--notify-role`, one-shot `--once`, and `watchdog update` for interval/scope/delivery/target changes.
 - Added non-terminal pause/resume lifecycle commands for obligations and watchdog runners, with review-due findings in `tmux-team watchdog`.
 - Surfaced paused obligations/runners in `status --verbose`, `obligation list`, `watchdog list/status`, and `dashboard`.
 - Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, section jump keys, and a help overlay.
@@ -15,8 +17,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 Migration notes:
 
 - Replace `tmux-team watch ...` usage with `tmux-team obligation ...`. Old command names are not kept as compatibility aliases.
-- Existing `team.sqlite` stores migrate additively to schema version 8 when opened; old `watches` rows are copied into the new `obligations` table and new obligation ids use the `obligation_` prefix.
-- Existing `team.sqlite` stores migrate additively to schema version 7 when opened; pause reason, paused timestamp, paused actor, and review timestamp columns are added to watches and watchdog runners.
+- Existing `team.sqlite` stores migrate additively to schema version 9 when opened; old `watches` rows are copied into the new `obligations` table and new obligation ids use the `obligation_` prefix. Obligations and watchdog runners include pause/review metadata, and watchdog runners gain description, goal, and notify-role metadata.
+- Bare `tmux-team watchdog` remains report-only. Use `watchdog run --once --delivery app-server-turn --notify-role <role>` or `watchdog start ... --delivery app-server-turn --notify-role <role>` when you want durable inbox pressure.
 - Existing `milestones.jsonl` entries remain readable. New entries include `recorded_by`, `scope`, and `subject_roles`; legacy `role` remains as a single-subject compatibility field.
 
 ## 0.3.1 - 2026-07-04

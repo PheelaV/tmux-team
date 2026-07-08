@@ -26,7 +26,7 @@ OBLIGATION_STATES = OBLIGATION_VISIBLE_STATES + ("done", "failed", "cancelled")
 TODO_STATES = ("open", "done", "superseded")
 WATCHDOG_RUNNER_STATES = ("running", "paused", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -197,6 +197,9 @@ class Store:
               state TEXT NOT NULL,
               interval_seconds INTEGER NOT NULL,
               scope_role TEXT,
+              description TEXT,
+              goal TEXT,
+              notify_role TEXT,
               delivery_method TEXT NOT NULL,
               pane TEXT,
               window TEXT,
@@ -224,6 +227,8 @@ class Store:
         self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
         self._migrate_watches_to_obligations(conn)
         self._ensure_column(conn, "obligations", "goal", "TEXT")
+        for column in ("description", "goal", "notify_role"):
+            self._ensure_column(conn, "watchdog_runners", column, "TEXT")
         for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
             self._ensure_column(conn, "obligations", column, "TEXT")
             self._ensure_column(conn, "watchdog_runners", column, "TEXT")
@@ -1103,6 +1108,9 @@ class Store:
         state: str,
         interval_seconds: int,
         scope_role: str | None = None,
+        description: str | None = None,
+        goal: str | None = None,
+        notify_role: str | None = None,
         delivery_method: str = "report-only",
         pane: str | None = None,
         window: str | None = None,
@@ -1117,18 +1125,24 @@ class Store:
             raise ValueError("watchdog runner interval_seconds must be positive")
         if scope_role and self.get_role(conn, scope_role) is None:
             raise KeyError(f"Unknown role: {scope_role}")
+        if notify_role and self.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
         now = utc_now()
         conn.execute(
             """
             INSERT INTO watchdog_runners(
-              name, state, interval_seconds, scope_role, delivery_method, pane, window, process_id,
+              name, state, interval_seconds, scope_role, description, goal, notify_role,
+              delivery_method, pane, window, process_id,
               created_at, updated_at, next_run_at, last_error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             ON CONFLICT(name) DO UPDATE SET
               state = excluded.state,
               interval_seconds = excluded.interval_seconds,
               scope_role = excluded.scope_role,
+              description = excluded.description,
+              goal = excluded.goal,
+              notify_role = excluded.notify_role,
               delivery_method = excluded.delivery_method,
               pane = COALESCE(excluded.pane, watchdog_runners.pane),
               window = COALESCE(excluded.window, watchdog_runners.window),
@@ -1146,6 +1160,9 @@ class Store:
                 state,
                 interval_seconds,
                 empty_to_none(scope_role),
+                empty_to_none(description),
+                empty_to_none(goal),
+                empty_to_none(notify_role),
                 delivery_method,
                 empty_to_none(pane),
                 empty_to_none(window),
@@ -1164,6 +1181,9 @@ class Store:
                 "state": state,
                 "interval_seconds": interval_seconds,
                 "scope_role": empty_to_none(scope_role),
+                "description": empty_to_none(description),
+                "goal": empty_to_none(goal),
+                "notify_role": empty_to_none(notify_role),
                 "delivery_method": delivery_method,
                 "pane": empty_to_none(pane),
                 "window": empty_to_none(window),
@@ -1181,6 +1201,9 @@ class Store:
         name: str,
         interval_seconds: int,
         scope_role: str | None,
+        description: str | None,
+        goal: str | None,
+        notify_role: str | None,
         delivery_method: str,
         pane: str | None,
         window: str | None,
@@ -1199,19 +1222,25 @@ class Store:
             return existing
         if scope_role and self.get_role(conn, scope_role) is None:
             raise KeyError(f"Unknown role: {scope_role}")
+        if notify_role and self.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
         now = utc_now()
         conn.execute(
             """
             INSERT INTO watchdog_runners(
-              name, state, interval_seconds, scope_role, delivery_method, pane, window, process_id,
+              name, state, interval_seconds, scope_role, description, goal, notify_role,
+              delivery_method, pane, window, process_id,
               created_at, updated_at, last_run_at, next_run_at, last_finding_count,
               last_finding_summary, last_error
             )
-            VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             ON CONFLICT(name) DO UPDATE SET
               state = 'running',
               interval_seconds = excluded.interval_seconds,
               scope_role = excluded.scope_role,
+              description = excluded.description,
+              goal = excluded.goal,
+              notify_role = excluded.notify_role,
               delivery_method = excluded.delivery_method,
               pane = COALESCE(excluded.pane, watchdog_runners.pane),
               window = COALESCE(excluded.window, watchdog_runners.window),
@@ -1231,6 +1260,9 @@ class Store:
                 normalized_name,
                 interval_seconds,
                 empty_to_none(scope_role),
+                empty_to_none(description),
+                empty_to_none(goal),
+                empty_to_none(notify_role),
                 delivery_method,
                 empty_to_none(pane),
                 empty_to_none(window),
@@ -1250,6 +1282,9 @@ class Store:
             normalized_name,
             {
                 "scope_role": empty_to_none(scope_role),
+                "description": empty_to_none(description),
+                "goal": empty_to_none(goal),
+                "notify_role": empty_to_none(notify_role),
                 "finding_count": finding_count,
                 "finding_summary": finding_summary,
                 "last_run_at": last_run_at,
@@ -1258,6 +1293,81 @@ class Store:
         )
         conn.commit()
         return self.get_watchdog_runner(conn, normalized_name)
+
+    def update_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        interval_seconds: int | None = None,
+        scope_role: str | None = None,
+        clear_scope_role: bool = False,
+        description: str | None = None,
+        goal: str | None = None,
+        notify_role: str | None = None,
+        clear_notify_role: bool = False,
+        delivery_method: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = self.get_watchdog_runner(conn, normalized_name)
+        if interval_seconds is not None and interval_seconds <= 0:
+            raise ValueError("watchdog runner interval_seconds must be positive")
+        if scope_role and self.get_role(conn, scope_role) is None:
+            raise KeyError(f"Unknown role: {scope_role}")
+        if notify_role and self.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
+
+        next_scope_role = (
+            None if clear_scope_role else empty_to_none(scope_role) if scope_role is not None else row["scope_role"]
+        )
+        next_notify_role = (
+            None if clear_notify_role else empty_to_none(notify_role) if notify_role is not None else row["notify_role"]
+        )
+        next_interval = int(interval_seconds if interval_seconds is not None else row["interval_seconds"])
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET interval_seconds = ?,
+                scope_role = ?,
+                description = COALESCE(?, description),
+                goal = COALESCE(?, goal),
+                notify_role = ?,
+                delivery_method = COALESCE(?, delivery_method),
+                updated_at = ?
+            WHERE name = ? AND state NOT IN ('stopped', 'failed')
+            RETURNING *
+            """,
+            (
+                next_interval,
+                next_scope_role,
+                empty_to_none(description),
+                empty_to_none(goal),
+                next_notify_role,
+                empty_to_none(delivery_method),
+                now,
+                normalized_name,
+            ),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot update watchdog runner {normalized_name} in state {row['state']}")
+        self.record_event(
+            conn,
+            "watchdog.runner_updated",
+            actor,
+            normalized_name,
+            {
+                "interval_seconds": next_interval,
+                "scope_role": next_scope_role,
+                "description": empty_to_none(description),
+                "goal": empty_to_none(goal),
+                "notify_role": next_notify_role,
+                "delivery_method": empty_to_none(delivery_method),
+            },
+        )
+        conn.commit()
+        return updated
 
     def stop_watchdog_runner(
         self,
