@@ -1130,7 +1130,7 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "team.resume")
         return
 
-    if args.command == "operator":
+    if args.command == "operator" and args.operator_command == "bind":
         authorize(config, policy_context, "operator.metadata")
         return
 

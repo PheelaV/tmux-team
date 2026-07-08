@@ -130,6 +130,12 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
 
+    def test_operator_show_is_role_readable(self) -> None:
+        code, out, err = self.run_main("--config", str(self.config), "--actor", "orchestrator", "operator", "show")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator:", out)
+
     def test_role_env_defaults_inbox_role_and_sender(self) -> None:
         with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
             code, out, err = self.run_main(
