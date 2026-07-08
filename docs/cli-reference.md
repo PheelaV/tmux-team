@@ -263,6 +263,17 @@ tmux-team resume --snapshot .tmux-team/runtime/sleeps/<snapshot>.toml
 tmux-team resume --no-reactivate-roles
 ```
 
+Resume replays configured role Codex launch settings from the sleep snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `status --verbose`, `dashboard`, and `resume` report fast state as unknown.
+
+Record or inspect operator recovery metadata:
+
+```bash
+tmux-team operator show
+tmux-team operator bind --pane %0 --codex-thread-id <thread-id>
+```
+
+The `[operator]` table is metadata for the human/control pane. It is not a managed role and does not receive inbox work.
+
 ## Extensions
 
 Project-local extensions live under `.tmux-team/extensions/<name>/extension.toml`.

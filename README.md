@@ -172,6 +172,8 @@ For advanced Codex config, pass repeatable per-role `-c` overrides:
 tmux-team bootstrap --project-root . --role-codex-config collector='model_reasoning_effort="high"'
 ```
 
+Configured role Codex launch settings are recorded in `team.toml`, included in sleep snapshots, and replayed by `tmux-team resume`. Live TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown; verify it manually after recovery if it matters.
+
 The default agent layout is grouped:
 
 ```bash
@@ -234,6 +236,7 @@ tmux-team milestone add --team --kind routing --summary "Team started"
 tmux-team milestone list --today
 tmux-team sleep
 tmux-team resume
+tmux-team operator bind --pane %0 --codex-thread-id <thread-id>
 ```
 
 The important loop is durable and one-message-at-a-time:

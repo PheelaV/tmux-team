@@ -245,6 +245,7 @@ The config and runtime store are the source of truth.
 - Role worktrees also get a `.tmux-team/team.env` pointer back to the current team config, so commands from Codex tool shells can rediscover the team even when process env is not inherited.
 - `.tmux-team/team.env` may include `TMUX_TEAM_ROLE` only when exactly one role owns that worktree. Shared worktrees must stay config-only because a single role value would be ambiguous.
 - Tmux pane option `@tmux-team-role` is the pane-local role fallback when `TMUX_PANE` is available.
+- The optional `[operator]` table records control-pane recovery metadata such as `pane` and `codex_thread_id`. It is not a managed role and must not receive inbox work.
 - Explicit CLI flags override env, pointer-file discovery, and pane/cwd inference.
 - Spawned or respawned role panes must receive fresh process env, pointer files, pane labels, and pane options from the current config; do not use tmux session-global role env.
 - Skill availability is not enough for reset safety. A role that has lost context must recover the role contract from the startup prompt, skill/invariants files, scratchpad memory, and bound config before claiming new work.
@@ -255,11 +256,12 @@ If a role pane target changes, config must change with it.
 
 `tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
 
-- It snapshots role state, pane targets, tmux session/window/pane IDs, and app-server thread bindings before teardown.
+- It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, operator mapping metadata, and configured Codex launch settings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
 - It tears down managed role/app-server windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
-- Resume reads the latest or specified sleep snapshot, recreates the app-server/role panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids.
+- Resume reads the latest or specified sleep snapshot, recreates the app-server/role panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
+- Resume restores configured model, reasoning effort, profile, raw Codex config overrides, and YOLO mode when present. TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown and must be verified manually if important.
 - Resume must update config/runtime pane and app-server bindings after recreating panes.
 - Resume reactivates roles by default; use `--no-reactivate-roles` when the operator wants to inspect before accepting work.
 

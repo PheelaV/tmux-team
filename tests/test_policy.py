@@ -212,6 +212,14 @@ can_sleep = true
         with self.assertRaisesRegex(PolicyError, "unmanaged panes"):
             authorize(config, PolicyContext(actor="implementer"), "pane.list", all="true")
 
+    def test_operator_metadata_is_operator_only(self) -> None:
+        config = self.config()
+
+        authorize(config, PolicyContext(), "operator.metadata")
+
+        with self.assertRaisesRegex(PolicyError, "operator metadata"):
+            authorize(config, PolicyContext(actor="orchestrator"), "operator.metadata")
+
     def test_permissive_policy_mode_is_breakglass(self) -> None:
         config = self.config()
         context = PolicyContext(actor="implementer", mode="permissive")

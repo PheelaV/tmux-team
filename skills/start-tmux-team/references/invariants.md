@@ -9,6 +9,7 @@ The Codex session that invokes the skill is the operator control session.
 - Name the launcher/operator tmux window `tt-control`.
 - Do not treat `tt-control` as a managed role.
 - Do not route `tmux-team send` work to `tt-control` unless the operator explicitly adds it as a role.
+- Record operator recovery metadata in `[operator]` when available. `operator.pane` and `operator.codex_thread_id` help recovery, but they do not make the control pane a managed role.
 
 ## App Server
 
@@ -174,6 +175,6 @@ Autonomous role-to-role messaging requires role panes that can run the `tmux-tea
 
 ## Sleep
 
-Use `tmux-team sleep` to snapshot role state, pane targets, and app-server bindings before tearing down managed windows. Sleep must leave `tt-control` alive by default and pauses active/draining roles unless explicitly told not to.
+Use `tmux-team sleep` to snapshot role state, pane targets, app-server bindings, operator mapping metadata, and configured Codex launch settings before tearing down managed windows. Sleep must leave `tt-control` alive by default and pauses active/draining roles unless explicitly told not to.
 
-Use `tmux-team resume` to restore a slept team from the latest or specified sleep snapshot. Resume must recreate managed role panes with `codex resume <saved-session>`, update pane/app-server bindings, and reactivate roles by default unless the operator passes `--no-reactivate-roles`.
+Use `tmux-team resume` to restore a slept team from the latest or specified sleep snapshot. Resume must recreate managed role panes with `codex resume <saved-session>`, replay known model/reasoning/profile/config/YOLO launch settings, update pane/app-server bindings, and reactivate roles by default unless the operator passes `--no-reactivate-roles`. Treat TUI-only settings such as `/fast` as unknown unless Codex exposes them through explicit config.

@@ -109,6 +109,27 @@ runtime_dir = "{other_runtime}"
         self.assertIn("team: test-team", out)
         self.assertNotIn("other-team", out)
 
+    def test_operator_bind_updates_recovery_metadata(self) -> None:
+        code, out, err = self.run_cli(
+            "operator",
+            "bind",
+            "--pane",
+            "%0",
+            "--codex-thread-id",
+            "thread-operator",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
+        config = load_config(self.config)
+        self.assertEqual(config.operator.pane, "%0")
+        self.assertEqual(config.operator.codex_thread_id, "thread-operator")
+
+        code, out, err = self.run_cli("operator", "show")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
+
     def test_role_env_defaults_inbox_role_and_sender(self) -> None:
         with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
             code, out, err = self.run_main(
@@ -564,6 +585,7 @@ runtime_dir = "{other_runtime}"
         self.assertIn("Memory Excerpts [source=memory-excerpt prose]", out)
         self.assertIn("collector", out)
         self.assertIn("todos", out)
+        self.assertIn("launch=unknown fast=unknown", out)
         self.assertIn("collect dashboard evidence", out)
         self.assertIn("capture dashboard fixture", out)
         self.assertIn("monitor fixture", out)
@@ -2852,6 +2874,8 @@ can_notify = ["orchestrator"]
         self.assertIn('codex_profile = "collector-profile"', out)
         self.assertIn("codex_config = [", out)
         self.assertIn('"model_reasoning_effort=\\"high\\""', out)
+        self.assertIn("[operator]", out)
+        self.assertIn('pane = "tt-bootstrap-options:tt-control.0"', out)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_accepts_custom_role_memory(self) -> None:
@@ -3061,13 +3085,27 @@ can_notify = ["orchestrator"]
         latest = self.root / "runtime" / "sleeps" / "latest.toml"
         snapshot = tomllib.loads(latest.read_text(encoding="utf-8"))
         self.assertEqual(snapshot["tmux"]["session"], "tt")
+        self.assertEqual(snapshot["operator"]["pane"], "%0")
+        self.assertEqual(snapshot["operator"]["codex_thread_id"], "thread-operator")
         self.assertEqual(snapshot["roles"]["orchestrator"]["app_server"]["thread_id"], "thread-orch")
+        self.assertTrue(snapshot["roles"]["orchestrator"]["capabilities"]["codex_yolo"])
+        self.assertEqual(snapshot["roles"]["orchestrator"]["capabilities"]["codex_model"], "gpt-5.5")
         self.assertEqual(snapshot["roles"]["implementer"]["tmux"]["window_id"], "@3")
 
         code, out, err = self.run_cli("status")
         self.assertEqual(code, 0, err)
         self.assertIn("orchestrator: state=paused", out)
         self.assertIn("implementer: state=paused", out)
+
+    def test_status_verbose_shows_operator_and_codex_recovery_settings(self) -> None:
+        self.write_remote_tui_config()
+
+        code, out, err = self.run_cli("status", "--verbose")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
+        self.assertIn("codex: yolo=yes model=gpt-5.5 effort=xhigh fast=unknown", out)
+        self.assertIn("codex: profile=implementer-profile config_overrides=1 fast=unknown", out)
 
     def test_resume_dry_run_plans_codex_resume_from_sleep_snapshot(self) -> None:
         self.write_remote_tui_config()
@@ -3082,7 +3120,13 @@ can_notify = ["orchestrator"]
         self.assertIn("roles: 2", out)
         self.assertIn("orchestrator: thread_id=thread-orch", out)
         self.assertIn("implementer: thread_id=thread-impl", out)
+        self.assertIn("codex_launch_settings: restored=implementer,orchestrator fast=unknown", out)
         self.assertIn("codex resume", out)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", out)
+        self.assertIn("--model gpt-5.5", out)
+        self.assertIn('model_reasoning_effort="xhigh"', out)
+        self.assertIn("--profile implementer-profile", out)
+        self.assertIn('model_reasoning_effort="high"', out)
         self.assertIn("--remote ws://127.0.0.1:4500 thread-orch", out)
         self.assertIn("--remote ws://127.0.0.1:4500 thread-impl", out)
         self.assertIn("tmux new-window -t tt -n tt-agents", out)
@@ -3209,6 +3253,10 @@ exit 0
 name = "test-team"
 runtime_dir = "{runtime}"
 
+[operator]
+pane = "%0"
+codex_thread_id = "thread-operator"
+
 [roles.orchestrator]
 mode = "app_server_remote_tui"
 state = "active"
@@ -3217,6 +3265,9 @@ worktree = "{orchestrator}"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-orch"
+codex_yolo = true
+codex_model = "gpt-5.5"
+codex_reasoning_effort = "xhigh"
 
 [roles.implementer]
 mode = "app_server_remote_tui"
@@ -3226,6 +3277,8 @@ worktree = "{implementer}"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-impl"
+codex_profile = "implementer-profile"
+codex_config = ['model_reasoning_effort="high"']
 """,
             encoding="utf-8",
         )
@@ -3249,6 +3302,10 @@ project_root = "{self.root}"
 config_path = "{self.config}"
 runtime_dir = "{self.root / "runtime"}"
 
+[operator]
+pane = "%0"
+codex_thread_id = "thread-operator"
+
 [tmux]
 session = "tt"
 kill_session = false
@@ -3261,6 +3318,9 @@ worktree = "{orchestrator}"
 
 [roles.orchestrator.capabilities]
 notify_method = "app-server-turn"
+codex_yolo = true
+codex_model = "gpt-5.5"
+codex_reasoning_effort = "xhigh"
 
 [roles.orchestrator.app_server]
 endpoint = "ws://127.0.0.1:4500"
@@ -3286,6 +3346,8 @@ worktree = "{implementer}"
 
 [roles.implementer.capabilities]
 notify_method = "app-server-turn"
+codex_profile = "implementer-profile"
+codex_config = ['model_reasoning_effort="high"']
 
 [roles.implementer.app_server]
 endpoint = "ws://127.0.0.1:4500"

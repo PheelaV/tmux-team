@@ -134,6 +134,8 @@ Context recovery should use Codex `SessionStart` hooks, not longer wake prompts.
 
 Do not reread the full skill on ordinary app-server wakes when the current tmux-team role contract version and role loop are already loaded in context. Reread the skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
+When recovery fidelity matters, record operator metadata with `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>` if the operator thread id is known. `tmux-team sleep` snapshots operator metadata and configured role Codex launch settings; `tmux-team resume` replays known model, reasoning effort, profile, raw Codex config, and YOLO settings. Treat TUI-only state such as `/fast` as unknown unless Codex exposes it through explicit config.
+
 Scratchpad memory is mandatory role state. It preserves long-term goals across context compression, sleep/resume, and pane restarts. It is also an observability surface for the role itself, other agents, and the human overseer. Keep the most recent and important state at the top.
 
 Role loop on every startup or wake:

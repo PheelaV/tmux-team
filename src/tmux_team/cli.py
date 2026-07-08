@@ -26,6 +26,7 @@ from .bootstrap import (
     RoleLaunchOptions,
     bootstrap_team,
     default_session_name,
+    detect_current_tmux_pane_id,
     detect_current_tmux_session,
     free_local_endpoint,
     parse_roles,
@@ -37,10 +38,12 @@ from .config import (
     ROLE_ENV,
     RUNTIME_HOME_ENV,
     ConfigError,
+    OperatorConfig,
     load_config,
     role_scratchpad_path,
     runtime_dir_env,
     write_default_config,
+    write_operator_config,
 )
 from .dashboard import (
     DashboardDependencyError,
@@ -111,6 +114,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_status(args, store, conn)
             if args.command == "dashboard":
                 return cmd_dashboard(args, store, conn, config)
+            if args.command == "operator":
+                return cmd_operator(args, config)
             if args.command == "ext":
                 return cmd_ext(args, config)
 
@@ -240,6 +245,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--provenance", action="store_true", help="Show row-level dashboard source/confidence labels"
     )
     dashboard.add_argument("--tmux-bin", default="tmux")
+
+    operator = subparsers.add_parser("operator", help="Inspect or update operator recovery metadata")
+    operator_sub = operator.add_subparsers(dest="operator_command", required=True)
+    operator_bind = operator_sub.add_parser("bind", help="Record the operator/control pane metadata in team.toml")
+    operator_bind.add_argument("--pane", help="Operator tmux pane id/target; defaults to current tmux pane")
+    operator_bind.add_argument("--codex-thread-id", help="Operator Codex thread id, when known")
+    operator_bind.add_argument("--tmux-bin", default="tmux")
+    operator_sub.add_parser("show", help="Show operator recovery metadata")
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
@@ -1117,6 +1130,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "team.resume")
         return
 
+    if args.command == "operator":
+        authorize(config, policy_context, "operator.metadata")
+        return
+
     if args.command == "codex" and args.codex_command == "bind":
         authorize(config, policy_context, "codex.bind", role=args.role)
         return
@@ -1141,6 +1158,7 @@ def cmd_config(args: argparse.Namespace, config) -> int:
     print(f"config: {config.config_path or '(none)'}")
     print(f"project_root: {config.project_root}")
     print(f"runtime_dir: {config.runtime_dir}")
+    print(f"operator: {operator_one_line(config.operator)}")
     print("roles:")
     for role in sorted(config.roles.values(), key=lambda item: item.name):
         pane = role.pane or "-"
@@ -1153,6 +1171,8 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
     counts = store.active_counts(conn)
     print(f"team: {store.config.name}")
     print(f"runtime_dir: {store.runtime_dir}")
+    if args.verbose:
+        print(f"operator: {operator_one_line(store.config.operator)}")
     print("roles:")
     for role in store.list_roles(conn):
         role_counts = counts.get(role["name"], {})
@@ -1168,6 +1188,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
         if args.verbose:
+            print(f"    codex: {codex_settings_summary(role_capabilities(role))}")
             rows = store.list_active_messages(conn, role=role["name"], limit=args.active_limit)
             if not rows:
                 print("    active: none")
@@ -1196,6 +1217,63 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             for runner in runners:
                 print(f"  {watchdog_runner_one_line(runner, stale_grace_seconds=60)}")
     return 0
+
+
+def cmd_operator(args: argparse.Namespace, config) -> int:
+    if args.operator_command == "show":
+        print(f"operator: {operator_one_line(config.operator)}")
+        return 0
+    if args.operator_command == "bind":
+        if config.config_path is None:
+            raise ConfigError("operator bind requires a config file")
+        pane = args.pane or detect_current_tmux_pane_id(args.tmux_bin) or config.operator.pane
+        thread_id = args.codex_thread_id or config.operator.codex_thread_id
+        if not pane and not thread_id:
+            raise ValueError("operator bind needs --pane, --codex-thread-id, or a current tmux pane")
+        operator = OperatorConfig(
+            pane=pane,
+            codex_thread_id=thread_id,
+            capabilities=config.operator.capabilities,
+        )
+        write_operator_config(config.config_path, operator)
+        print(f"operator: {operator_one_line(operator)}")
+        return 0
+    return 2
+
+
+def operator_one_line(operator: OperatorConfig) -> str:
+    pane = operator.pane or "unknown"
+    thread = operator.codex_thread_id or "unknown"
+    return f"pane={pane} codex_thread_id={thread}"
+
+
+def role_capabilities(row) -> dict[str, object]:
+    try:
+        data = json.loads(row["capabilities_json"] or "{}")
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def codex_settings_summary(capabilities: dict[str, object]) -> str:
+    parts: list[str] = []
+    if capabilities.get("codex_yolo") is True:
+        parts.append("yolo=yes")
+    for key, label in (
+        ("codex_profile", "profile"),
+        ("codex_model", "model"),
+        ("codex_reasoning_effort", "effort"),
+    ):
+        value = capabilities.get(key)
+        if value:
+            parts.append(f"{label}={value}")
+    config_overrides = capabilities.get("codex_config")
+    if isinstance(config_overrides, list):
+        parts.append(f"config_overrides={len(config_overrides)}")
+    elif config_overrides:
+        parts.append("config_overrides=1")
+    launch = " ".join(parts) if parts else "launch=unknown"
+    return f"{launch} fast=unknown"
 
 
 def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
@@ -2562,6 +2640,8 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     print(f"endpoint: {result.endpoint}")
     print(f"roles: {result.role_count}")
     print(f"reactivated_roles: {'yes' if result.reactivated_roles else 'no'}")
+    restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
+    print(f"codex_launch_settings: restored={restored} fast=unknown")
     print("role_threads:")
     for role, thread_id in result.role_threads.items():
         pane = result.role_panes.get(role) or "-"

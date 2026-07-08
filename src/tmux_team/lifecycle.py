@@ -26,7 +26,7 @@ from .bootstrap import (
     write_role_env_files,
     write_team_config,
 )
-from .config import TeamConfig, load_config
+from .config import OperatorConfig, TeamConfig, load_config
 from .store import Store, utc_now
 
 APP_SERVER_WINDOW = "tt-app-server"
@@ -73,6 +73,7 @@ class ResumeResult:
     role_panes: dict[str, str]
     role_threads: dict[str, str]
     reactivated_roles: bool
+    restored_launch_roles: tuple[str, ...]
 
 
 def sleep_team(
@@ -116,6 +117,7 @@ def sleep_team(
         kill_session=kill_session,
         pause_roles=pause_roles,
         dry_run=dry_run,
+        tmux_bin=tmux_bin,
     )
 
     snapshot_path: Path | None = None
@@ -193,16 +195,20 @@ def resume_team(
     snapshot = tomllib.loads(snapshot_path.read_text(encoding="utf-8"))
     validate_sleep_snapshot(snapshot)
 
-    role_launch_options = role_launch_options or {}
+    explicit_role_launch_options = role_launch_options or {}
     roles_data = snapshot["roles"]
     roles = tuple(str(role) for role in roles_data)
     if not roles:
         raise LifecycleError("sleep snapshot has no roles")
-    unknown_launch_roles = set(role_launch_options or {}) - set(roles)
+    unknown_launch_roles = set(explicit_role_launch_options) - set(roles)
     if unknown_launch_roles:
         raise LifecycleError(
             f"Codex launch options specified for role(s) not in sleep snapshot: {', '.join(sorted(unknown_launch_roles))}"
         )
+    role_launch_options = merge_role_launch_options(
+        saved_role_launch_options(snapshot, config, roles),
+        explicit_role_launch_options,
+    )
     agent_layout = normalize_agent_layout(agent_layout)
     session = session or snapshot.get("tmux", {}).get("session") or config.name
     endpoint = endpoint or first_snapshot_endpoint(snapshot)
@@ -242,6 +248,7 @@ def resume_team(
             role_panes={role: binding.pane for role, binding in role_bindings.items()},
             role_threads={role: binding.thread_id for role, binding in role_bindings.items()},
             reactivated_roles=reactivate_roles,
+            restored_launch_roles=tuple(sorted(role for role, options in role_launch_options.items() if options)),
         )
 
     if start_app_server:
@@ -297,6 +304,7 @@ def resume_team(
         role_launch_options,
         role_scratchpads,
         force=True,
+        operator=operator_config_from_snapshot(snapshot, fallback=config.operator),
     )
     write_role_env_files(config.config_path, resumed_bindings)
 
@@ -324,6 +332,7 @@ def resume_team(
         role_panes={role: binding.pane for role, binding in resumed_bindings.items()},
         role_threads={role: binding.thread_id for role, binding in resumed_bindings.items()},
         reactivated_roles=reactivate_roles,
+        restored_launch_roles=tuple(sorted(role for role, options in role_launch_options.items() if options)),
     )
 
 
@@ -332,6 +341,94 @@ def validate_sleep_snapshot(snapshot: dict[str, Any]) -> None:
         raise LifecycleError(f"unsupported sleep snapshot schema_version: {snapshot.get('schema_version')}")
     if not isinstance(snapshot.get("roles"), dict):
         raise LifecycleError("sleep snapshot is missing roles")
+
+
+def saved_role_launch_options(
+    snapshot: dict[str, Any],
+    config: TeamConfig,
+    roles: tuple[str, ...],
+) -> dict[str, RoleLaunchOptions]:
+    options: dict[str, RoleLaunchOptions] = {}
+    for role in roles:
+        snapshot_capabilities = snapshot_role_capabilities(snapshot, role)
+        config_role = config.roles.get(role)
+        config_capabilities = config_role.capabilities if config_role is not None else {}
+        launch_options = role_launch_options_from_capabilities(config_capabilities | snapshot_capabilities)
+        if launch_options != RoleLaunchOptions():
+            options[role] = launch_options
+    return options
+
+
+def snapshot_role_capabilities(snapshot: dict[str, Any], role: str) -> dict[str, Any]:
+    role_data = snapshot.get("roles", {}).get(role)
+    if not isinstance(role_data, dict):
+        return {}
+    capabilities = role_data.get("capabilities")
+    return dict(capabilities) if isinstance(capabilities, dict) else {}
+
+
+def role_launch_options_from_capabilities(capabilities: dict[str, Any]) -> RoleLaunchOptions:
+    codex_config = capabilities.get("codex_config")
+    if isinstance(codex_config, (list, tuple)):
+        config_overrides = tuple(str(item) for item in codex_config if str(item))
+    elif codex_config:
+        config_overrides = (str(codex_config),)
+    else:
+        config_overrides = ()
+    return RoleLaunchOptions(
+        model=optional_capability(capabilities, "codex_model"),
+        reasoning_effort=optional_capability(capabilities, "codex_reasoning_effort"),
+        profile=optional_capability(capabilities, "codex_profile"),
+        config_overrides=config_overrides,
+        yolo=optional_bool_capability(capabilities, "codex_yolo"),
+    )
+
+
+def merge_role_launch_options(
+    saved: dict[str, RoleLaunchOptions],
+    explicit: dict[str, RoleLaunchOptions],
+) -> dict[str, RoleLaunchOptions]:
+    merged = dict(saved)
+    for role, override in explicit.items():
+        base = merged.get(role, RoleLaunchOptions())
+        merged[role] = RoleLaunchOptions(
+            model=override.model if override.model is not None else base.model,
+            reasoning_effort=override.reasoning_effort
+            if override.reasoning_effort is not None
+            else base.reasoning_effort,
+            profile=override.profile if override.profile is not None else base.profile,
+            config_overrides=override.config_overrides or base.config_overrides,
+            yolo=override.yolo if override.yolo is not None else base.yolo,
+        )
+    return {role: options for role, options in merged.items() if options != RoleLaunchOptions()}
+
+
+def optional_capability(capabilities: dict[str, Any], key: str) -> str | None:
+    value = capabilities.get(key)
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def optional_bool_capability(capabilities: dict[str, Any], key: str) -> bool | None:
+    value = capabilities.get(key)
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def operator_config_from_snapshot(snapshot: dict[str, Any], *, fallback: OperatorConfig) -> OperatorConfig:
+    operator_data = snapshot.get("operator")
+    if not isinstance(operator_data, dict):
+        return fallback
+    known_keys = {"pane", "codex_thread_id", "tmux"}
+    return OperatorConfig(
+        pane=str(operator_data["pane"]) if operator_data.get("pane") else fallback.pane,
+        codex_thread_id=str(operator_data["codex_thread_id"])
+        if operator_data.get("codex_thread_id")
+        else fallback.codex_thread_id,
+        capabilities={key: item for key, item in operator_data.items() if key not in known_keys},
+    )
 
 
 def first_snapshot_endpoint(snapshot: dict[str, Any]) -> str | None:
@@ -632,6 +729,7 @@ def build_sleep_snapshot(
     kill_session: bool,
     pause_roles: bool,
     dry_run: bool,
+    tmux_bin: str,
 ) -> dict[str, Any]:
     roles: dict[str, Any] = {}
     for role_name, role_config in config.roles.items():
@@ -662,8 +760,9 @@ def build_sleep_snapshot(
                 "details": target.details,
             },
         }
+    operator = build_operator_snapshot(config, tmux_bin=tmux_bin, session=session, dry_run=dry_run)
 
-    return {
+    snapshot: dict[str, Any] = {
         "schema_version": SLEEP_SCHEMA_VERSION,
         "sleep_id": sleep_id,
         "created_at": utc_now(),
@@ -683,6 +782,46 @@ def build_sleep_snapshot(
         "roles": roles,
         "pause_roles": pause_roles,
     }
+    if operator:
+        snapshot["operator"] = operator
+    return snapshot
+
+
+def build_operator_snapshot(
+    config: TeamConfig,
+    *,
+    tmux_bin: str,
+    session: str | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    target_value = config.operator.pane
+    if not target_value and session:
+        target_value = f"{session}:{CONTROL_PLANE_WINDOW}.0"
+    if not target_value and not config.operator.codex_thread_id and not config.operator.capabilities:
+        return {}
+    if target_value and not dry_run:
+        target = inspect_tmux_target(tmux_bin, target_value)
+    else:
+        target = infer_tmux_target(target_value or "")
+    pane = target.pane_id or target_value
+    data: dict[str, Any] = dict(config.operator.capabilities)
+    if pane:
+        data["pane"] = pane
+    if config.operator.codex_thread_id:
+        data["codex_thread_id"] = config.operator.codex_thread_id
+    data["tmux"] = {
+        "target": target.target,
+        "session": target.session,
+        "window_id": target.window_id,
+        "window_name": target.window_name,
+        "pane_id": target.pane_id,
+        "pane_title": target.pane_title,
+        "pane_dead": target.pane_dead,
+        "current_command": target.current_command,
+        "live": target.live,
+        "details": target.details,
+    }
+    return data
 
 
 def write_sleep_snapshot(runtime_dir: Path, sleep_id: str, snapshot: dict[str, Any]) -> tuple[Path, Path]:

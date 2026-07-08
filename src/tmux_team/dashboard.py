@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -90,6 +91,7 @@ def collect_dashboard_snapshot(
                 "completed": role_counts.get("completed", 0),
                 "open_todos": open_todos,
                 "active_summary": str(active_summary),
+                "codex_settings": codex_settings_summary(role_capabilities(role)),
             }
         )
 
@@ -243,7 +245,7 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool =
     lines.extend(["", "Roles [source=runtime-db]"])
     lines.extend(
         format_table(
-            ("role", "state", "pane", "pending", "claimed", "ack", "stale", "todos", "active"),
+            ("role", "state", "pane", "pending", "claimed", "ack", "stale", "todos", "codex", "active"),
             (
                 (
                     row_text(row, "name"),
@@ -254,6 +256,7 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool =
                     row_text(row, "acknowledged"),
                     row_text(row, "stale_claimed"),
                     row_text(row, "open_todos"),
+                    truncate(row_text(row, "codex_settings"), 32),
                     truncate(row_text(row, "active_summary"), 54),
                 )
                 for row in snapshot.roles
@@ -368,7 +371,7 @@ def run_textual_dashboard(
             table = self.query_one("#roles", DataTable)
             table.zebra_stripes = True
             table.cursor_type = "row"
-            table.add_columns("Role", "State", "Pane", "Pending", "Claimed", "Ack", "Stale", "Todos", "Active")
+            table.add_columns("Role", "State", "Pane", "Pending", "Claimed", "Ack", "Stale", "Todos", "Codex", "Active")
             self.refresh_dashboard()
             self.set_interval(refresh, self.refresh_dashboard)
 
@@ -461,6 +464,7 @@ def run_textual_dashboard(
                     row_text(row, "acknowledged"),
                     row_text(row, "stale_claimed"),
                     row_text(row, "open_todos"),
+                    truncate(row_text(row, "codex_settings"), 40),
                     truncate(row_text(row, "active_summary"), 64),
                 )
             if snapshot.roles:
@@ -830,6 +834,35 @@ def truncate(value: str, limit: int | None) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 3)].rstrip() + "..."
+
+
+def role_capabilities(row) -> dict[str, object]:
+    try:
+        data = json.loads(row["capabilities_json"] or "{}")
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def codex_settings_summary(capabilities: dict[str, object]) -> str:
+    parts: list[str] = []
+    if capabilities.get("codex_yolo") is True:
+        parts.append("yolo=yes")
+    for key, label in (
+        ("codex_profile", "profile"),
+        ("codex_model", "model"),
+        ("codex_reasoning_effort", "effort"),
+    ):
+        value = capabilities.get(key)
+        if value:
+            parts.append(f"{label}={value}")
+    config_overrides = capabilities.get("codex_config")
+    if isinstance(config_overrides, list):
+        parts.append(f"config_overrides={len(config_overrides)}")
+    elif config_overrides:
+        parts.append("config_overrides=1")
+    launch = " ".join(parts) if parts else "launch=unknown"
+    return f"{launch} fast=unknown"
 
 
 def row_text(row: dict[str, object], key: str) -> str:

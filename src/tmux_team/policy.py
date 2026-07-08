@@ -193,6 +193,9 @@ def authorize(config: TeamConfig, context: PolicyContext, action: str, **resourc
             return
         raise PolicyError(f"actor {actor!r} is not authorized to manage watchdog runners")
 
+    if action == "operator.metadata":
+        raise PolicyError(f"actor {actor!r} is not authorized to update operator metadata")
+
     if action == "role.state.change":
         if not policy.can_change_role_state:
             raise PolicyError(f"actor {actor!r} is not authorized to change role state")

@@ -38,6 +38,13 @@ class RoleConfig:
 
 
 @dataclass(frozen=True)
+class OperatorConfig:
+    pane: str | None = None
+    codex_thread_id: str | None = None
+    capabilities: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TeamConfig:
     name: str
     runtime_dir: Path
@@ -46,6 +53,7 @@ class TeamConfig:
     project_root: Path | None = None
     policy: TeamPolicy = field(default_factory=TeamPolicy)
     extensions: ExtensionSettings = field(default_factory=ExtensionSettings)
+    operator: OperatorConfig = field(default_factory=OperatorConfig)
 
 
 class ConfigError(RuntimeError):
@@ -82,6 +90,7 @@ def load_config(
             name="default",
             runtime_dir=runtime_dir,
             roles={},
+            operator=OperatorConfig(),
             config_path=None,
             project_root=project_root,
             policy=TeamPolicy(),
@@ -111,6 +120,7 @@ def load_config(
 
     runtime_value = runtime_dir_override or runtime_dir_env() or team_data.get("runtime_dir")
     runtime_dir = resolve_runtime_dir(project_root, runtime_value)
+    operator = parse_operator_config(data.get("operator"))
 
     roles: dict[str, RoleConfig] = {}
     for role_name, role_data in data.get("roles", {}).items():
@@ -138,6 +148,7 @@ def load_config(
         name=team_name,
         runtime_dir=runtime_dir,
         roles=roles,
+        operator=operator,
         config_path=path,
         project_root=project_root.resolve(),
         policy=team_policy,
@@ -169,6 +180,26 @@ def write_default_config(path: Path, name: str, runtime_dir: str | None) -> None
             },
         },
     }
+    path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+
+def write_operator_config(path: Path, operator: OperatorConfig) -> None:
+    path = path.expanduser().resolve()
+    if not path.exists():
+        raise ConfigError(f"Config file does not exist: {path}")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
+    operator_data: dict[str, Any] = dict(operator.capabilities)
+    if operator.pane:
+        operator_data["pane"] = operator.pane
+    if operator.codex_thread_id:
+        operator_data["codex_thread_id"] = operator.codex_thread_id
+    if operator_data:
+        data["operator"] = operator_data
+    else:
+        data.pop("operator", None)
     path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 
@@ -221,6 +252,19 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def parse_operator_config(value: Any) -> OperatorConfig:
+    if value is None:
+        return OperatorConfig()
+    if not isinstance(value, dict):
+        raise ConfigError("operator must be a TOML table")
+    known_keys = {"pane", "codex_thread_id"}
+    return OperatorConfig(
+        pane=_optional_str(value.get("pane")),
+        codex_thread_id=_optional_str(value.get("codex_thread_id")),
+        capabilities={key: item for key, item in value.items() if key not in known_keys},
+    )
 
 
 def parse_extension_settings(value: Any) -> ExtensionSettings:
