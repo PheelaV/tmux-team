@@ -80,7 +80,7 @@ Shared explicitly mapped role worktrees must be explicit with `--allow-shared-wo
 Each role has a scratchpad memory file declared in config.
 
 - Bootstrap creates missing scratchpads before role Codex panes start.
-- A newly spawned role receives a startup prompt to load the `start-tmux-team` skill, read invariants, read memory, then claim inbox work or park.
+- A newly spawned role receives a startup prompt to load the `start-tmux-team` skill, read memory, then claim inbox work or park. It reads invariants only when changing behavior, debugging delivery/layout/lifecycle/recovery, migrating a team, or resolving a state conflict.
 - Scratchpad memory preserves long-term goals across context compression, sleep/resume, and pane restarts.
 - Scratchpad memory is also an observability surface for the role, other agents, and the human overseer.
 - Keep the latest and most important state at the top.

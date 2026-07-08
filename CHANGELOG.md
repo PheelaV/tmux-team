@@ -22,6 +22,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, section jump keys, and a help overlay.
 - Added milestone subject classification with `recorded_by`, `scope`, `subject_roles`, `milestone add --subject-role/--team`, and matching list filters.
 - Clarified role guidance so material p2p completion notices must be reconciled upward to the orchestrator instead of terminating at an intermediate role.
+- Slimmed the `start-tmux-team` runtime skill and made `references/invariants.md` a conditional reference instead of mandatory ordinary-startup context.
 
 Migration notes:
 
@@ -32,6 +33,7 @@ Migration notes:
 - Existing sessions may add `[operator]` manually or with `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>`. Role `codex_model`, `codex_reasoning_effort`, `codex_profile`, `codex_config`, and `codex_yolo` values in `team.toml` are now included in sleep snapshots and replayed by `resume`; TUI-only state such as `/fast` remains unknown unless mapped through explicit Codex config.
 - Running watchdog runners are now part of lifecycle recovery. If a host or tmux session ends abruptly before `tmux-team sleep`, `tmux-team resume` can rebuild a recovery snapshot from current `team.toml` role bindings and SQLite watchdog runner rows, then restart the role panes and running watchdog panes.
 - Existing `milestones.jsonl` entries remain readable. New entries include `recorded_by`, `scope`, and `subject_roles`; legacy `role` remains as a single-subject compatibility field.
+- Update the installed plugin/skill after pulling this release. Ordinary role startup now loads the compact runtime skill and reads invariants only for behavior changes, lifecycle/delivery debugging, migration, or state-conflict resolution.
 
 ## 0.3.1 - 2026-07-04
 

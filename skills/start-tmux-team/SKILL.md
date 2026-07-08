@@ -5,11 +5,19 @@ description: Bootstrap and operate a pane-resident Codex agent team with tmux-te
 
 # Start Tmux Team
 
-## Workflow
+Use `tmux-team` as the control plane for visible Codex roles in tmux. The Codex session that invokes this skill is the operator control session. Do not manually paste role work into panes with `tmux send-keys`.
 
-Before starting a team, read `references/invariants.md`.
+## Reference Routing
 
-Before running `tmux-team`, verify the CLI exists:
+Use this file for ordinary bootstrap, role startup, and day-to-day operation.
+
+Read `references/invariants.md` when changing tmux-team behavior, debugging delivery/layout/lifecycle/recovery, migrating an existing team, or resolving a conflict between runtime state and expectations. Read `references/team-shapes.md` only for non-default role shapes.
+
+For full command details, use the repo docs: `docs/cli-reference.md`, `docs/receiving-and-hooks.md`, `docs/live-demo.md`, and `docs/invariants.md`.
+
+## Preflight
+
+Verify the CLI exists before running it:
 
 ```bash
 command -v tmux-team
@@ -25,29 +33,23 @@ or:
 pipx install git+https://github.com/PheelaV/tmux-team.git
 ```
 
-Use `tmux-team bootstrap` as the entry point. Do not manually type prompts into role panes with `tmux send-keys`.
+## Bootstrap
 
-The Codex session that invoked this skill is the operator control session. Bootstrap names its tmux window `tt-control`, keeps `tt-app-server` isolated, and uses a grouped `tt-agents` window by default. If the launcher is already inside tmux, bootstrap uses that tmux session by default.
-
-Default team shape:
-
-```text
-orchestrator, implementer, collector, trainer
-```
-
-If the user gives a goal, pass it with `--goal` for short text or `--goal-file` for longer text. If the user gives no team shape, use the default. Ask only when the target project root or goal is genuinely ambiguous.
-
-`--goal` and `--goal-file` are operator-to-orchestrator inputs only. They should describe the objective, boundaries, and success criteria. Do not write them as role runbooks; role-specific instructions belong in orchestrator-created inbox messages.
-
-## Start A Team
-
-From the target project root:
+Start from the target project root:
 
 ```bash
 tmux-team bootstrap --project-root . --goal "USER_GOAL"
 ```
 
-For an explicit team:
+Default roles:
+
+```text
+orchestrator, implementer, collector, trainer
+```
+
+Ask only when the project root, goal, or team shape is genuinely ambiguous. `--goal` and `--goal-file` are operator-to-orchestrator inputs only: objective, boundaries, and success criteria. Do not write them as role runbooks; the orchestrator decomposes work into role inbox messages.
+
+For explicit shape or layout:
 
 ```bash
 tmux-team bootstrap \
@@ -58,9 +60,9 @@ tmux-team bootstrap \
   --goal-file /path/to/goal.md
 ```
 
-Use `--agent-layout separate-windows` only when the user explicitly asks for one tmux window per role.
+Use `--agent-layout separate-windows` only when the operator wants one tmux window per role.
 
-If the user is migrating an existing multi-worktree setup, preserve role worktrees during bootstrap. Use generic role mapping like:
+For existing multi-worktree teams, preserve role worktrees:
 
 ```bash
 tmux-team bootstrap \
@@ -75,160 +77,122 @@ tmux-team bootstrap \
   --goal-file /path/to/goal.md
 ```
 
-If role exports or user instructions mention separate worktrees but no mapping is provided, stop and ask for the generic role-to-path mapping. Do not silently launch every role from `--project-root`.
+If user instructions or exports mention separate worktrees but no mapping is provided, stop and ask for the generic role-to-path mapping. Do not silently launch every role from `--project-root`.
 
-When roles must message or notify each other without operator approvals, use one of:
+For autonomous role-to-role messaging, use an explicit role execution policy:
 
 ```bash
 tmux-team bootstrap --project-root . --role-profile tmux-team-role
 tmux-team bootstrap --project-root . --role-yolo
 ```
 
-Prefer `--role-profile` when the user already has a suitable Codex profile. Use `--role-yolo` only when the operator accepts Codex allow-all mode for managed role panes. It passes `--dangerously-bypass-approvals-and-sandbox` to role TUIs only; the `tt-control` session remains separate.
+Prefer `--role-profile`. Use `--role-yolo` only when the operator accepts Codex allow-all/no-sandbox mode for managed role panes. It does not change the operator control session.
 
-What bootstrap does:
+Bootstrap creates or updates:
 
-- uses the current tmux session when launched inside tmux, or starts a tmux session if needed;
-- names the launcher/operator window `tt-control`;
-- starts a visible `tt-app-server` tmux window running `codex app-server`;
-- opens role panes in one tiled `tt-agents` window by default using `codex --cd <role-worktree> --remote ...`;
-- binds each role pane to the team config and role using process env, worktree pointer files, and tmux pane metadata;
-- creates one scratchpad memory file per role;
-- waits for each role TUI to create a loaded app-server thread;
-- writes `.tmux-team/team.toml` with app-server endpoint and discovered thread IDs;
-- queues the initial goal to `orchestrator` when a goal is provided;
-- wakes the orchestrator through app-server `turn/start`, not terminal input.
+- `tt-control` for the operator launcher, not a managed role;
+- `tt-app-server` for isolated `codex app-server` transport;
+- visible role panes in grouped `tt-agents` by default;
+- per-role Codex remote TUI sessions launched with `codex --cd <role-worktree> --remote ...`;
+- `.tmux-team/team.toml`, `team.sqlite`, pane metadata, env discovery files, and scratchpad memory;
+- the initial orchestrator inbox message and app-server wake when a goal is provided.
 
-## After Startup
-
-Report:
-
-- tmux session name;
-- app-server endpoint;
-- config path;
-- role thread IDs;
-- how to attach: `tmux attach -t <session>`.
-
-Use normal operations after startup:
+After startup, report the tmux session, config path, app-server endpoint, role thread IDs, and attach command:
 
 ```bash
-tmux-team status
+tmux attach -t <session>
+```
+
+## Operator Commands
+
+Use durable state first:
+
+```bash
+tmux-team status --verbose
 tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
-tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
-tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
+tmux-team inbox list --role orchestrator --verbose
 tmux-team pane capture collector --lines 120 --offset 40
-tmux-team watchdog
-tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team milestone list --today
+tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
 tmux-team watchdog start --name default --interval 15m --notify-role orchestrator --delivery app-server-turn
-tmux-team watchdog list
 tmux-team role pause trainer
-tmux-team role resume trainer
 tmux-team sleep
 tmux-team resume
 ```
 
-Inside spawned role panes, follow the role-specific commands shown in the startup prompt. They include explicit `--role <role>` because Codex tool shells do not always inherit pane-local env, and shared worktrees are ambiguous. Short commands such as `tmux-team memory show` and `tmux-team inbox next` are fine only when role discovery works. Use explicit `--config` as an override from the control plane or scripts.
+Inside managed role panes, prefer short commands such as `tmux-team memory show` and `tmux-team inbox next` when role discovery works. Use explicit `--role <role>` or `--config <path>` when running from scripts, shared worktrees, or uncertain shells.
 
-Context recovery should use Codex `SessionStart` hooks, not longer wake prompts. Configure the hook for `startup|resume|clear|compact` and have it print `tmux-team codex session-context`. That output is the same operating contract as the initial role startup prompt, not a new task; it restores role, config, scratchpad, pending count, contract version, and the role loop after context reset or compaction.
+## Role Runtime Contract
 
-Do not reread the full skill on ordinary app-server wakes when the current tmux-team role contract version and role loop are already loaded in context. Reread the skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
+Each spawned role must have this skill available in its active `CODEX_HOME`. The role startup prompt loads the skill, reads scratchpad memory, then claims inbox work or parks.
 
-When recovery fidelity matters, record operator metadata with `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>` if the operator thread id is known. `tmux-team sleep` snapshots operator metadata and configured role Codex launch settings; `tmux-team resume` replays known model, reasoning effort, profile, raw Codex config, and YOLO settings. Treat TUI-only state such as `/fast` as unknown unless Codex exposes it through explicit config.
+Use Codex `SessionStart` hooks for `startup|resume|clear|compact` recovery. The hook should print `tmux-team codex session-context`; that output restores the role, config, scratchpad path, pending count, contract version, and loop. It is not a task body.
 
-Scratchpad memory is mandatory role state. It preserves long-term goals across context compression, sleep/resume, and pane restarts. It is also an observability surface for the role itself, other agents, and the human overseer. Keep the most recent and important state at the top.
+Do not reread the full skill on ordinary app-server wakes when the role contract and loop are already loaded. Reread on first startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
-Role loop on every startup or wake:
+App-server wakes are blunt interrupts. They say durable inbox work exists; the task body must be claimed from SQLite inbox state.
 
-1. Confirm the tmux-team role contract is loaded; use `tmux-team codex session-context --role <role>` after context reset instead of rereading the full skill on every ordinary wake.
-2. Run `tmux-team memory show --role <role>` unless the startup prompt or environment makes short commands reliable.
-3. Run `tmux-team inbox next --role <role>` unless the startup prompt or environment makes short commands reliable.
-4. If no message exists, park. Do not append routine "still idle" memory.
-5. If a message exists, ack it.
-6. Compare message instructions against scratchpad boundaries. If they conflict, stop and ask the orchestrator.
-7. Use `tmux-team todo` for active-message substeps that should survive context reset while the message is active.
-8. Do the work.
-9. Before long work or completion, update memory only if durable state changed materially: active task, blocker, changed boundary, running job, stable input, owned artifact, final result, or next action. Use `tmux-team memory append --role <role> --body "<concise durable update>"` when role discovery is not guaranteed.
-10. Complete or supersede open todos, then complete the message with a concise result. Use `--summary` for the one-line result and `--body` or `--body-file` for detailed evidence when needed.
+Role loop on startup or wake:
 
-Todos are role-owned checklist state for the active inbox message. They are not assignments, scratchpad memory, milestones, or messages to other roles. Use them when a message has several execution steps, when the role is about to do work that could be interrupted, or when a context reset would otherwise lose the active subplan:
+1. Confirm the tmux-team role contract is loaded; after context reset, run `tmux-team codex session-context`.
+2. Run `tmux-team memory show` before claiming work.
+3. Run `tmux-team inbox next`.
+4. If no message exists, park without writing routine idle memory.
+5. Ack the claimed message.
+6. Compare message instructions with scratchpad boundaries; ask orchestrator on conflict.
+7. Use `tmux-team todo` for active-message substeps that should survive reset.
+8. Do the work from the role worktree.
+9. Before long work, completion, or parking, update memory only for material durable state changes.
+10. Complete or supersede open todos, then complete the inbox message with a concise result.
+11. Repeat `tmux-team inbox next` until no pending work remains.
+
+## Memory, Todos, And Milestones
+
+Scratchpad memory is mandatory durable role state. Keep the newest and most important state near the top. Use it for long-term goals, role boundaries, current task, blockers, running jobs, stable inputs, owned artifacts, and next action.
+
+Append memory only when the update is likely to matter after context reset, sleep/resume, or operator handoff. As a rule of thumb, append for active-task, blocker, boundary, long-running-job, or final-result changes; do not append routine startup, no-pending, "still waiting", command transcripts, temporary search output, or full report bodies.
+
+Use todos only for the active inbox message:
 
 ```bash
-tmux-team todo add --role <role> --message <message-id> "Run focused regression"
-tmux-team todo done --role <role> <todo-id>
-tmux-team todo supersede --role <role> <todo-id> "Run broader verification instead"
-tmux-team todo recover --role <role>
+tmux-team todo add --message <message-id> "Run focused regression"
+tmux-team todo done <todo-id>
+tmux-team todo supersede <todo-id> "Run broader verification instead"
+tmux-team todo recover
 ```
 
-If a todo is obsolete because the plan changed, supersede it instead of marking it done. `tmux-team inbox complete` refuses to finish a message while open todos remain unless the caller explicitly passes `--allow-open-todos`.
+`tmux-team inbox complete` refuses open todos unless `--allow-open-todos` is explicit. Supersede obsolete todos instead of marking undone work as done.
 
-Use this memory score before appending:
-
-- 3 points: active task changed, blocker appeared/resolved, boundary changed, long-running job started/stopped, final result changes next action.
-- 2 points: stable input changed, important artifact/report was produced, handoff decision was made.
-- 1 point: commit/dirty status changed, test result observed, minor status detail.
-- 0 points: repeated startup, no pending inbox, routine command output, transient search result, "still waiting" with no new fact.
-
-Append only when the score is 3 or higher, or when the orchestrator explicitly asks for a memory update. Combine low-score facts into the next high-value update instead of writing separate notes.
-
-Do not use scratchpad memory as a full chat log, command transcript, reasoning dump, temporary grep store, duplicate report body, routine startup/parking log, or place to append full replacement sections. Reports go in files; memory points to them and records the conclusion.
-
-Milestones are the broad operator timeline. The orchestrator should record concise milestones for team start, task routing, accepted evidence, blocker found/resolved, tests passing, stable commit approval, sleep/resume, and role resize:
+Milestones are the broad operator timeline. The operator/control plane and orchestrator record them by default; other roles report evidence through inbox completion. Record team start, task routing, accepted evidence, blockers found/resolved, tests passing, stable commit approval, sleep/resume, and role resize.
 
 ```bash
 tmux-team milestone add --kind result --summary "Targeted tests passed after implementer fix" --subject-role implementer --tag test
 tmux-team milestone add --kind routing --summary "Team started" --team
-tmux-team milestone list --today
-tmux-team milestone list --since -4h
 ```
 
-Milestones should separate writer from subject. Use `--subject-role ROLE` when the event is about one or more roles, and `--team` when it is team-wide. The writer is recorded separately as `recorded_by`.
+## Messaging And Supervision
 
-Do not use milestones as chat, scratchpad memory, task transport, or command transcripts. Use them for "what happened today?" and "what changed while I was away?" operator summaries.
+Complete delegated work with `tmux-team inbox complete ... --reply-to-sender` so the sender receives a normal durable completion notice. Do not use it for pure bookkeeping that would create reply loops.
 
-Non-orchestrator roles should not call `tmux-team milestone add` by default. They report evidence, blockers, and results by completing their inbox message back to the orchestrator. The orchestrator decides whether that result deserves a milestone.
+Material delegated results must not terminate at an intermediate non-orchestrator role. If a completion notice affects the team goal, stable commit, blocker state, external run state, or operator-visible result, send a concise upward report to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`.
 
-When completing delegated work, use `tmux-team inbox complete ... --reply-to-sender` so the original sender is woken through the normal message path. Do not use `--reply-to-sender` for pure acknowledgement/bookkeeping messages that would create reply loops. When dispatching fan-out work, still keep the message id printed by `tmux-team send`; it is the durable handle for status and audit.
+Use one stable `--correlation-key` per logical work thread across retries, follow-ups, and verification. Check `status --verbose` or `inbox list --verbose` before sending duplicate-looking work.
 
-Do not let material delegated results terminate at an intermediate role. If a non-orchestrator role receives a completion notice that affects the team goal, stable commit, blocker state, external run state, or operator-visible result, it must reconcile upward: send a concise message to `orchestrator` with the result and evidence reference, or complete the original orchestrator-owned task with `--reply-to-sender` if that task is still active. Local completion notices may be closed locally only when they are pure bookkeeping.
+Use `tmux-team broadcast` for the same checkpoint or instruction to multiple roles. It creates one durable message per recipient. Use either `--only` or `--exclude`, not both.
 
-Orchestrator unblock-first rule: when new operator or role information can unblock another role's safe setup work, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate. Prefer a gated prep message over waiting for local review or bookkeeping to finish:
+Use `tmux-team pane capture <role> --lines N --offset N` to inspect live pane output when memory and messages are insufficient. Pane capture is observation only; it is not proof of delivery, acknowledgement, or completion.
 
-```bash
-tmux-team send \
-  --to collector \
-  --priority high \
-  --summary "Prepare next run; launch gated on stable approval" \
-  --correlation-key next-run-prep \
-  --body "Start preflight/setup now. Do not launch until stable approval or explicit release arrives."
-```
+Use `tmux-team watchdog` for report-only durable-state checks. Use delivery-enabled `watchdog run --once` or `watchdog start` when findings should create durable inbox pressure and wake a role. Runners are visible panes in `tt-watchdogs`, not role agents; change them with `watchdog update/pause/resume/stop`.
 
-State the hold condition clearly, continue validation, then send an approve/cancel/update follow-up. Do not block downstream prep on redundant verification already supplied by a worker unless forwarding the handoff would cross a safety boundary.
-
-When dispatching multi-step work, choose one stable `--correlation-key` per logical work thread and reuse it for retries, follow-ups, and verification. Before sending a follow-up, check `tmux-team status --verbose` or `tmux-team inbox list --verbose` for existing active or completed work. Do not invent near-synonym keys for the same task; use `--allow-duplicate` only when redundant independent work is deliberate.
-
-Use `tmux-team broadcast` when the orchestrator needs to send the same checkpoint or instruction to several roles. Broadcast queues one normal message per recipient, so each role still has its own message id, ack, completion, and optional reply. Use either `--only` for a positive role filter or `--exclude` for a negative role filter; those switches are mutually exclusive. Do not treat broadcast as a shared task.
-
-Use `tmux-team pane capture <role> --lines N --offset N` for live supervision when memory and messages are not enough. `--lines` or `--limit` controls how much history to print; `--offset` pages back from the newest output. Pane capture lets the orchestrator or operator inspect recent visible pane output for progress, stuck commands, approval prompts, or intermediate test output. Pane capture is observation only; do not use it as proof of delivery or completion.
-
-Use native watchdog runners for repeated durable-state checks. Bare `tmux-team watchdog` is a single-shot report-only checker. Delivery-enabled `watchdog run --once` or `watchdog start` creates durable inbox pressure and wakes the configured `--notify-role` while suppressing duplicate active escalations by correlation key. `tmux-team watchdog start --name <name> --interval <duration>` opens or reuses the visible `tt-watchdogs` tmux window, gives each runner a titled pane such as `tt-watchdog-default`, records runner state in SQLite, and surfaces it through `watchdog list`, `status --verbose`, `dashboard`, and `pane list --all`. Use `watchdog update` to change interval, goal, scope, delivery, or notify target. Use `watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown. Do not treat watchdog runners as role agents or obligations.
-
-For freeze, checkpoint, restart, or do-not-continue instructions, send an urgent message. App-server wakes include the highest-priority pending sender, priority, and summary; urgent wakes tell the role to stop at the current safe point and claim the urgent message before continuing other work. Keep the full instruction in the durable message body.
-
-Use `tmux-team sleep` to snapshot role/app-server bindings, running watchdog runners, operator metadata, and configured Codex launch settings before tearing down managed role, app-server, and watchdog windows. It leaves `tt-control` alive by default and pauses active/draining roles unless `--no-pause-roles` is used.
-
-Use `tmux-team resume` to restore a slept team from `.tmux-team/runtime/sleeps/latest.toml` or `--snapshot PATH`. Resume recreates managed role panes and launches each with `codex resume <saved-session>` so the Codex conversations captured in the sleep snapshot continue instead of starting fresh sessions, then reinstantiates running watchdog runner panes from durable runner state. If no graceful sleep snapshot exists, resume can build a recovery snapshot from `team.toml` and SQLite runtime state. Use `--dry-run` first when inspecting a migration or remote host.
+Use `tmux-team sleep` to snapshot role/app-server bindings, operator metadata, running watchdogs, and configured Codex launch settings before tearing down managed role, app-server, and watchdog windows. Use `tmux-team resume` to restore from the latest snapshot or durable runtime state after abrupt shutdown. Treat TUI-only Codex state such as `/fast` as unknown unless explicit config records it.
 
 ## Safety Rules
 
-- Keep agents in tmux panes.
-- Keep `tt-control` and `tt-app-server` isolated from role-agent panes.
-- Use Codex app-server remote TUI for wake delivery.
-- Never use `tmux send-keys` for production wake.
-- For autonomous role-to-role messaging, launch role panes with a permissions profile or explicit `--role-yolo`.
-- Preserve user takeover: `tt-app-server` and role panes are visible tmux windows.
-- If bootstrap fails after creating partial tmux windows, report the exact failed command and current session name.
-
-## Team Shapes
-
-For non-default team shapes or role naming guidance, read `references/team-shapes.md`.
+- Keep agents in visible tmux panes.
+- Keep `tt-control`, `tt-app-server`, and role panes isolated by purpose.
+- Use app-server `turn/start` for production wake delivery.
+- Never use `tmux send-keys` as the production wake path.
+- Keep task bodies in the inbox, not wake prompts or scratchpads.
+- Preserve user takeover: role panes and infrastructure panes stay inspectable.
+- If bootstrap partially fails, report the failed command and current tmux session name.

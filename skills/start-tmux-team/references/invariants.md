@@ -1,6 +1,6 @@
 # Invariants
 
-Follow these constraints when starting or operating tmux-team.
+Follow these constraints when changing or debugging tmux-team behavior. Ordinary bootstrap, role startup, and inbox work should use `SKILL.md` first and read this file only when a deeper invariant is needed.
 
 ## Control Plane
 
