@@ -33,13 +33,15 @@ The scenario asks the orchestrator to exercise the main operating surfaces:
 
 - durable role dispatch with stable `--correlation-key` values;
 - completion replies back to the original sender;
-- `status --verbose`, `inbox list --verbose`, `pane list --all`, `pane capture --lines/--offset`, and `watchdog`;
+- operator recovery metadata plus configured role Codex launch settings;
+- `status --verbose`, `dashboard --once`, `inbox list --verbose`, `pane list --all`, `pane capture --lines/--offset`, and `watchdog`;
+- one-shot watchdog pressure delivery with `--delivery app-server-turn` and `--notify-role orchestrator`;
 - obligation start/update/complete state;
 - milestone recording by the orchestrator only;
 - stable commit approval and collector sync;
 - `broadcast --notice --only` and `broadcast --notice --exclude`.
 
-The verifier checks that the final target test passes in the collector worktree, the implementer produced a fix commit, the collector verified the approved stable commit in its own worktree, and the runtime database contains the expected messages, completion notices, notice broadcasts, a completed obligation, stable approval, obligation events, and milestones. It fails duplicate collector verification dispatches by requiring the exact expected correlation keys and message counts.
+The verifier checks that the final target test passes in the collector worktree, the implementer produced a fix commit, the collector verified the approved stable commit in its own worktree, operator metadata and role Codex launch settings are present, and the runtime database contains the expected messages, watchdog pressure escalation, completion notices, notice broadcasts, completed obligation state, stable approval, obligation/watchdog events, and milestones. It fails duplicate collector verification dispatches by requiring the exact expected correlation keys and message counts.
 
 Lifecycle features such as `sleep`, `resume`, and role resizing are covered by the local integration tests rather than this live bugfix scenario.
 
