@@ -2,7 +2,7 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
-## Unreleased
+## 0.4.0 - 2026-07-08
 
 - Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
 - Updated repo-local marketplace metadata to install the upcoming `v0.4.0` plugin tag.
