@@ -239,6 +239,8 @@ tmux-team resume
 tmux-team operator bind --pane %0 --codex-thread-id <thread-id>
 ```
 
+The optional live dashboard is optimized for an operator tmux split: work/supervision and context/history are separate pages, pane preview starts off by default, and local theme plus concise/verbose preferences are stored under `.tmux-team/runtime/dashboard_preferences.json`.
+
 The important loop is durable and one-message-at-a-time:
 
 ```text

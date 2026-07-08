@@ -26,8 +26,15 @@ from tmux_team.config import RoleConfig, TeamConfig, load_config
 from tmux_team.dashboard import (
     DashboardSnapshot,
     collect_dashboard_snapshot,
+    dashboard_codex_chips,
+    format_milestone_line,
+    load_dashboard_preferences,
+    memory_lines,
+    obligation_lines,
     role_shortcut_target,
+    save_dashboard_preferences,
     textual_pane_preview_body,
+    watchdog_lines,
 )
 from tmux_team.lifecycle import start_resumed_watchdog_runner, tmux_window_exists
 from tmux_team.store import Store
@@ -599,7 +606,7 @@ runtime_dir = "{other_runtime}"
         self.assertIn("Memory Excerpts [source=memory-excerpt prose]", out)
         self.assertIn("collector", out)
         self.assertIn("todos", out)
-        self.assertIn("launch=unknown fast=unknown", out)
+        self.assertNotIn("fast=unknown", out)
         self.assertIn("collect dashboard evidence", out)
         self.assertIn("capture dashboard fixture", out)
         self.assertIn("monitor fixture", out)
@@ -684,6 +691,108 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(role_shortcut_target(("collector", "orchestrator", "trainer"), 2), "orchestrator")
         self.assertIsNone(role_shortcut_target(("collector",), 2))
 
+    def test_dashboard_preferences_load_save_and_ignore_bad_files(self) -> None:
+        preferences = self.root / "runtime" / "dashboard_preferences.json"
+
+        save_dashboard_preferences(preferences, {"theme": "dracula", "verbosity": "verbose"})
+
+        self.assertEqual(load_dashboard_preferences(preferences), {"theme": "dracula", "verbosity": "verbose"})
+
+        preferences.write_text("{bad json", encoding="utf-8")
+        self.assertEqual(load_dashboard_preferences(preferences), {})
+
+        preferences.write_text('["dracula"]', encoding="utf-8")
+        self.assertEqual(load_dashboard_preferences(preferences), {})
+
+    def test_dashboard_codex_chips_show_known_structured_facts_only(self) -> None:
+        chips = dashboard_codex_chips(
+            {
+                "codex_yolo": True,
+                "codex_profile": "team-role",
+                "codex_model": "gpt-5.5",
+                "codex_reasoning_effort": "high",
+                "codex_config": ["sandbox=workspace-write", "approval=on-request"],
+                "codex_fast": "unknown",
+            }
+        )
+
+        self.assertEqual(chips, "yolo profile:team-role model:gpt-5.5 effort:high cfg:2")
+        self.assertNotIn("fast", chips)
+        self.assertEqual(dashboard_codex_chips({}), "-")
+
+    def test_dashboard_concise_rows_keep_key_state_without_full_detail(self) -> None:
+        obligation = {
+            "role": "collector",
+            "obligation_id": "obligation_1",
+            "state": "paused",
+            "summary": "collect evidence",
+            "updated": "2m",
+            "next_update": "2026-07-08T10:00:00+00:00",
+            "paused_reason": "waiting for review",
+            "review_at": "2026-07-08T11:00:00+00:00",
+            "overdue": False,
+            "review_due": False,
+        }
+        watchdog = {
+            "name": "collector-pressure",
+            "state": "running",
+            "interval": "1m",
+            "scope": "collector",
+            "notify_role": "orchestrator",
+            "delivery": "app-server-turn",
+            "last_run": "2026-07-08T09:00:00+00:00",
+            "next_run": "2026-07-08T09:01:00+00:00",
+            "findings": 0,
+            "summary": "healthy",
+            "safe_to_close": "no",
+            "pane": "%7",
+            "goal": "keep pressure on active work",
+        }
+
+        obligation_line = obligation_lines((obligation,), verbose=False)[0]
+        watchdog_line = watchdog_lines((watchdog,), verbose=False)[0]
+
+        self.assertIn(
+            "collector obligation_1 PAUSED review=2026-07-08T11:00:00+00:00 collect evidence", obligation_line
+        )
+        self.assertNotIn("updated=", obligation_line)
+        self.assertIn("collector-pressure running every=1m scope=collector", watchdog_line)
+        self.assertIn("notify=orchestrator", watchdog_line)
+        self.assertIn("next=2026-07-08T09:01:00+00:00", watchdog_line)
+        self.assertNotIn("delivery=", watchdog_line)
+        self.assertNotIn("goal=", watchdog_line)
+
+    def test_dashboard_memory_lines_include_scratchpad_mtime(self) -> None:
+        code, _out, err = self.run_cli("memory", "append", "--role", "collector", "--body", "Active task: timestamp")
+        self.assertEqual(code, 0, err)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
+
+        self.assertEqual(len(snapshot.memories), 1)
+        updated = str(snapshot.memories[0]["updated"])
+        self.assertRegex(updated, r"^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertIn(f"collector {updated}: Active task: timestamp", memory_lines(snapshot.memories)[0])
+
+    def test_dashboard_plain_milestone_lines_do_not_emit_rich_markup(self) -> None:
+        line = format_milestone_line(
+            {
+                "created_at": "2026-07-08T12:00:00+00:00",
+                "kind": "result",
+                "recorded_by": "orchestrator",
+                "scope": "team",
+                "summary": "tests passed",
+            }
+        )
+
+        self.assertEqual(
+            line,
+            "2026-07-08T12:00:00+00:00 [result] recorded_by=orchestrator subject=team tests passed",
+        )
+        self.assertNotIn("[green]", line)
+        self.assertNotIn("[bold", line)
+
     def test_textual_pane_preview_body_handles_enabled_previews(self) -> None:
         long_line = "long-" + ("x" * 180)
         snapshot = DashboardSnapshot(
@@ -716,10 +825,8 @@ runtime_dir = "{other_runtime}"
         lines = textual_pane_preview_body(snapshot, include_pane_preview=True)
 
         rendered = "\n".join(lines)
-        self.assertIn("role", lines[0])
-        self.assertIn("pane", lines[0])
-        self.assertIn("state", lines[0])
-        self.assertIn("tail", lines[0])
+        self.assertIn("collector %7", lines[0])
+        self.assertIn("cmd=codex dead=False copy=True", lines[0])
         self.assertIn("collector", rendered)
         self.assertIn("%7", rendered)
         self.assertIn("cmd=codex dead=False copy=True", rendered)

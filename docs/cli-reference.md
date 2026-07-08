@@ -63,7 +63,11 @@ tmux-team dashboard --refresh 2
 tmux-team dashboard --no-pane-preview
 ```
 
-Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. Role filtering scopes roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the role. The live dashboard supports `r` refresh, modal `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, and direct jumps such as `a` alerts, `t` roles, `o` obligations, `d` watchdogs, `m` milestones, and `p` panes. Sections are independently scrollable; the top alert panel shows recent pressure while the alert-history section keeps the longer bounded list. Use inbox, obligations, milestones, and memory commands to mutate durable state.
+Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. Role filtering scopes roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the role.
+
+The live dashboard has two pages. The work/supervision page shows active work, obligations, and watchdog runners. The context/history page shows milestones, memory excerpts, and alert history. Pane preview is off by default in live mode because the operator is already in tmux; toggle it from the dashboard when you need a full-width pane tail. The live dashboard stores local preferences such as theme and concise/verbose item mode in `.tmux-team/runtime/dashboard_preferences.json`.
+
+The live dashboard supports `r` refresh, modal `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, `[`/`]` page switching, `v` concise/verbose item mode, and direct jumps from the full `Ctrl-P` key menu. Sections are independently scrollable; the top alert panel shows recent pressure while the alert-history section keeps the longer bounded list. Use inbox, obligations, milestones, and memory commands to mutate durable state.
 
 ## Messages And Routing
 
@@ -265,7 +269,7 @@ tmux-team resume --snapshot .tmux-team/runtime/sleeps/<snapshot>.toml
 tmux-team resume --no-reactivate-roles
 ```
 
-Resume replays configured role Codex launch settings from the sleep or recovery snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. It also reinstantiates running watchdog runner panes from durable runner state. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `status --verbose`, `dashboard`, and `resume` report fast state as unknown.
+Resume replays configured role Codex launch settings from the sleep or recovery snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. It also reinstantiates running watchdog runner panes from durable runner state. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `resume` warns when they matter and the live dashboard omits them rather than showing a noisy unknown chip.
 
 Record or inspect operator recovery metadata:
 

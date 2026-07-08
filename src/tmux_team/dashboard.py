@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -8,12 +9,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from .config import TeamConfig, role_scratchpad_path
-from .display import (
-    codex_settings_summary,
-    format_seconds_duration,
-    role_capabilities,
-    watchdog_runner_display_state,
-)
+from .display import format_seconds_duration, role_capabilities, watchdog_runner_display_state
 from .store import (
     CLAIMABLE_STATES,
     OBLIGATION_VISIBLE_STATES,
@@ -47,8 +43,23 @@ class DashboardSnapshot:
     alerts: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class SemanticPalette:
+    section: str = "cyan"
+    label: str = "cyan"
+    role: str = "magenta"
+    identifier: str = "blue"
+    datetime: str = "green"
+    warning: str = "yellow"
+    error: str = "red"
+    success: str = "green"
+    text: str = "white"
+
+
+DEFAULT_SEMANTIC_PALETTE = SemanticPalette()
 ALERTS_RECENT_LIMIT = 5
 ALERTS_HISTORY_LIMIT = 50
+DASHBOARD_PREFERENCES_FILE = "dashboard_preferences.json"
 
 
 def collect_dashboard_snapshot(
@@ -90,6 +101,7 @@ def collect_dashboard_snapshot(
         active_summary = in_progress[0]["summary"] if in_progress else "-"
 
         open_todos = sum(todo_counts.values())
+        capabilities = role_capabilities(role)
         role_rows.append(
             {
                 "name": role_name,
@@ -106,7 +118,7 @@ def collect_dashboard_snapshot(
                 "completed": role_counts.get("completed", 0),
                 "open_todos": open_todos,
                 "active_summary": str(active_summary),
-                "codex_settings": codex_settings_summary(role_capabilities(role)),
+                "codex_settings": dashboard_codex_chips(capabilities),
             }
         )
 
@@ -172,6 +184,7 @@ def collect_dashboard_snapshot(
                 "role": role_name,
                 "source": "memory-excerpt",
                 "confidence": "operator-authored-prose",
+                "updated": file_updated_at(memory_path),
                 "excerpt": read_excerpt(memory_path, memory_chars) or "(missing or empty)",
             }
         )
@@ -282,6 +295,26 @@ def role_shortcut_target(visible_roles: Iterable[str], number: int | str) -> str
     return None
 
 
+def dashboard_codex_chips(capabilities: dict[str, object]) -> str:
+    chips: list[str] = []
+    if capabilities.get("codex_yolo") is True:
+        chips.append("yolo")
+    for key, label in (
+        ("codex_profile", "profile"),
+        ("codex_model", "model"),
+        ("codex_reasoning_effort", "effort"),
+    ):
+        value = capabilities.get(key)
+        if value:
+            chips.append(f"{label}:{value}")
+    config_overrides = capabilities.get("codex_config")
+    if isinstance(config_overrides, list) and config_overrides:
+        chips.append(f"cfg:{len(config_overrides)}")
+    elif config_overrides:
+        chips.append("cfg")
+    return " ".join(chips) if chips else "-"
+
+
 def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool = False) -> str:
     lines = [
         f"tmux-team dashboard  team={snapshot.team}  at={snapshot.collected_at}",
@@ -319,6 +352,21 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool =
     return "\n".join(lines).rstrip() + "\n"
 
 
+def load_dashboard_preferences(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_dashboard_preferences(path: Path, preferences: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(preferences, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
 def run_textual_dashboard(
     config: TeamConfig,
     *,
@@ -330,8 +378,10 @@ def run_textual_dashboard(
     provenance: bool = False,
 ) -> int:
     try:
+        from rich.text import Text
         from textual.app import App, ComposeResult
-        from textual.containers import Horizontal, VerticalScroll
+        from textual.binding import Binding
+        from textual.containers import Grid, Horizontal, VerticalScroll
         from textual.screen import ModalScreen
         from textual.widgets import DataTable, Footer, Header, Static
     except ImportError as exc:
@@ -340,6 +390,8 @@ def run_textual_dashboard(
             "git+https://github.com/PheelaV/tmux-team.git'` or `pipx install 'tmux-team[dashboard] @ "
             "git+https://github.com/PheelaV/tmux-team.git'`."
         ) from exc
+
+    preferences_path = config.runtime_dir / DASHBOARD_PREFERENCES_FILE
 
     class HelpScreen(ModalScreen[None]):
         CSS = """
@@ -367,23 +419,48 @@ def run_textual_dashboard(
             ("q", "quit", "Quit"),
             ("r", "refresh_now", "Refresh"),
             ("h", "toggle_help", "Help"),
-            ("tab", "focus_next", "Next"),
-            ("shift+tab", "focus_previous", "Previous"),
+            Binding("tab", "focus_next", "Next", show=False),
+            Binding("shift+tab", "focus_previous", "Previous", show=False),
             ("escape", "clear_filter", "Team"),
             ("f", "filter_focused_role", "Filter role"),
-            ("a", "show_section('alerts')", "Alerts"),
-            ("t", "show_section('roles')", "Roles"),
-            ("o", "show_section('obligations')", "Obligations"),
-            ("d", "show_section('watchdogs')", "Watchdogs"),
-            ("m", "show_section('milestones')", "Milestones"),
-            ("p", "show_section('panes')", "Panes"),
-        ] + [(str(number % 10), f"filter_role({number})", f"Role {number}") for number in range(1, 11)]
+            ("v", "toggle_verbosity", "Verbose"),
+            ("[", "previous_page", "Prev page"),
+            ("]", "next_page", "Next page"),
+            Binding("w", "show_page('supervision')", "Work page", show=False),
+            Binding("c", "show_page('records')", "Context page", show=False),
+            Binding("a", "show_section('alerts')", "Alerts", show=False),
+            Binding("t", "show_section('roles')", "Roles", show=False),
+            Binding("o", "show_section('obligations')", "Obligations", show=False),
+            Binding("d", "show_section('watchdogs')", "Watchdogs", show=False),
+            Binding("m", "show_section('milestones')", "Milestones", show=False),
+            Binding("p", "toggle_pane_preview", "Pane preview", show=False),
+        ] + [
+            Binding(str(number % 10), f"filter_role({number})", f"Role {number}", show=False) for number in range(1, 11)
+        ]
         CSS = """
         Screen { layout: vertical; }
         #top { height: 7; }
         #summary, #alerts-recent { width: 1fr; border: solid $primary; padding: 0 1; }
         DataTable { height: 10; border: solid $accent; }
-        .section-row { height: 1fr; }
+        #sections {
+            height: 1fr;
+            layout: grid;
+            grid-columns: 1fr 1fr;
+        }
+        #sections.supervision {
+            grid-size: 2 2;
+            grid-rows: 0.75fr 1.25fr;
+        }
+        #sections.records {
+            grid-size: 2 2;
+            grid-rows: 1fr 1fr;
+        }
+        #sections.records.preview-on {
+            grid-size: 2 3;
+            grid-rows: 0.9fr 0.9fr 1.1fr;
+        }
+        #active-scroll, #panes-scroll, #alerts-scroll { column-span: 2; }
+        .hidden { display: none; }
         .section-scroll {
             width: 1fr;
             height: 1fr;
@@ -392,6 +469,20 @@ def run_textual_dashboard(
             margin: 1 1 0 0;
         }
         .section-scroll:focus { border: heavy $accent; }
+        .narrow #top {
+            height: 12;
+            layout: vertical;
+        }
+        .narrow #summary, .narrow #alerts-recent {
+            width: 1fr;
+            height: 6;
+        }
+        .narrow #sections {
+            grid-size: 1;
+            grid-columns: 1fr;
+            grid-rows: 1fr;
+        }
+        .narrow #active-scroll, .narrow #panes-scroll, .narrow #alerts-scroll { column-span: 1; }
         """
 
         def compose(self) -> ComposeResult:
@@ -400,14 +491,11 @@ def run_textual_dashboard(
                 yield Static(id="summary")
                 yield Static(id="alerts-recent")
             yield DataTable(id="roles")
-            with Horizontal(id="section-row-1", classes="section-row"):
-                with VerticalScroll(id="alerts-scroll", classes="section-scroll"):
-                    yield Static(id="alerts-history")
+            with Grid(id="sections"):
                 with VerticalScroll(id="active-scroll", classes="section-scroll"):
                     yield Static(id="active")
                 with VerticalScroll(id="obligations-scroll", classes="section-scroll"):
                     yield Static(id="obligations")
-            with Horizontal(id="section-row-2", classes="section-row"):
                 with VerticalScroll(id="watchdogs-scroll", classes="section-scroll"):
                     yield Static(id="watchdogs")
                 with VerticalScroll(id="milestones-scroll", classes="section-scroll"):
@@ -416,12 +504,21 @@ def run_textual_dashboard(
                     yield Static(id="memory")
                 with VerticalScroll(id="panes-scroll", classes="section-scroll"):
                     yield Static(id="panes")
+                with VerticalScroll(id="alerts-scroll", classes="section-scroll"):
+                    yield Static(id="alerts-history")
             yield Footer()
 
         def on_mount(self) -> None:
+            self.preferences_path = preferences_path
+            self.saved_theme = self.theme
+            self.verbose_items = False
+            self.saved_verbosity = "concise"
+            self.load_dashboard_preferences()
             self.role_filter = role_filter
             self.role_order = tuple(config.roles)
             self.visible_roles = self.role_order
+            self.current_page = "supervision"
+            self.pane_preview_enabled = False
             self.section_targets = {
                 "alerts": "alerts-scroll",
                 "roles": "roles",
@@ -430,6 +527,8 @@ def run_textual_dashboard(
                 "milestones": "milestones-scroll",
                 "panes": "panes-scroll",
             }
+            self.update_responsive_layout()
+            self.update_page_visibility(reset_scroll=True)
             table = self.query_one("#roles", DataTable)
             table.zebra_stripes = True
             table.cursor_type = "row"
@@ -437,17 +536,50 @@ def run_textual_dashboard(
             self.refresh_dashboard()
             self.set_interval(refresh, self.refresh_dashboard)
 
+        def load_dashboard_preferences(self) -> None:
+            preferences = load_dashboard_preferences(self.preferences_path)
+            theme_name = str(preferences.get("theme") or "")
+            if theme_name and theme_name in self.available_themes:
+                self.theme = theme_name
+                self.saved_theme = theme_name
+            verbosity = str(preferences.get("verbosity") or "")
+            if verbosity in {"concise", "verbose"}:
+                self.verbose_items = verbosity == "verbose"
+                self.saved_verbosity = verbosity
+
+        def persist_dashboard_preferences(self) -> None:
+            verbosity = "verbose" if self.verbose_items else "concise"
+            if self.theme == self.saved_theme and verbosity == self.saved_verbosity:
+                return
+            save_dashboard_preferences(self.preferences_path, {"theme": self.theme, "verbosity": verbosity})
+            self.saved_theme = self.theme
+            self.saved_verbosity = verbosity
+
         def action_refresh_now(self) -> None:
             self.refresh_dashboard()
 
         def action_toggle_help(self) -> None:
             self.push_screen(HelpScreen())
 
+        def action_toggle_verbosity(self) -> None:
+            self.verbose_items = not self.verbose_items
+            self.refresh_dashboard()
+
         def action_clear_filter(self) -> None:
             self.role_filter = None
             self.refresh_dashboard()
 
         def action_show_section(self, section_id: str) -> None:
+            if section_id in {"active", "obligations", "watchdogs"}:
+                self.current_page = "supervision"
+            elif section_id in {"alerts", "milestones", "memory"}:
+                self.current_page = "records"
+            elif section_id == "panes":
+                self.current_page = "records"
+                self.pane_preview_enabled = True
+            self.update_page_visibility(reset_scroll=True)
+            if section_id == "panes":
+                self.refresh_dashboard()
             target_id = self.section_targets.get(section_id, f"{section_id}-scroll")
             try:
                 target = self.query_one(f"#{target_id}")
@@ -455,6 +587,26 @@ def run_textual_dashboard(
                 target.scroll_visible()
             except Exception:
                 pass
+
+        def action_show_page(self, page: str) -> None:
+            if page in {"supervision", "records"}:
+                self.current_page = page
+                self.update_page_visibility(reset_scroll=True)
+                self.refresh_dashboard()
+
+        def action_previous_page(self) -> None:
+            self.current_page = "supervision" if self.current_page == "records" else "records"
+            self.update_page_visibility(reset_scroll=True)
+            self.refresh_dashboard()
+
+        def action_next_page(self) -> None:
+            self.action_previous_page()
+
+        def action_toggle_pane_preview(self) -> None:
+            self.current_page = "records"
+            self.pane_preview_enabled = not self.pane_preview_enabled
+            self.update_page_visibility(reset_scroll=True)
+            self.refresh_dashboard()
 
         def action_filter_focused_role(self) -> None:
             table = self.query_one("#roles", DataTable)
@@ -469,32 +621,101 @@ def run_textual_dashboard(
                 self.role_filter = target
                 self.refresh_dashboard()
 
+        def on_resize(self, event) -> None:
+            self.update_responsive_layout()
+
+        def update_responsive_layout(self) -> None:
+            width = getattr(getattr(self, "screen", None), "size", None)
+            columns = getattr(width, "width", 0)
+            target = self.screen
+            if columns and columns < 118:
+                target.add_class("narrow")
+            else:
+                target.remove_class("narrow")
+
+        def update_page_visibility(self, *, reset_scroll: bool = False) -> None:
+            sections = self.query_one("#sections")
+            sections.set_class(self.current_page == "supervision", "supervision")
+            sections.set_class(self.current_page == "records", "records")
+            sections.set_class(self.current_page == "records" and self.pane_preview_enabled, "preview-on")
+            visibility = {
+                "active-scroll": self.current_page == "supervision",
+                "obligations-scroll": self.current_page == "supervision",
+                "watchdogs-scroll": self.current_page == "supervision",
+                "milestones-scroll": self.current_page == "records",
+                "memory-scroll": self.current_page == "records",
+                "alerts-scroll": self.current_page == "records",
+                "panes-scroll": self.current_page == "records" and self.pane_preview_enabled,
+            }
+            for widget_id, visible in visibility.items():
+                widget = self.query_one(f"#{widget_id}")
+                widget.set_class(not visible, "hidden")
+                if visible and reset_scroll:
+                    try:
+                        widget.scroll_home(animate=False, immediate=True)
+                    except Exception:
+                        pass
+
+        def resolve_semantic_palette(self) -> SemanticPalette:
+            theme = self.current_theme
+            variables = {**theme.to_color_system().generate(), **theme.variables}
+
+            def token(name: str, fallback: str) -> str:
+                value = variables.get(name) or variables.get(name.replace("_", "-")) or fallback
+                return str(value)
+
+            return SemanticPalette(
+                section=token("accent", "cyan"),
+                label=token("primary", "cyan"),
+                role=token("secondary", "magenta"),
+                identifier=token("accent", "blue"),
+                datetime=token("success", "green"),
+                warning=token("warning", "yellow"),
+                error=token("error", "red"),
+                success=token("success", "green"),
+                text=token("text", "white"),
+            )
+
         def refresh_dashboard(self) -> None:
+            self.persist_dashboard_preferences()
             store = Store(config)
             with store.connect() as conn:
                 snapshot = collect_dashboard_snapshot(
                     store,
                     conn,
                     role_filter=self.role_filter,
-                    include_pane_preview=include_pane_preview,
+                    include_pane_preview=include_pane_preview and self.pane_preview_enabled,
                     pane_lines=pane_line_count,
                     tmux_bin=tmux_bin,
                 )
-            self.query_one("#summary", Static).update(summary_panel(snapshot, refresh, self.role_filter))
-            self.query_one("#alerts-recent", Static).update(alerts_recent_panel(snapshot.alerts))
+            palette = self.resolve_semantic_palette()
+            self.update_page_visibility()
+            self.query_one("#summary", Static).update(
+                summary_panel(
+                    snapshot,
+                    refresh,
+                    self.role_filter,
+                    palette=palette,
+                    page=self.current_page,
+                    pane_preview_enabled=self.pane_preview_enabled,
+                    verbose_items=self.verbose_items,
+                )
+            )
+            self.query_one("#alerts-recent", Static).update(alerts_recent_panel(snapshot.alerts, palette=palette))
             self.query_one("#alerts-history", Static).update(
-                lines_panel(
-                    "Alert History [runtime-db/watchdog]",
-                    alert_lines(snapshot.alerts),
-                    rich=True,
-                    truncate_at=None,
+                section_panel(
+                    "Alert History",
+                    alert_lines(snapshot.alerts, palette=palette),
+                    palette=palette,
                 )
             )
             table = self.query_one("#roles", DataTable)
             cursor_row = getattr(table, "cursor_row", 0)
             table.clear(columns=False)
             self.visible_roles = tuple(row_text(row, "name") for row in snapshot.roles)
-            for row in role_table_rows(snapshot, codex_limit=40, active_limit=64):
+            for row in textual_role_table_rows(
+                snapshot, text_cls=Text, codex_limit=40, active_limit=64, palette=palette
+            ):
                 table.add_row(*row)
             if snapshot.roles:
                 try:
@@ -503,41 +724,64 @@ def run_textual_dashboard(
                     pass
             self.query_one("#active", Static).update(
                 section_panel(
-                    "Active Work [runtime-db + todo]",
-                    active_lines(snapshot.active_messages, rich=True, provenance=provenance),
+                    "Active Work",
+                    active_lines(snapshot.active_messages, rich=True, provenance=provenance, palette=palette),
+                    palette=palette,
                 )
             )
             self.query_one("#obligations", Static).update(
                 section_panel(
-                    "Obligations [runtime-db]",
-                    obligation_lines(snapshot.obligations, rich=True, provenance=provenance),
+                    "Obligations",
+                    obligation_lines(
+                        snapshot.obligations,
+                        rich=True,
+                        provenance=provenance,
+                        palette=palette,
+                        verbose=self.verbose_items,
+                    ),
+                    palette=palette,
                 )
             )
             self.query_one("#watchdogs", Static).update(
                 section_panel(
-                    "Watchdog Runners [watchdog/runtime-db]",
-                    watchdog_lines(snapshot.watchdog_runners, rich=True, provenance=provenance),
+                    "Watchdog Runners",
+                    watchdog_lines(
+                        snapshot.watchdog_runners,
+                        rich=True,
+                        provenance=provenance,
+                        palette=palette,
+                        verbose=self.verbose_items,
+                    ),
+                    palette=palette,
                 )
             )
             self.query_one("#milestones", Static).update(
-                lines_panel(
-                    "Milestones [milestone-jsonl]",
-                    (format_milestone_line(row, provenance=provenance) for row in snapshot.milestones),
-                    rich=True,
+                section_panel(
+                    "Milestones",
+                    (
+                        format_milestone_line(row, rich=True, provenance=provenance, palette=palette)
+                        for row in snapshot.milestones
+                    ),
+                    palette=palette,
                 )
             )
             self.query_one("#memory", Static).update(
                 section_panel(
-                    "Memory Excerpts [memory-excerpt prose]",
-                    memory_lines(snapshot.memories, truncate_at=140, rich=True, provenance=provenance),
+                    "Memory Excerpts",
+                    memory_lines(snapshot.memories, truncate_at=140, rich=True, provenance=provenance, palette=palette),
+                    palette=palette,
                 )
             )
             self.query_one("#panes", Static).update(
-                lines_panel(
-                    "Pane Preview [best-effort pane-capture]",
-                    textual_pane_preview_body(snapshot, include_pane_preview=include_pane_preview),
-                    rich=True,
-                    truncate_at=None,
+                section_panel(
+                    "Pane Preview",
+                    textual_pane_preview_body(
+                        snapshot,
+                        include_pane_preview=include_pane_preview and self.pane_preview_enabled,
+                        rich=True,
+                        palette=palette,
+                    ),
+                    palette=palette,
                 )
             )
 
@@ -545,57 +789,140 @@ def run_textual_dashboard(
     return 0
 
 
-def summary_panel(snapshot: DashboardSnapshot, refresh: float, role_filter: str | None = None) -> str:
+def summary_panel(
+    snapshot: DashboardSnapshot,
+    refresh: float,
+    role_filter: str | None = None,
+    *,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+    page: str = "supervision",
+    pane_preview_enabled: bool = False,
+    verbose_items: bool = False,
+) -> str:
     scope = role_filter or "team"
+    pane_state = "on" if pane_preview_enabled else "off"
+    verbosity = "verbose" if verbose_items else "concise"
     return "\n".join(
         [
-            f"[b]team[/b] {rich_escape(snapshot.team)}",
-            f"[b]scope[/b] {rich_escape(scope)}",
-            f"[b]collected[/b] {rich_escape(snapshot.collected_at)}",
-            f"[b]refresh[/b] {refresh:g}s",
-            f"[b]runtime[/b] {rich_escape(snapshot.runtime_dir)}",
-            f"[b]config[/b] {rich_escape(snapshot.config_path)}",
+            f"{label('team', palette)} {rich_escape(snapshot.team)}",
+            f"{label('scope', palette)} {rich_escape(scope)}  {label('page', palette)} {rich_escape(page)}",
+            f"{label('collected', palette)} {datetime_text(snapshot.collected_at, palette)}",
+            f"{label('refresh', palette)} {refresh:g}s  {label('view', palette)} {rich_escape(verbosity)}  "
+            f"{label('pane preview', palette)} {rich_escape(pane_state)}",
+            f"{label('runtime', palette)} {rich_escape(snapshot.runtime_dir)}",
+            f"{label('config', palette)} {rich_escape(snapshot.config_path)}",
         ]
     )
 
 
-def alerts_recent_panel(alerts: Iterable[str]) -> str:
+def alerts_recent_panel(alerts: Iterable[str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
     rows = list(alerts)
     if not rows:
-        return "[b]alerts[/b]\nnone"
+        return f"{section_title('alerts', palette)}\nnone"
     visible = rows[:ALERTS_RECENT_LIMIT]
     hidden = len(rows) - len(visible)
-    lines = ["[b]alerts[/b]"]
-    lines.extend(f"[red]![/red] {rich_escape(truncate(row, 120))}" for row in visible)
+    lines = [section_title("alerts", palette)]
+    lines.extend(format_alert_line(row, truncate_at=120, palette=palette) for row in visible)
     if hidden:
         lines.append(f"[dim]+{hidden} more in alert history[/dim]")
     return "\n".join(lines)
 
 
-def alert_lines(alerts: Iterable[str]) -> list[str]:
+def alert_lines(alerts: Iterable[str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> list[str]:
     rows = list(alerts)
     if not rows:
         return ["none"]
-    return [f"! {row}" for row in rows]
+    return [format_alert_line(row, palette=palette) for row in rows]
 
 
 def help_text() -> str:
     return "\n".join(
         [
-            "[b]tmux-team dashboard keys[/b]",
-            "r refresh  q quit  h help  tab/shift-tab focus  escape team overview",
-            "f filter to focused role row  1-9 role rows 1-9  0 role row 10",
-            "jumps: a alerts  t roles  o obligations  d watchdogs  m milestones  p panes",
+            "[b]tmux-team dashboard help[/b]",
+            "The dashboard has two pages: work/supervision and context/history.",
+            "Use left/right bracket to switch pages. The work page shows active work, obligations, and watchdog runners.",
+            "The context page shows milestones, memory excerpts, and alert history.",
+            "Use v to toggle concise/verbose item text. Pane preview is off by default; use the key menu to toggle it.",
+            "Use f on a focused role row to filter to that role; escape returns to the team overview.",
+            "Press Ctrl-P for the full key menu, including page jumps, section jumps, pane preview, and role shortcuts.",
             "Sources: runtime-db is authoritative; memory-excerpt is prose; pane-capture is best-effort screen text.",
         ]
     )
 
 
-def section_panel(title: str, rows: Iterable[str]) -> str:
+def section_title(value: str, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    clean = str(value).replace("[", "(").replace("]", ")")
+    return f"[bold underline reverse {palette.section}]{rich_escape(clean)}[/]"
+
+
+def label(value: str, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    return f"[bold underline {palette.label}]{rich_escape(value)}[/]"
+
+
+def role_text(value: str, rich: bool, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    if not rich:
+        return value
+    return f"[bold underline {palette.role}]{rich_escape(value)}[/]"
+
+
+def id_text(value: str, rich: bool, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    if not rich:
+        return value
+    return f"[bold underline {palette.identifier}]{rich_escape(value)}[/]"
+
+
+def datetime_text(value: object, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    text = "-" if value is None else str(value)
+    if text in ("", "-"):
+        return rich_escape(text)
+    return f"[bold underline {palette.datetime}]{rich_escape(text)}[/]"
+
+
+def priority_text(value: str, rich: bool, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    if not rich:
+        return value
+    color = palette.error if value.lower() == "urgent" else palette.warning if value.lower() == "high" else palette.text
+    return f"[{color}]{rich_escape(value)}[/]"
+
+
+def status_text(
+    value: str, rich: bool, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE, color: str | None = None
+) -> str:
+    if not rich:
+        return value
+    normalized = value.lower()
+    selected = color
+    if selected is None:
+        if normalized in ("stale", "failed", "overdue"):
+            selected = palette.error
+        elif normalized in ("paused", "review", "acknowledged", "claimed"):
+            selected = palette.warning
+        elif normalized in ("active", "completed", "done"):
+            selected = palette.success
+        else:
+            selected = palette.text
+    return f"[{selected}]{rich_escape(value)}[/]"
+
+
+def state_text(value: str, rich: bool, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+    return status_text(value, rich, palette)
+
+
+def format_alert_line(
+    row: str, *, truncate_at: int | None = None, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE
+) -> str:
+    text = truncate(row, truncate_at) if truncate_at else row
+    role, separator, rest = text.partition(":")
+    if separator and role:
+        return f"[{palette.error}]![/] {role_text(role, True, palette)}:{rich_escape(rest)}"
+    return f"[{palette.error}]![/] {rich_escape(text)}"
+
+
+def section_panel(title: str, rows: Iterable[str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
     values = list(rows)
     if not values:
         values = ["none"]
-    return f"[b]{title}[/b]\n" + "\n".join(values)
+    return f"{section_title(title, palette)}\n" + "\n".join(values)
 
 
 def role_table_rows(snapshot: DashboardSnapshot, *, codex_limit: int, active_limit: int) -> Iterable[tuple[str, ...]]:
@@ -614,16 +941,45 @@ def role_table_rows(snapshot: DashboardSnapshot, *, codex_limit: int, active_lim
         )
 
 
-def active_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
+def textual_role_table_rows(
+    snapshot: DashboardSnapshot,
+    *,
+    text_cls,
+    codex_limit: int,
+    active_limit: int,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+) -> Iterable[tuple[object, ...]]:
+    for row in snapshot.roles:
+        yield (
+            text_cls.from_markup(role_text(row_text(row, "name"), True, palette)),
+            text_cls.from_markup(state_text(row_text(row, "state"), True, palette)),
+            text_cls.from_markup(id_text(row_text(row, "pane"), True, palette)),
+            row_text(row, "pending"),
+            row_text(row, "claimed"),
+            row_text(row, "acknowledged"),
+            row_text(row, "stale_claimed"),
+            row_text(row, "open_todos"),
+            truncate(row_text(row, "codex_settings"), codex_limit),
+            truncate(row_text(row, "active_summary"), active_limit),
+        )
+
+
+def active_lines(
+    rows: Iterable[dict[str, object]],
+    *,
+    rich: bool = False,
+    provenance: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
         seen = True
         source = provenance_suffix(row, provenance)
         lines.append(
-            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'message_id', rich)} "
-            f"{safe_row_text(row, 'state', rich)} {safe_row_text(row, 'priority', rich)} "
-            f"from={safe_row_text(row, 'sender', rich)} age={safe_row_text(row, 'age', rich)} "
+            f"{role_text(row_text(row, 'role'), rich, palette)} {id_text(row_text(row, 'message_id'), rich, palette)} "
+            f"{state_text(row_text(row, 'state'), rich, palette)} {priority_text(row_text(row, 'priority'), rich, palette)} "
+            f"from={role_text(row_text(row, 'sender'), rich, palette)} age={safe_row_text(row, 'age', rich)} "
             f"{safe_row_text(row, 'summary', rich)}{source}"
         )
         for todo in row_strings(row, "todos"):
@@ -634,27 +990,48 @@ def active_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, prove
     return lines
 
 
-def obligation_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
+def obligation_lines(
+    rows: Iterable[dict[str, object]],
+    *,
+    rich: bool = False,
+    provenance: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+    verbose: bool = True,
+) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
         seen = True
         if bool(row.get("overdue")):
-            marker = "[red]OVERDUE[/red]" if rich else "OVERDUE"
+            marker = status_text("OVERDUE", rich, palette, palette.error)
         elif bool(row.get("review_due")):
-            marker = "[yellow]REVIEW[/yellow]" if rich else "REVIEW"
+            marker = status_text("REVIEW", rich, palette, palette.warning)
         elif row_text(row, "state") == "paused":
-            marker = "[yellow]PAUSED[/yellow]" if rich else "paused"
+            marker = status_text("PAUSED", rich, palette, palette.warning)
         else:
-            marker = row_text(row, "state")
+            marker = state_text(row_text(row, "state"), rich, palette)
         pause = ""
         if row_text(row, "state") == "paused":
             pause = (
-                f" review={safe_row_text(row, 'review_at', rich)} reason={safe_row_text(row, 'paused_reason', rich)}"
+                f" review={datetime_text(row_text(row, 'review_at'), palette) if rich else row_text(row, 'review_at')} "
+                f"reason={safe_row_text(row, 'paused_reason', rich)}"
             )
+        if not verbose:
+            if row_text(row, "state") == "paused":
+                timing = f"review={datetime_text(row_text(row, 'review_at'), palette) if rich else row_text(row, 'review_at')}"
+            else:
+                timing = f"next={datetime_text(row_text(row, 'next_update'), palette) if rich else row_text(row, 'next_update')}"
+            summary = truncate(row_text(row, "summary"), 110)
+            summary_text = rich_escape(summary) if rich else summary
+            lines.append(
+                f"{role_text(row_text(row, 'role'), rich, palette)} {id_text(row_text(row, 'obligation_id'), rich, palette)} "
+                f"{marker} {timing} {summary_text}{provenance_suffix(row, provenance)}"
+            )
+            continue
         lines.append(
-            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'obligation_id', rich)} {marker} "
-            f"updated={safe_row_text(row, 'updated', rich)} next={safe_row_text(row, 'next_update', rich)}{pause} "
+            f"{role_text(row_text(row, 'role'), rich, palette)} {id_text(row_text(row, 'obligation_id'), rich, palette)} {marker} "
+            f"updated={datetime_text(row_text(row, 'updated'), palette) if rich else row_text(row, 'updated')} "
+            f"next={datetime_text(row_text(row, 'next_update'), palette) if rich else row_text(row, 'next_update')}{pause} "
             f"{safe_row_text(row, 'summary', rich)}{provenance_suffix(row, provenance)}"
         )
     if not seen:
@@ -662,26 +1039,47 @@ def obligation_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, p
     return lines
 
 
-def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
+def watchdog_lines(
+    rows: Iterable[dict[str, object]],
+    *,
+    rich: bool = False,
+    provenance: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+    verbose: bool = True,
+) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
         seen = True
         state = row_text(row, "state")
-        if rich and state in ("stale", "failed"):
-            state = f"[red]{state}[/red]"
-        elif rich and state == "paused":
-            state = f"[yellow]{state}[/yellow]"
+        state = state_text(state, rich, palette)
         pause = ""
         if row_text(row, "state") == "paused":
             pause = (
-                f" review={safe_row_text(row, 'review_at', rich)} reason={safe_row_text(row, 'paused_reason', rich)}"
+                f" review={datetime_text(row_text(row, 'review_at'), palette) if rich else row_text(row, 'review_at')} "
+                f"reason={safe_row_text(row, 'paused_reason', rich)}"
             )
+        if not verbose:
+            next_or_review = (
+                f"review={datetime_text(row_text(row, 'review_at'), palette) if rich else row_text(row, 'review_at')}"
+                if row_text(row, "state") == "paused"
+                else f"next={datetime_text(row_text(row, 'next_run'), palette) if rich else row_text(row, 'next_run')}"
+            )
+            summary = truncate(row_text(row, "summary"), 100)
+            summary_text = rich_escape(summary) if rich else summary
+            lines.append(
+                f"{id_text(row_text(row, 'name'), rich, palette)} {state} "
+                f"every={safe_row_text(row, 'interval', rich)} scope={role_text(row_text(row, 'scope'), rich, palette)} "
+                f"notify={role_text(row_text(row, 'notify_role'), rich, palette)} {next_or_review} "
+                f"findings={safe_row_text(row, 'findings', rich)} {summary_text}{provenance_suffix(row, provenance)}"
+            )
+            continue
         lines.append(
-            f"{safe_row_text(row, 'name', rich)} {state} interval={safe_row_text(row, 'interval', rich)} "
-            f"scope={safe_row_text(row, 'scope', rich)} notify={safe_row_text(row, 'notify_role', rich)} "
+            f"{id_text(row_text(row, 'name'), rich, palette)} {state} interval={safe_row_text(row, 'interval', rich)} "
+            f"scope={role_text(row_text(row, 'scope'), rich, palette)} notify={role_text(row_text(row, 'notify_role'), rich, palette)} "
             f"delivery={safe_row_text(row, 'delivery', rich)} "
-            f"last={safe_row_text(row, 'last_run', rich)} next={safe_row_text(row, 'next_run', rich)} "
+            f"last={datetime_text(row_text(row, 'last_run'), palette) if rich else row_text(row, 'last_run')} "
+            f"next={datetime_text(row_text(row, 'next_run'), palette) if rich else row_text(row, 'next_run')} "
             f"findings={safe_row_text(row, 'findings', rich)} safe_to_close={safe_row_text(row, 'safe_to_close', rich)} "
             f"pane={safe_row_text(row, 'pane', rich)}{pause} {safe_row_text(row, 'summary', rich)} "
             f"goal={safe_row_text(row, 'goal', rich)}"
@@ -703,10 +1101,18 @@ def lines_panel(title: str, rows: Iterable[str], *, rich: bool = False, truncate
     return f"[b]{title}[/b]\n" + "\n".join(rendered)
 
 
-def textual_pane_preview_body(snapshot: DashboardSnapshot, *, include_pane_preview: bool) -> list[str]:
+def textual_pane_preview_body(
+    snapshot: DashboardSnapshot,
+    *,
+    include_pane_preview: bool,
+    rich: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+) -> list[str]:
     if not include_pane_preview:
         return ["disabled"]
-    return format_pane_preview_grid_lines(snapshot.pane_previews, tail_count=5, provenance=True)
+    return format_pane_preview_grid_lines(
+        snapshot.pane_previews, tail_count=5, rich=rich, provenance=True, palette=palette
+    )
 
 
 def format_pane_preview_grid_lines(
@@ -715,26 +1121,27 @@ def format_pane_preview_grid_lines(
     tail_count: int,
     rich: bool = False,
     provenance: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
 ) -> list[str]:
     lines: list[str] = []
     seen = False
-    header = ("role", "pane", "state", "tail")
-    lines.append(format_fixed_row(header, rich=rich))
-    lines.append(format_fixed_row(("-" * 12, "-" * 8, "-" * 32, "-" * 24), rich=rich))
     for row in rows:
         seen = True
         state = f"cmd={row_text(row, 'current_command')} dead={row_text(row, 'dead')} copy={row_text(row, 'in_mode')}"
         source = f"source={row_text(row, 'screen_source')}{provenance_suffix(row, provenance)}"
         tail = row_text(row, "text").splitlines()[-tail_count:] or ["(empty)"]
-        lines.append(
-            format_fixed_row(
-                (row_text(row, "role"), row_text(row, "pane"), state, tail[0]),
-                rich=rich,
+        if rich:
+            lines.append(
+                f"{role_text(row_text(row, 'role'), rich, palette)} {id_text(row_text(row, 'pane'), rich, palette)} "
+                f"[dim]{rich_escape(state)} {rich_escape(source)}[/dim]"
             )
-        )
-        lines.append(format_fixed_row(("", "", source, ""), rich=rich))
-        for line in tail[1:]:
-            lines.append(format_fixed_row(("", "", "", line), rich=rich))
+            for line in tail:
+                lines.append(f"  {rich_escape(line)}")
+        else:
+            lines.append(f"{row_text(row, 'role')} {row_text(row, 'pane')} {state} {source}")
+            for line in tail:
+                lines.append(f"  {line}")
+        lines.append("")
     if not seen:
         lines.append("none")
     return lines
@@ -747,16 +1154,28 @@ def format_fixed_row(cells: tuple[str, str, str, str], *, rich: bool = False) ->
 
 
 def memory_lines(
-    rows: Iterable[dict[str, object]], *, truncate_at: int | None = None, rich: bool = False, provenance: bool = False
+    rows: Iterable[dict[str, object]],
+    *,
+    truncate_at: int | None = None,
+    rich: bool = False,
+    provenance: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
 ) -> list[str]:
     lines: list[str] = []
     for row in rows:
+        excerpt = first_content_line(row_text(row, "excerpt"))
+        if truncate_at is not None:
+            role_budget = (
+                len(row_text(row, "role")) + len(row_text(row, "updated")) + len(provenance_suffix(row, provenance)) + 7
+            )
+            excerpt = truncate(excerpt, max(12, truncate_at - role_budget))
         line = (
-            f"{safe_row_text(row, 'role', rich)}: "
-            f"{rich_escape(first_content_line(row_text(row, 'excerpt'))) if rich else first_content_line(row_text(row, 'excerpt'))}"
+            f"{role_text(row_text(row, 'role'), rich, palette)} "
+            f"{datetime_text(row_text(row, 'updated'), palette) if rich else row_text(row, 'updated')}: "
+            f"{rich_escape(excerpt) if rich else excerpt}"
             f"{provenance_suffix(row, provenance)}"
         )
-        lines.append(truncate(line, truncate_at) if truncate_at else line)
+        lines.append(line)
     return lines or ["none"]
 
 
@@ -840,6 +1259,13 @@ def read_excerpt(path: Path, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "..."
 
 
+def file_updated_at(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, UTC).replace(microsecond=0).isoformat()
+    except OSError:
+        return "-"
+
+
 def first_line(value: str) -> str:
     stripped = value.strip()
     return stripped.splitlines()[0] if stripped else "-"
@@ -853,12 +1279,25 @@ def first_content_line(value: str) -> str:
     return first_line(value)
 
 
-def format_milestone_line(row: dict, *, provenance: bool = False) -> str:
+def format_milestone_line(
+    row: dict,
+    *,
+    rich: bool = False,
+    provenance: bool = False,
+    palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE,
+) -> str:
     kind = row.get("kind") or "milestone"
     recorded_by = row.get("recorded_by") or row.get("actor") or "-"
+    if not rich:
+        return (
+            f"{row.get('created_at')} [{kind}] recorded_by={recorded_by} "
+            f"subject={milestone_subject_label(row)} {row.get('summary')}"
+            f"{provenance_suffix({'source': 'milestone-jsonl', 'confidence': 'operator-recorded'}, provenance)}"
+        )
     return (
-        f"{row.get('created_at')} [{kind}] recorded_by={recorded_by} "
-        f"subject={milestone_subject_label(row)} {row.get('summary')}"
+        f"{datetime_text(row.get('created_at'), palette)} [{palette.warning}]{rich_escape(kind)}[/] "
+        f"recorded_by={role_text(str(recorded_by), True, palette)} "
+        f"subject={role_text(milestone_subject_label(row), True, palette)} {rich_escape(row.get('summary'))}"
         f"{provenance_suffix({'source': 'milestone-jsonl', 'confidence': 'operator-recorded'}, provenance)}"
     )
 

@@ -2,6 +2,19 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## 0.4.1 - 2026-07-08
+
+- Reworked the optional live Textual dashboard into two operator pages: work/supervision for active work, obligations, and watchdog runners; context/history for milestones, memory excerpts, and alert history.
+- Made live dashboard pane previews opt-in with the pane preview toggle, while keeping `dashboard --once` and explicit pane-preview CLI behavior intact.
+- Added dashboard-local preferences in `.tmux-team/runtime/dashboard_preferences.json` for theme and concise/verbose item mode.
+- Added concise/verbose row rendering for obligations and watchdog runners, cleaner live headings, theme-aware semantic styling, role-table Codex chips for known structured launch settings, and scratchpad mtime timestamps for memory excerpts.
+- Kept `/fast` out of dashboard role-table metadata because it is not durable structured tmux-team state today.
+- Updated repo-local marketplace metadata to install the upcoming `v0.4.1` plugin tag.
+
+Migration notes:
+
+- Existing dashboard users should upgrade the optional `tmux-team[dashboard]` install. The first live launch uses concise mode with pane previews off; operators can toggle verbosity and pane previews from the dashboard, and preferences are saved under the runtime directory.
+
 ## 0.4.0 - 2026-07-08
 
 - Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
