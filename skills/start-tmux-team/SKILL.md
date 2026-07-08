@@ -190,6 +190,8 @@ Non-orchestrator roles should not call `tmux-team milestone add` by default. The
 
 When completing delegated work, use `tmux-team inbox complete ... --reply-to-sender` so the original sender is woken through the normal message path. Do not use `--reply-to-sender` for pure acknowledgement/bookkeeping messages that would create reply loops. When dispatching fan-out work, still keep the message id printed by `tmux-team send`; it is the durable handle for status and audit.
 
+Do not let material delegated results terminate at an intermediate role. If a non-orchestrator role receives a completion notice that affects the team goal, stable commit, blocker state, external run state, or operator-visible result, it must reconcile upward: send a concise message to `orchestrator` with the result and evidence reference, or complete the original orchestrator-owned task with `--reply-to-sender` if that task is still active. Local completion notices may be closed locally only when they are pure bookkeeping.
+
 Orchestrator unblock-first rule: when new operator or role information can unblock another role's safe setup work, route a bounded handoff promptly unless doing so would create irreversible external effects or violate an explicit safety gate. Prefer a gated prep message over waiting for local review or bookkeeping to finish:
 
 ```bash

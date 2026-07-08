@@ -197,6 +197,7 @@ Message completion is durable state. Conversational completion replies are expli
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.
 - Completion replies must be stored as `message_kind='completion_notice'`.
 - `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
+- Material completion notices must not terminate at an intermediate non-orchestrator role. If a delegated result affects the team goal, stable commit, blocker state, external run state, or operator-visible outcome, the recipient must reconcile upward to `orchestrator` with a concise durable message or by completing the still-active orchestrator-owned task.
 - A dispatcher must keep the message id returned by `tmux-team send`.
 - After fan-out, the dispatcher checks `tmux-team status`, `inbox list`, or events for that message's state before routing follow-up work.
 - For one logical work thread, reuse one stable `--correlation-key` across retries, follow-ups, and verification. Different keys are treated as different work, so near-synonym keys create avoidable duplicate work. Use `--allow-duplicate` only when redundant independent work is deliberate.

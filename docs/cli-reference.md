@@ -122,7 +122,9 @@ tmux-team inbox list --role collector --verbose
 tmux-team inbox reclaimable --role collector
 ```
 
-Use `--reply-to-sender` for delegated role work so the original sender receives a completion notice and wake. After reading acknowledged completion notices, close the bookkeeping with:
+Use `--reply-to-sender` for delegated role work so the original sender receives a completion notice and wake. A completion notice is local bookkeeping until the goal owner reconciles it. If a non-orchestrator role receives a material delegated result, it should send a concise upward report to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`.
+
+After reading acknowledged completion notices, close pure bookkeeping with:
 
 ```bash
 tmux-team inbox complete-replies --role orchestrator

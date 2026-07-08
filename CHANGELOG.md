@@ -21,6 +21,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Expanded the live demo with an operator-triggered sleep/resume phase, resumed watchdog interval nudge, and a post-resume test operation.
 - Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, section jump keys, and a help overlay.
 - Added milestone subject classification with `recorded_by`, `scope`, `subject_roles`, `milestone add --subject-role/--team`, and matching list filters.
+- Clarified role guidance so material p2p completion notices must be reconciled upward to the orchestrator instead of terminating at an intermediate role.
 
 Migration notes:
 

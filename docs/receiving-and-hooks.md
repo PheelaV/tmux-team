@@ -129,6 +129,8 @@ If the wake says `N pending` with `N > 1`, the role follows its loaded tmux-team
 
 `--reply-to-sender` is the lazy conversational path: completion is recorded on the original message, and a reply message is queued back to the sender when the sender is a managed role. Use `--summary` for the concise result and `--body` or `--body-file` for evidence, test output, or handoff detail that should travel with the completion reply.
 
+Completion notices are local bookkeeping until the goal owner reconciles them. If a non-orchestrator role receives a completion notice that changes team-level state, stable commit readiness, blocker state, external run status, or an operator-visible result, it should forward a concise result to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`. Do not rely on a p2p completion notice alone to close team-level work.
+
 Broadcast is just repeated durable send:
 
 ```bash
