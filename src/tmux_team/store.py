@@ -19,14 +19,14 @@ MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
 STALE_CLAIMED_STATE = "stale_claimed"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
-WATCH_ACTIVE_STATES = ("active", "blocked")
-WATCH_PAUSED_STATE = "paused"
-WATCH_VISIBLE_STATES = WATCH_ACTIVE_STATES + (WATCH_PAUSED_STATE,)
-WATCH_STATES = WATCH_VISIBLE_STATES + ("done", "failed", "cancelled")
+OBLIGATION_ACTIVE_STATES = ("active", "blocked")
+OBLIGATION_PAUSED_STATE = "paused"
+OBLIGATION_VISIBLE_STATES = OBLIGATION_ACTIVE_STATES + (OBLIGATION_PAUSED_STATE,)
+OBLIGATION_STATES = OBLIGATION_VISIBLE_STATES + ("done", "failed", "cancelled")
 TODO_STATES = ("open", "done", "superseded")
 WATCHDOG_RUNNER_STATES = ("running", "paused", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -153,12 +153,13 @@ class Store:
               payload_json TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS watches (
+            CREATE TABLE IF NOT EXISTS obligations (
               id TEXT PRIMARY KEY,
               role TEXT NOT NULL,
               status TEXT NOT NULL,
               summary TEXT NOT NULL,
               current_summary TEXT NOT NULL,
+              goal TEXT,
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
@@ -171,8 +172,8 @@ class Store:
               review_at TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_watches_role_status_updated
-              ON watches(role, status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_obligations_role_status_updated
+              ON obligations(role, status, updated_at);
 
             CREATE TABLE IF NOT EXISTS todos (
               id TEXT PRIMARY KEY,
@@ -221,11 +222,41 @@ class Store:
         self._ensure_column(conn, "messages", "related_to", "TEXT")
         self._ensure_column(conn, "messages", "supersedes", "TEXT")
         self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
+        self._migrate_watches_to_obligations(conn)
+        self._ensure_column(conn, "obligations", "goal", "TEXT")
         for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
-            self._ensure_column(conn, "watches", column, "TEXT")
+            self._ensure_column(conn, "obligations", column, "TEXT")
             self._ensure_column(conn, "watchdog_runners", column, "TEXT")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
+
+    def _migrate_watches_to_obligations(self, conn: sqlite3.Connection) -> None:
+        if not self._table_exists(conn, "watches"):
+            return
+        for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
+            self._ensure_column(conn, "watches", column, "TEXT")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO obligations(
+              id, role, status, summary, current_summary, goal, created_by, created_at,
+              updated_at, last_update_at, next_update_at, completed_at, paused_reason,
+              paused_at, paused_by, review_at
+            )
+            SELECT
+              id, role, status, summary, current_summary, NULL, created_by, created_at,
+              updated_at, last_update_at, next_update_at, completed_at, paused_reason,
+              paused_at, paused_by, review_at
+            FROM watches
+            """
+        )
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     def sync_roles(self, conn: sqlite3.Connection, roles: Iterable[RoleConfig]) -> None:
         now = utc_now()
@@ -806,57 +837,58 @@ class Store:
             )
         )
 
-    def start_watch(
+    def start_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
         summary: str,
+        goal: str | None,
         created_by: str,
         next_update_at: str | None = None,
     ) -> sqlite3.Row:
         if self.get_role(conn, role) is None:
             raise KeyError(f"Unknown role: {role}")
         now = utc_now()
-        watch_id = new_watch_id()
+        obligation_id = new_obligation_id()
         conn.execute(
             """
-            INSERT INTO watches(
-              id, role, status, summary, current_summary,
+            INSERT INTO obligations(
+              id, role, status, summary, current_summary, goal,
               created_by, created_at, updated_at, last_update_at, next_update_at
             )
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (watch_id, role, summary, summary, created_by, now, now, now, next_update_at),
+            (obligation_id, role, summary, summary, empty_to_none(goal), created_by, now, now, now, next_update_at),
         )
         self.record_event(
             conn,
-            "watch.started",
+            "obligation.started",
             created_by,
-            watch_id,
-            {"role": role, "summary": summary, "next_update_at": next_update_at},
+            obligation_id,
+            {"role": role, "summary": summary, "goal": empty_to_none(goal), "next_update_at": next_update_at},
         )
         conn.commit()
-        return self.get_watch(conn, watch_id)
+        return self.get_obligation(conn, obligation_id)
 
-    def update_watch(
+    def update_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
-        watch_id: str,
+        obligation_id: str,
         summary: str,
         status: str = "active",
         next_update_at: str | None = None,
         actor: str = "operator",
     ) -> sqlite3.Row:
-        if status not in WATCH_ACTIVE_STATES:
-            raise ValueError(f"Invalid active watch status: {status}")
-        row = self._watch_for_role(conn, role, watch_id)
+        if status not in OBLIGATION_ACTIVE_STATES:
+            raise ValueError(f"Invalid active obligation status: {status}")
+        row = self._obligation_for_role(conn, role, obligation_id)
         now = utc_now()
         updated = conn.execute(
             """
-            UPDATE watches
+            UPDATE obligations
             SET status = ?,
                 current_summary = ?,
                 updated_at = ?,
@@ -865,37 +897,37 @@ class Store:
             WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
             RETURNING *
             """,
-            (status, summary, now, now, next_update_at, watch_id, role),
+            (status, summary, now, now, next_update_at, obligation_id, role),
         ).fetchone()
         if updated is None:
-            raise ValueError(f"Cannot update watch {watch_id} in state {row['status']}")
+            raise ValueError(f"Cannot update obligation {obligation_id} in state {row['status']}")
         self.record_event(
             conn,
-            "watch.updated",
+            "obligation.updated",
             actor,
-            watch_id,
+            obligation_id,
             {"role": role, "status": status, "summary": summary, "next_update_at": next_update_at},
         )
         conn.commit()
         return updated
 
-    def pause_watch(
+    def pause_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
-        watch_id: str,
+        obligation_id: str,
         reason: str,
         review_at: str | None = None,
         actor: str = "operator",
     ) -> sqlite3.Row:
-        row = self._watch_for_role(conn, role, watch_id)
-        if row["status"] not in WATCH_VISIBLE_STATES:
-            raise ValueError(f"Cannot pause watch {watch_id} in state {row['status']}")
+        row = self._obligation_for_role(conn, role, obligation_id)
+        if row["status"] not in OBLIGATION_VISIBLE_STATES:
+            raise ValueError(f"Cannot pause obligation {obligation_id} in state {row['status']}")
         now = utc_now()
         updated = conn.execute(
             """
-            UPDATE watches
+            UPDATE obligations
             SET status = 'paused',
                 updated_at = ?,
                 next_update_at = NULL,
@@ -906,15 +938,15 @@ class Store:
             WHERE id = ? AND role = ?
             RETURNING *
             """,
-            (now, reason, now, actor, review_at, watch_id, role),
+            (now, reason, now, actor, review_at, obligation_id, role),
         ).fetchone()
         if updated is None:
-            raise KeyError(f"Unknown watch: {watch_id}")
+            raise KeyError(f"Unknown obligation: {obligation_id}")
         self.record_event(
             conn,
-            "watch.paused",
+            "obligation.paused",
             actor,
-            watch_id,
+            obligation_id,
             {
                 "role": role,
                 "reason": reason,
@@ -926,23 +958,23 @@ class Store:
         conn.commit()
         return updated
 
-    def resume_watch(
+    def resume_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
-        watch_id: str,
+        obligation_id: str,
         summary: str,
         next_update_at: str | None = None,
         actor: str = "operator",
     ) -> sqlite3.Row:
-        row = self._watch_for_role(conn, role, watch_id)
-        if row["status"] != WATCH_PAUSED_STATE:
-            raise ValueError(f"Cannot resume watch {watch_id} in state {row['status']}")
+        row = self._obligation_for_role(conn, role, obligation_id)
+        if row["status"] != OBLIGATION_PAUSED_STATE:
+            raise ValueError(f"Cannot resume obligation {obligation_id} in state {row['status']}")
         now = utc_now()
         updated = conn.execute(
             """
-            UPDATE watches
+            UPDATE obligations
             SET status = 'active',
                 current_summary = ?,
                 updated_at = ?,
@@ -956,15 +988,15 @@ class Store:
             WHERE id = ? AND role = ? AND status = 'paused'
             RETURNING *
             """,
-            (summary, now, now, next_update_at, watch_id, role),
+            (summary, now, now, next_update_at, obligation_id, role),
         ).fetchone()
         if updated is None:
-            raise ValueError(f"Cannot resume watch {watch_id} in state {row['status']}")
+            raise ValueError(f"Cannot resume obligation {obligation_id} in state {row['status']}")
         self.record_event(
             conn,
-            "watch.resumed",
+            "obligation.resumed",
             actor,
-            watch_id,
+            obligation_id,
             {
                 "role": role,
                 "summary": summary,
@@ -976,23 +1008,23 @@ class Store:
         conn.commit()
         return updated
 
-    def complete_watch(
+    def complete_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
-        watch_id: str,
+        obligation_id: str,
         status: str,
         summary: str,
         actor: str = "operator",
     ) -> sqlite3.Row:
         if status not in ("done", "failed", "cancelled"):
-            raise ValueError(f"Invalid terminal watch status: {status}")
-        row = self._watch_for_role(conn, role, watch_id)
+            raise ValueError(f"Invalid terminal obligation status: {status}")
+        row = self._obligation_for_role(conn, role, obligation_id)
         now = utc_now()
         updated = conn.execute(
             """
-            UPDATE watches
+            UPDATE obligations
             SET status = ?,
                 current_summary = ?,
                 updated_at = ?,
@@ -1006,21 +1038,21 @@ class Store:
             WHERE id = ? AND role = ? AND status IN ('active', 'blocked', 'paused')
             RETURNING *
             """,
-            (status, summary, now, now, now, watch_id, role),
+            (status, summary, now, now, now, obligation_id, role),
         ).fetchone()
         if updated is None:
-            raise ValueError(f"Cannot complete watch {watch_id} in state {row['status']}")
+            raise ValueError(f"Cannot complete obligation {obligation_id} in state {row['status']}")
         self.record_event(
             conn,
-            "watch.completed",
+            "obligation.completed",
             actor,
-            watch_id,
+            obligation_id,
             {"role": role, "status": status, "summary": summary},
         )
         conn.commit()
         return updated
 
-    def list_watches(
+    def list_obligations(
         self,
         conn: sqlite3.Connection,
         *,
@@ -1034,9 +1066,9 @@ class Store:
             clauses.append("role = ?")
             params.append(role)
         if states:
-            invalid = tuple(state for state in states if state not in WATCH_STATES)
+            invalid = tuple(state for state in states if state not in OBLIGATION_STATES)
             if invalid:
-                raise ValueError(f"Invalid watch state: {invalid[0]}")
+                raise ValueError(f"Invalid obligation state: {invalid[0]}")
             placeholders = ", ".join("?" for _ in states)
             clauses.append(f"status IN ({placeholders})")
             params.extend(states)
@@ -1045,7 +1077,7 @@ class Store:
         return list(
             conn.execute(
                 f"""
-                SELECT * FROM watches
+                SELECT * FROM obligations
                 {where}
                 ORDER BY
                   CASE status
@@ -2164,16 +2196,16 @@ class Store:
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def get_watch(self, conn: sqlite3.Connection, watch_id: str) -> sqlite3.Row:
-        row = conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone()
+    def get_obligation(self, conn: sqlite3.Connection, obligation_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM obligations WHERE id = ?", (obligation_id,)).fetchone()
         if row is None:
-            raise KeyError(f"Unknown watch: {watch_id}")
+            raise KeyError(f"Unknown obligation: {obligation_id}")
         return row
 
-    def _watch_for_role(self, conn: sqlite3.Connection, role: str, watch_id: str) -> sqlite3.Row:
-        row = self.get_watch(conn, watch_id)
+    def _obligation_for_role(self, conn: sqlite3.Connection, role: str, obligation_id: str) -> sqlite3.Row:
+        row = self.get_obligation(conn, obligation_id)
         if row["role"] != role:
-            raise PermissionError(f"Watch {watch_id} belongs to {row['role']}, not {role}")
+            raise PermissionError(f"Obligation {obligation_id} belongs to {row['role']}, not {role}")
         return row
 
     def _todo_for_role(self, conn: sqlite3.Connection, role: str, todo_id: str) -> sqlite3.Row:
@@ -2209,10 +2241,10 @@ def new_message_id() -> str:
     return f"msg_{stamp}_{suffix}"
 
 
-def new_watch_id() -> str:
+def new_obligation_id() -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
-    return f"watch_{stamp}_{suffix}"
+    return f"obligation_{stamp}_{suffix}"
 
 
 def new_todo_id() -> str:

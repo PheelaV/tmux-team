@@ -52,7 +52,7 @@ tmux-team status
 tmux-team status --verbose
 ```
 
-`status --verbose` shows bounded active message summaries, open todo counts, watches, watchdog runners, stale claimed work, and claimed-but-not-acknowledged warnings.
+`status --verbose` shows bounded active message summaries, open todo counts, obligations, watchdog runners, stale claimed work, and claimed-but-not-acknowledged warnings.
 
 Use `dashboard` for an operator snapshot. `dashboard --once` works in the base install; the live refreshing dashboard requires the optional `tmux-team[dashboard]` extra.
 
@@ -63,7 +63,7 @@ tmux-team dashboard --refresh 2
 tmux-team dashboard --no-pane-preview
 ```
 
-Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. The live dashboard supports `r` refresh, `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, and direct jumps such as `a` alerts, `t` roles, `w` watches, `d` watchdogs, `m` milestones, and `p` panes. Use inbox, watches, milestones, and memory commands to mutate durable state.
+Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. The live dashboard supports `r` refresh, `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, and direct jumps such as `a` alerts, `t` roles, `o` obligations, `d` watchdogs, `m` milestones, and `p` panes. Use inbox, obligations, milestones, and memory commands to mutate durable state.
 
 ## Messages And Routing
 
@@ -167,19 +167,19 @@ tmux-team milestone list --since -4h
 
 By default, the operator/control plane and orchestrator record milestones. Other roles report evidence through inbox completion and let the orchestrator decide what deserves a milestone. New milestones separate the writer (`recorded_by`) from the subject (`--subject-role`, repeated or comma-separated, or `--team`). The older `--role` flag remains as a legacy single-subject alias.
 
-## Watches And Watchdogs
+## Obligations And Watchdogs
 
-Use `watch` for long-running supervision that should not stay as an acknowledged inbox task for hours.
+Use `obligation` for long-running role commitments that should not stay as acknowledged inbox tasks for hours.
 
 ```bash
-tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
-tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
-tmux-team watch pause <watch-id> --role collector --reason "Blocked by prerequisite" --review-in 30m
-tmux-team watch resume <watch-id> --role collector --summary "Prerequisite resolved" --next-update-in 15m
-tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
+tmux-team obligation start --role collector --summary "Monitor external run" --goal "Report terminal result" --next-update-in 15m
+tmux-team obligation update <obligation-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
+tmux-team obligation pause <obligation-id> --role collector --reason "Blocked by prerequisite" --review-in 30m
+tmux-team obligation resume <obligation-id> --role collector --summary "Prerequisite resolved" --next-update-in 15m
+tmux-team obligation complete <obligation-id> --role collector --summary "Run terminalized"
 ```
 
-Paused watches keep their previous summary, store a pause reason and optional review time, and do not count as overdue. When the review time passes, `watchdog` reports `watch_review_due`. Use `watch complete --status cancelled` when the watch is truly terminal.
+Paused obligations keep their previous summary, store a pause reason and optional review time, and do not count as overdue. When the review time passes, `watchdog` reports `obligation_review_due`. Use `obligation complete --status cancelled` when the obligation is truly terminal.
 
 Use `watchdog` for built-in durable-state checks.
 
@@ -233,7 +233,7 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
 
-- `team.sqlite` for messages, todos, watches, role state, notifications, events, and stable commits;
+- `team.sqlite` for messages, todos, obligations, role state, notifications, events, and stable commits;
 - `events.jsonl` for append-only audit;
 - `milestones.jsonl` for append-only operator milestones;
 - `messages/*.md` for message bodies;

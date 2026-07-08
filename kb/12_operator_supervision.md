@@ -29,7 +29,7 @@ The dashboard should combine existing supervision surfaces rather than inventing
 
 - roles and message counts from SQLite;
 - active messages and open todos from SQLite;
-- watches from SQLite;
+- obligations from SQLite;
 - milestones from `milestones.jsonl`;
 - latest scratchpad excerpts from role memory files;
 - bounded pane tails from tmux when preview is enabled;
@@ -39,23 +39,23 @@ Dashboard sections must label provenance. SQLite-backed rows are authoritative r
 
 The live dashboard should stay keyboard-first: refresh/help, role-filter shortcuts, team overview, and section jump keys must be available without mouse input.
 
-It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete watch, or inspect full message body can be added later behind explicit commands.
+It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete an obligation, or inspect full message body can be added later behind explicit commands.
 
-## Watches
+## Obligations
 
 Long-running monitoring must not be hidden as an indefinitely acknowledged inbox task.
 
-`tmux-team watch` is the durable role-owned state for ongoing supervision:
+`tmux-team obligation` is the durable role-owned state for ongoing commitments:
 
-- `watch start` creates an active watch with a summary and optional next expected update.
-- `watch update` records heartbeat or blocker state as `active` or `blocked`.
-- `watch pause` records intentional deferral with a reason and optional review time without counting as overdue.
-- `watch resume` restores a paused watch with a fresh summary and next expected update.
-- `watch complete` terminalizes the watch as `done`, `failed`, or `cancelled`.
-- `watch list` defaults to active, blocked, and paused watches.
-- `status --verbose` shows visible watches alongside active inbox messages.
+- `obligation start` creates an active obligation with a summary, optional goal, and optional next expected update.
+- `obligation update` records update or blocker state as `active` or `blocked`.
+- `obligation pause` records intentional deferral with a reason and optional review time without counting as overdue.
+- `obligation resume` restores a paused obligation with a fresh summary and next expected update.
+- `obligation complete` terminalizes the obligation as `done`, `failed`, or `cancelled`.
+- `obligation list` defaults to active, blocked, and paused obligations.
+- `status --verbose` shows visible obligations alongside active inbox messages.
 
-Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+Obligations are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 
 ## Unblock-First Routing
 
@@ -105,10 +105,10 @@ Bare `tmux-team watchdog` remains a single-shot report. It reports:
 - stale claimed messages;
 - claimed-but-not-acknowledged messages;
 - old acknowledged tasks;
-- overdue watches;
-- review-due paused watches and watchdog runners.
+- overdue obligations;
+- review-due paused obligations and watchdog runners.
 
-It must not mutate message or watch state, wake roles, or write milestones by default.
+It must not mutate message or obligation state, wake roles, or write milestones by default.
 
 Use native runners for repeated checks:
 
@@ -127,4 +127,4 @@ Runner invariants:
 - paused runners do not emit repeated findings and keep the previous finding summary plus pause reason and review time;
 - runner state is durable in SQLite and appears in `status --verbose` and `dashboard`;
 - `pane list --all` marks runner panes with `infrastructure=watchdog`;
-- watches are role-owned deadlines, while watchdog runners are periodic checkers.
+- obligations are role-owned commitments, while watchdog runners are periodic checkers.

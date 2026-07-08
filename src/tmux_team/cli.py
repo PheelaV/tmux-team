@@ -58,10 +58,10 @@ from .store import (
     ROLE_STATES,
     STALE_CLAIMED_STATE,
     TODO_STATES,
-    WATCH_ACTIVE_STATES,
-    WATCH_PAUSED_STATE,
-    WATCH_STATES,
-    WATCH_VISIBLE_STATES,
+    OBLIGATION_ACTIVE_STATES,
+    OBLIGATION_PAUSED_STATE,
+    OBLIGATION_STATES,
+    OBLIGATION_VISIBLE_STATES,
     Store,
     normalize_priority,
     normalize_watchdog_runner_name,
@@ -127,8 +127,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_todo(args, store, conn)
             if args.command == "milestone":
                 return cmd_milestone(args, store, conn)
-            if args.command == "watch":
-                return cmd_watch(args, store, conn)
+            if args.command == "obligation":
+                return cmd_obligation(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
             if args.command == "pane":
@@ -544,44 +544,45 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_list.add_argument("--limit", type=int, default=50)
     milestone_list.add_argument("--json", action="store_true", help="Print JSON array instead of human output")
 
-    watch = subparsers.add_parser("watch", help="Track long-running role supervision work")
-    watch_sub = watch.add_subparsers(dest="watch_command", required=True)
-    watch_start = watch_sub.add_parser("start", help="Start a long-running supervision watch")
-    watch_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_start.add_argument("--summary", required=True, help="Concise supervision summary")
-    watch_start.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+    obligation = subparsers.add_parser("obligation", help="Track role-owned commitments with expected updates")
+    obligation_sub = obligation.add_subparsers(dest="obligation_command", required=True)
+    obligation_start = obligation_sub.add_parser("start", help="Start a role-owned obligation")
+    obligation_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_start.add_argument("--summary", required=True, help="Concise obligation summary")
+    obligation_start.add_argument("--goal", help="Done condition or longer-lived objective")
+    obligation_start.add_argument("--next-update-in", help="Expected next update duration, e.g. 15m")
 
-    watch_update = watch_sub.add_parser("update", help="Record a watch heartbeat or blocker")
-    watch_update.add_argument("watch_id")
-    watch_update.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_update.add_argument("--summary", required=True, help="Current watch state")
-    watch_update.add_argument("--state", default="active", choices=WATCH_ACTIVE_STATES)
-    watch_update.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+    obligation_update = obligation_sub.add_parser("update", help="Record an obligation update or blocker")
+    obligation_update.add_argument("obligation_id")
+    obligation_update.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_update.add_argument("--summary", required=True, help="Current obligation state")
+    obligation_update.add_argument("--state", default="active", choices=OBLIGATION_ACTIVE_STATES)
+    obligation_update.add_argument("--next-update-in", help="Expected next update duration, e.g. 15m")
 
-    watch_pause = watch_sub.add_parser("pause", help="Pause a supervision watch until explicit resume or review")
-    watch_pause.add_argument("watch_id")
-    watch_pause.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_pause.add_argument("--reason", required=True, help="Why the watch is intentionally paused")
-    watch_pause_review = watch_pause.add_mutually_exclusive_group()
-    watch_pause_review.add_argument("--review-in", help="When to review the pause, e.g. 30m")
-    watch_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
+    obligation_pause = obligation_sub.add_parser("pause", help="Pause an obligation until resume or review")
+    obligation_pause.add_argument("obligation_id")
+    obligation_pause.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_pause.add_argument("--reason", required=True, help="Why the obligation is intentionally paused")
+    obligation_pause_review = obligation_pause.add_mutually_exclusive_group()
+    obligation_pause_review.add_argument("--review-in", help="When to review the pause, e.g. 30m")
+    obligation_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
 
-    watch_resume = watch_sub.add_parser("resume", help="Resume a paused supervision watch")
-    watch_resume.add_argument("watch_id")
-    watch_resume.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_resume.add_argument("--summary", required=True, help="Fresh resumed watch state")
-    watch_resume.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+    obligation_resume = obligation_sub.add_parser("resume", help="Resume a paused obligation")
+    obligation_resume.add_argument("obligation_id")
+    obligation_resume.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_resume.add_argument("--summary", required=True, help="Fresh resumed obligation state")
+    obligation_resume.add_argument("--next-update-in", help="Expected next update duration, e.g. 15m")
 
-    watch_complete = watch_sub.add_parser("complete", help="Complete a supervision watch")
-    watch_complete.add_argument("watch_id")
-    watch_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_complete.add_argument("--status", default="done", choices=("done", "failed", "cancelled"))
-    watch_complete.add_argument("--summary", required=True, help="Terminal watch summary")
+    obligation_complete = obligation_sub.add_parser("complete", help="Complete an obligation")
+    obligation_complete.add_argument("obligation_id")
+    obligation_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_complete.add_argument("--status", default="done", choices=("done", "failed", "cancelled"))
+    obligation_complete.add_argument("--summary", required=True, help="Terminal obligation summary")
 
-    watch_list = watch_sub.add_parser("list", help="List supervision watches")
-    watch_list.add_argument("--role", help="Owning role; defaults to --actor or all roles for operator")
-    watch_list.add_argument("--state", action="append", choices=WATCH_STATES, help="Filter state; repeatable")
-    watch_list.add_argument("--limit", type=int, default=50)
+    obligation_list = obligation_sub.add_parser("list", help="List obligations")
+    obligation_list.add_argument("--role", help="Owning role; defaults to --actor or all roles for operator")
+    obligation_list.add_argument("--state", action="append", choices=OBLIGATION_STATES, help="Filter state; repeatable")
+    obligation_list.add_argument("--limit", type=int, default=50)
 
     role = subparsers.add_parser("role", help="Inspect or change role state")
     role_sub = role.add_subparsers(dest="role_command", required=True)
@@ -640,7 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog.add_argument("--role", help="Limit checks to one role")
     watchdog.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog.add_argument("--ack-warn-seconds", type=int, default=3600)
-    watchdog.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog.add_argument("--obligation-grace-seconds", type=int, default=0)
     watchdog.add_argument("--json", action="store_true", help="Print findings as JSON")
     watchdog_sub = watchdog.add_subparsers(dest="watchdog_command")
     watchdog_run = watchdog_sub.add_parser("run", help="Run a visible periodic watchdog loop in this pane")
@@ -650,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog_run.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
     watchdog_run.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog_run.add_argument("--ack-warn-seconds", type=int, default=3600)
-    watchdog_run.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog_run.add_argument("--obligation-grace-seconds", type=int, default=0)
     watchdog_run.add_argument("--iterations", type=int, help="Exit after this many iterations; useful for tests")
     watchdog_start = watchdog_sub.add_parser("start", help="Start a watchdog runner in a visible tmux window")
     watchdog_start.add_argument("--name", default="default", help="Runner name")
@@ -659,7 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog_start.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
     watchdog_start.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog_start.add_argument("--ack-warn-seconds", type=int, default=3600)
-    watchdog_start.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog_start.add_argument("--obligation-grace-seconds", type=int, default=0)
     watchdog_start.add_argument("--session", help="tmux session; defaults to current tmux session")
     watchdog_start.add_argument("--window-name", help="tmux window name; defaults to tt-watchdog-<name>")
     watchdog_start.add_argument("--tmux-bin", default="tmux")
@@ -969,11 +970,13 @@ def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext
             args.role = policy_context.actor
         if args.actor is None:
             args.actor = policy_context.actor or "operator"
-    if args.command == "watch":
+    if args.command == "obligation":
         if getattr(args, "role", None) is None and policy_context.actor is not None:
             args.role = policy_context.actor
-        if args.watch_command != "list" and args.role is None:
-            raise ValueError(f"watch {args.watch_command} --role is required unless --actor or ${ROLE_ENV} is set")
+        if args.obligation_command != "list" and args.role is None:
+            raise ValueError(
+                f"obligation {args.obligation_command} --role is required unless --actor or ${ROLE_ENV} is set"
+            )
     if args.command == "codex" and args.codex_command == "session-context" and args.role is None:
         args.role = policy_context.actor
         if args.role is None:
@@ -1063,8 +1066,8 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
             authorize(config, policy_context, "milestone.list", role=args.role or "")
         return
 
-    if args.command == "watch":
-        authorize(config, policy_context, f"watch.{args.watch_command}", role=args.role or "")
+    if args.command == "obligation":
+        authorize(config, policy_context, f"obligation.{args.obligation_command}", role=args.role or "")
         return
 
     if args.command == "role" and args.role_command != "list":
@@ -1160,11 +1163,13 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
                     if open_todos:
                         line = f"{line} todos_open={open_todos}"
                     print(f"      {line}")
-            watches = store.list_watches(conn, role=role["name"], states=WATCH_VISIBLE_STATES, limit=args.active_limit)
-            if watches:
-                print("    watches:")
-                for watch in watches:
-                    print(f"      {watch_one_line(watch)}")
+            obligations = store.list_obligations(
+                conn, role=role["name"], states=OBLIGATION_VISIBLE_STATES, limit=args.active_limit
+            )
+            if obligations:
+                print("    obligations:")
+                for obligation in obligations:
+                    print(f"      {obligation_one_line(obligation)}")
     if args.verbose:
         runners = store.list_watchdog_runners(conn, limit=args.active_limit)
         print("watchdog_runners:")
@@ -1407,76 +1412,77 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
     return 2
 
 
-def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
-    if args.watch_command == "start":
-        row = store.start_watch(
+def cmd_obligation(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.obligation_command == "start":
+        row = store.start_obligation(
             conn,
             role=args.role,
             summary=args.summary,
+            goal=args.goal,
             created_by=args.actor or "operator",
-            next_update_at=watch_next_update_at(args.next_update_in),
+            next_update_at=obligation_next_update_at(args.next_update_in),
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "update":
-        row = store.update_watch(
+    if args.obligation_command == "update":
+        row = store.update_obligation(
             conn,
             role=args.role,
-            watch_id=args.watch_id,
+            obligation_id=args.obligation_id,
             summary=args.summary,
             status=args.state,
-            next_update_at=watch_next_update_at(args.next_update_in),
+            next_update_at=obligation_next_update_at(args.next_update_in),
             actor=args.actor or "operator",
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "pause":
-        row = store.pause_watch(
+    if args.obligation_command == "pause":
+        row = store.pause_obligation(
             conn,
             role=args.role,
-            watch_id=args.watch_id,
+            obligation_id=args.obligation_id,
             reason=args.reason,
             review_at=review_at_from_args(args.review_in, args.review_at),
             actor=args.actor or "operator",
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "resume":
-        row = store.resume_watch(
+    if args.obligation_command == "resume":
+        row = store.resume_obligation(
             conn,
             role=args.role,
-            watch_id=args.watch_id,
+            obligation_id=args.obligation_id,
             summary=args.summary,
-            next_update_at=watch_next_update_at(args.next_update_in),
+            next_update_at=obligation_next_update_at(args.next_update_in),
             actor=args.actor or "operator",
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "complete":
-        row = store.complete_watch(
+    if args.obligation_command == "complete":
+        row = store.complete_obligation(
             conn,
             role=args.role,
-            watch_id=args.watch_id,
+            obligation_id=args.obligation_id,
             status=args.status,
             summary=args.summary,
             actor=args.actor or "operator",
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "list":
-        states = tuple(args.state) if args.state else WATCH_VISIBLE_STATES
-        rows = store.list_watches(conn, role=args.role, states=states, limit=args.limit)
+    if args.obligation_command == "list":
+        states = tuple(args.state) if args.state else OBLIGATION_VISIBLE_STATES
+        rows = store.list_obligations(conn, role=args.role, states=states, limit=args.limit)
         if not rows:
             role = args.role or "all roles"
-            print(f"no watches for {role}")
+            print(f"no obligations for {role}")
             return 0
         for row in rows:
-            print(watch_one_line(row))
+            print(obligation_one_line(row))
         return 0
 
     return 2
@@ -1825,7 +1831,7 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
         role=args.role,
         unacked_warn_seconds=args.unacked_warn_seconds,
         ack_warn_seconds=args.ack_warn_seconds,
-        watch_grace_seconds=args.watch_grace_seconds,
+        obligation_grace_seconds=args.obligation_grace_seconds,
     )
     if args.json:
         print(json_dumps(findings))
@@ -1876,7 +1882,7 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
                 role=args.role,
                 unacked_warn_seconds=args.unacked_warn_seconds,
                 ack_warn_seconds=args.ack_warn_seconds,
-                watch_grace_seconds=args.watch_grace_seconds,
+                obligation_grace_seconds=args.obligation_grace_seconds,
             )
             summary = summarize_watchdog_findings(findings)
             row = store.record_watchdog_runner_run(
@@ -1954,8 +1960,8 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
             str(args.unacked_warn_seconds),
             "--ack-warn-seconds",
             str(args.ack_warn_seconds),
-            "--watch-grace-seconds",
-            str(args.watch_grace_seconds),
+            "--obligation-grace-seconds",
+            str(args.obligation_grace_seconds),
         ]
     )
     if args.role:
@@ -2697,14 +2703,14 @@ def watchdog_findings(
     role: str | None,
     unacked_warn_seconds: int,
     ack_warn_seconds: int,
-    watch_grace_seconds: int,
+    obligation_grace_seconds: int,
 ) -> list[dict[str, str]]:
     roles = [role] if role else [row["name"] for row in store.list_roles(conn)]
     findings: list[dict[str, str]] = []
     now = datetime.now(UTC).replace(microsecond=0)
     unacked_cutoff = (now - timedelta(seconds=unacked_warn_seconds)).isoformat()
     ack_cutoff = (now - timedelta(seconds=ack_warn_seconds)).isoformat()
-    watch_cutoff = (now - timedelta(seconds=watch_grace_seconds)).isoformat()
+    obligation_cutoff = (now - timedelta(seconds=obligation_grace_seconds)).isoformat()
 
     for role_name in roles:
         if store.get_role(conn, role_name) is None:
@@ -2752,19 +2758,19 @@ def watchdog_findings(
 
         for row in conn.execute(
             """
-            SELECT * FROM watches
+            SELECT * FROM obligations
             WHERE role = ?
               AND status IN ('active', 'blocked')
               AND next_update_at IS NOT NULL
               AND next_update_at <= ?
             ORDER BY next_update_at
             """,
-            (role_name, watch_cutoff),
+            (role_name, obligation_cutoff),
         ):
             findings.append(
                 {
                     "severity": "warning",
-                    "kind": "watch_overdue",
+                    "kind": "obligation_overdue",
                     "role": row["role"],
                     "ref": row["id"],
                     "summary": row["current_summary"],
@@ -2773,7 +2779,7 @@ def watchdog_findings(
 
         for row in conn.execute(
             """
-            SELECT * FROM watches
+            SELECT * FROM obligations
             WHERE role = ?
               AND status = 'paused'
               AND review_at IS NOT NULL
@@ -2785,7 +2791,7 @@ def watchdog_findings(
             findings.append(
                 {
                     "severity": "warning",
-                    "kind": "watch_review_due",
+                    "kind": "obligation_review_due",
                     "role": row["role"],
                     "ref": row["id"],
                     "summary": row["paused_reason"] or row["current_summary"],
@@ -2904,7 +2910,7 @@ def active_message_line(row, unacked_warn_seconds: int | None = None) -> str:
     return " ".join(parts)
 
 
-def watch_one_line(row) -> str:
+def obligation_one_line(row) -> str:
     parts = [
         row["id"],
         f"role={row['role']}",
@@ -2912,9 +2918,11 @@ def watch_one_line(row) -> str:
         f"age={format_age(row['created_at'])}",
         f"updated={row['updated_at']}",
     ]
+    if row["goal"]:
+        parts.append(f"goal={row['goal']}")
     if row["next_update_at"]:
         parts.append(f"next_update_at={row['next_update_at']}")
-    if row["status"] == WATCH_PAUSED_STATE:
+    if row["status"] == OBLIGATION_PAUSED_STATE:
         if row["review_at"]:
             parts.append(f"review_at={row['review_at']}")
         if row["paused_by"]:
@@ -2952,7 +2960,7 @@ def claimed_unacked_warning(row, threshold_seconds: int | None) -> bool:
     return int(age.total_seconds()) >= threshold_seconds
 
 
-def watch_next_update_at(value: str | None) -> str | None:
+def obligation_next_update_at(value: str | None) -> str | None:
     if value is None:
         return None
     raw = value.strip()

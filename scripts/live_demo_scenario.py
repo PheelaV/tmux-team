@@ -287,10 +287,10 @@ def verify(root: Path) -> None:
             f"scope = '{STABLE_SCOPE}' AND commit_sha = '{collector_head}'",
             1,
         )
-        require_sql_count_exact(conn, "watches", "status IN ('active', 'blocked')", 0)
-        require_sql_count_exact(conn, "watches", "status IN ('done', 'failed', 'cancelled')", 1)
-        require_sql_count(conn, "events", "type = 'watch.updated'", 2)
-        require_sql_count(conn, "events", "type = 'watch.completed'", 1)
+        require_sql_count_exact(conn, "obligations", "status IN ('active', 'blocked')", 0)
+        require_sql_count_exact(conn, "obligations", "status IN ('done', 'failed', 'cancelled')", 1)
+        require_sql_count(conn, "events", "type = 'obligation.updated'", 2)
+        require_sql_count(conn, "events", "type = 'obligation.completed'", 1)
         require_sql_count(conn, "events", "type = 'stable.approved'", 1)
     finally:
         conn.close()
@@ -409,16 +409,16 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     A seeded regression causes tmux-team inbox claiming to violate urgent-first priority ordering. The team must diagnose and fix this from tests and code, then verify the fix from the collector worktree.
 
     Required team flow:
-    1. Orchestrator records a start milestone and starts a watch for demo verification.
+    1. Orchestrator records a start milestone and starts an obligation for demo verification.
     2. Orchestrator runs status --verbose, pane list --all, watchdog, and memory show for its own role before dispatching.
     3. Orchestrator sends a notice-only checkpoint with broadcast --from orchestrator --notice --only implementer,collector.
     4. Orchestrator sends collector exactly one baseline evidence task with --correlation-key {CORRELATION_KEYS["baseline"]}. The collector identifies the minimal failing test command and reports evidence with --reply-to-sender.
-    5. Orchestrator updates the watch after accepting collector evidence.
+    5. Orchestrator updates the obligation after accepting collector evidence.
     6. Orchestrator sends implementer exactly one fix task with --correlation-key {CORRELATION_KEYS["fix"]}. The implementer fixes the production bug in the implementer worktree, runs the targeted test, commits the fix, and reports the commit SHA with --reply-to-sender.
     7. Orchestrator inspects relation state with inbox list --role collector --verbose and inbox list --role implementer --verbose, then inspects at least one role pane with pane capture --lines N --offset N.
     8. Orchestrator approves the implementer fix with stable approve <sha> --role {STABLE_SCOPE}.
     9. Orchestrator sends collector exactly one fix verification task with --correlation-key {CORRELATION_KEYS["verification"]}. The collector uses tmux-team stable sync --role collector --apply or an equivalent checkout of the approved stable commit, then reruns the targeted test in the collector worktree.
-    10. Orchestrator updates and completes the watch, records a final milestone that the target test passed, checks watchdog is clean, and broadcasts a notice-only final summary with broadcast --from orchestrator --notice --exclude orchestrator.
+    10. Orchestrator updates and completes the obligation, records a final milestone that the target test passed, checks watchdog is clean, and broadcasts a notice-only final summary with broadcast --from orchestrator --notice --exclude orchestrator.
 
     After reviewing completion notices, close them with inbox complete-replies or an explicit inbox complete command so the final inbox has no unfinished work.
 
@@ -438,7 +438,7 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     - Collector verifies that commit in its own worktree.
     - Orchestrator records the fix as the collector stable commit before collector verification.
     - Role communication uses tmux-team inbox messages and completion replies, not ad-hoc pane text.
-    - The run exercises status --verbose, inbox list --verbose, pane list --all, pane capture --lines/--offset, watchdog, watch start/update/complete, milestones, completion replies, stable approve/sync, broadcast --notice --only, and broadcast --notice --exclude.
+    - The run exercises status --verbose, inbox list --verbose, pane list --all, pane capture --lines/--offset, watchdog, obligation start/update/complete, milestones, completion replies, stable approve/sync, broadcast --notice --only, and broadcast --notice --exclude.
     - Non-orchestrator roles do not write milestones.
 
     Boundaries:

@@ -15,7 +15,7 @@ Use this as agent-facing project memory. Human docs live in [../docs/index.md](.
 - Message relation metadata, completion notices, notice broadcasts, and duplicate warnings.
 - Role-owned active-message todos with recovery surfaces.
 - Scratchpad memory and append-only milestones.
-- Watches for long-running role-owned supervision.
+- Obligations for long-running role-owned commitments.
 - `status --verbose`, dashboard snapshots/live TUI, pane listing, and pane capture/summary.
 - Single-shot watchdog checks and visible watchdog runners.
 - `tmux-team sleep` TOML snapshots and managed-window teardown.
@@ -37,7 +37,7 @@ Use this as agent-facing project memory. Human docs live in [../docs/index.md](.
 
 - Active Slurm run registry.
 - Retry/backoff for notifications.
-- `tmux-team status --watch`.
+- richer obligation status filters.
 - Subagent join ledger.
 - Real MCP SDK dependency.
 - Custom notification providers.

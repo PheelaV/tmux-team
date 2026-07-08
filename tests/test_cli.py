@@ -542,7 +542,7 @@ runtime_dir = "{other_runtime}"
         )
         self.assertEqual(code, 0, err)
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "start",
             "--role",
             "collector",
@@ -582,7 +582,7 @@ runtime_dir = "{other_runtime}"
             collected_at="2026-07-04T12:00:00+00:00",
             roles=(),
             active_messages=(),
-            watches=(),
+            obligations=(),
             watchdog_runners=(),
             milestones=(),
             memories=(),
@@ -937,9 +937,9 @@ exit 9
         self.assertIn("Watchdog Runners", out)
         self.assertIn("demo stopped interval=1s scope=team", out)
 
-    def test_watch_lifecycle_and_status_verbose(self) -> None:
+    def test_obligation_lifecycle_and_status_verbose(self) -> None:
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "start",
             "--role",
             "collector",
@@ -949,16 +949,16 @@ exit 9
             "5m",
         )
         self.assertEqual(code, 0, err)
-        watch_id = out.split()[0]
-        self.assertTrue(watch_id.startswith("watch_"))
+        obligation_id = out.split()[0]
+        self.assertTrue(obligation_id.startswith("obligation_"))
         self.assertIn("role=collector", out)
         self.assertIn("state=active", out)
         self.assertIn("next_update_at=", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "update",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--summary",
@@ -971,14 +971,14 @@ exit 9
 
         code, out, err = self.run_cli("status", "--verbose")
         self.assertEqual(code, 0, err)
-        self.assertIn("watches:", out)
-        self.assertIn(f"{watch_id} role=collector state=active", out)
+        self.assertIn("obligations:", out)
+        self.assertIn(f"{obligation_id} role=collector state=active", out)
         self.assertIn("summary=heartbeat ok", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "complete",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--status",
@@ -989,13 +989,13 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("state=done", out)
 
-        code, out, err = self.run_cli("watch", "list", "--role", "collector", "--state", "done")
+        code, out, err = self.run_cli("obligation", "list", "--role", "collector", "--state", "done")
         self.assertEqual(code, 0, err)
         self.assertIn("summary=run terminalized", out)
 
-    def test_watch_pause_resume_and_review_due(self) -> None:
+    def test_obligation_pause_resume_and_review_due(self) -> None:
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "start",
             "--role",
             "collector",
@@ -1005,24 +1005,24 @@ exit 9
             "1m",
         )
         self.assertEqual(code, 0, err)
-        watch_id = out.split()[0]
+        obligation_id = out.split()[0]
 
         store = Store(load_config(self.config))
         with store.connect() as conn:
             conn.execute(
-                "UPDATE watches SET next_update_at = ? WHERE id = ?",
-                ("2000-01-01T00:00:00+00:00", watch_id),
+                "UPDATE obligations SET next_update_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", obligation_id),
             )
             conn.commit()
 
-        code, out, err = self.run_cli("watchdog", "--watch-grace-seconds", "0")
+        code, out, err = self.run_cli("watchdog", "--obligation-grace-seconds", "0")
         self.assertEqual(code, 0, err)
-        self.assertIn(f"kind=watch_overdue role=collector ref={watch_id}", out)
+        self.assertIn(f"kind=obligation_overdue role=collector ref={obligation_id}", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "pause",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--reason",
@@ -1035,15 +1035,15 @@ exit 9
         self.assertIn("reason=blocked by prerequisite", out)
         self.assertIn("review_at=2099-01-01T00:00:00+00:00", out)
 
-        code, out, err = self.run_cli("watchdog", "--watch-grace-seconds", "0")
+        code, out, err = self.run_cli("watchdog", "--obligation-grace-seconds", "0")
         self.assertEqual(code, 0, err)
-        self.assertNotIn("kind=watch_overdue", out)
-        self.assertNotIn("kind=watch_review_due", out)
+        self.assertNotIn("kind=obligation_overdue", out)
+        self.assertNotIn("kind=obligation_review_due", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "pause",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--reason",
@@ -1053,15 +1053,15 @@ exit 9
         )
         self.assertEqual(code, 0, err)
 
-        code, out, err = self.run_cli("watchdog", "--watch-grace-seconds", "0")
+        code, out, err = self.run_cli("watchdog", "--obligation-grace-seconds", "0")
         self.assertEqual(code, 0, err)
-        self.assertIn(f"kind=watch_review_due role=collector ref={watch_id}", out)
-        self.assertNotIn("kind=watch_overdue", out)
+        self.assertIn(f"kind=obligation_review_due role=collector ref={obligation_id}", out)
+        self.assertNotIn("kind=obligation_overdue", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "resume",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--summary",

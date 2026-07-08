@@ -133,8 +133,8 @@ Watchdog checks are local supervision, not autonomous orchestration.
 - Use `tmux-team watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown.
 - Watchdog runners must stay visible in tmux and self-describing in pane output.
 - Runner state must be inspected through `watchdog list`, `watchdog status`, `status --verbose`, `dashboard`, or `pane list --all`.
-- Do not confuse watches with watchdog runners: watches are role-owned expectations; watchdog runners are periodic checkers.
-- Watchdog checks do not wake roles, mutate inbox/watch state, or write milestones by default.
+- Do not confuse obligations with watchdog runners: obligations are role-owned commitments; watchdog runners are periodic checkers.
+- Watchdog checks do not wake roles, mutate inbox/obligation state, or write milestones by default.
 
 ## Milestone Log
 

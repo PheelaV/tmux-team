@@ -136,12 +136,12 @@ The orchestrator is on the critical path for team throughput and should not seri
 The operator and orchestrator may inspect managed role panes.
 
 - Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
-- Use `tmux-team dashboard --once` for a deterministic read-only snapshot of roles, active messages, todos, watches, milestones, memory excerpts, alerts, and optional pane tails.
+- Use `tmux-team dashboard --once` for a deterministic read-only snapshot of roles, active messages, todos, obligations, milestones, memory excerpts, alerts, and optional pane tails.
 - Use `tmux-team dashboard` for the live Textual operator dashboard only when the optional `tmux-team[dashboard]` extra is installed.
 - Dashboard sections must label provenance. Runtime database rows are authoritative, memory excerpts are prose, and pane previews are best-effort tmux captures with screen-text heuristic status only.
 - Textual dashboard rendering must escape arbitrary memory and pane text as plain text. Captured terminal output must not be treated as trusted Rich markup.
 - The live dashboard should remain keyboard-first: refresh/help, role filter shortcuts, team overview, and direct section jumps must work without mouse input.
-- Dashboard views are observation surfaces. They must not mutate inbox, todo, watch, milestone, memory, or role state.
+- Dashboard views are observation surfaces. They must not mutate inbox, todo, obligation, milestone, memory, or role state.
 - Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
 - Use `tmux-team pane capture <role> --summary` when raw scrollback would flood context; summaries must be generated from bounded capture, use a compact JSON shape, and remain observational only.
@@ -202,24 +202,24 @@ Message completion is durable state. Conversational completion replies are expli
 - For one logical work thread, reuse one stable `--correlation-key` across retries, follow-ups, and verification. Different keys are treated as different work, so near-synonym keys create avoidable duplicate work. Use `--allow-duplicate` only when redundant independent work is deliberate.
 - Plain `complete` remains available for scripts and operator-originated tasks that should not generate reply traffic.
 
-## Supervision Watches
+## Obligations
 
 Long-running monitoring work must not be hidden as an indefinitely acknowledged inbox task.
 
-- Use `tmux-team watch start/update/complete` for ongoing supervision with heartbeat-style updates.
-- Watches are durable role-owned state with a current summary, last update, optional next expected update, and terminal status.
-- Use `tmux-team watch pause/resume` for non-terminal deferral. A paused watch preserves its previous summary, stores a pause reason, optional review time, paused timestamp, and actor, and must not count as overdue while paused.
-- When a paused watch review time passes, `tmux-team watchdog` reports `watch_review_due`. Use `watch complete --status cancelled` for terminal cancellation.
-- Watches appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
-- Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
-- A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
+- Use `tmux-team obligation start/update/complete` for ongoing role-owned commitments with expected updates.
+- Obligations are durable role-owned state with a current summary, optional goal, last update, optional next expected update, and terminal status.
+- Use `tmux-team obligation pause/resume` for non-terminal deferral. A paused obligation preserves its previous summary, stores a pause reason, optional review time, paused timestamp, and actor, and must not count as overdue while paused.
+- When a paused obligation review time passes, `tmux-team watchdog` reports `obligation_review_due`. Use `obligation complete --status cancelled` for terminal cancellation.
+- Obligations appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
+- Obligations are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+- A role may manage its own obligations. The orchestrator and operator may manage or inspect obligations across roles.
 
 ## Watchdog
 
 Watchdog checks are local supervision, not autonomous orchestration.
 
-- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, overdue watches, and review-due paused watches/runners.
-- Watchdog checks must not mutate message/watch state, wake roles, or write milestones by default.
+- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, overdue obligations, and review-due paused obligations/runners.
+- Watchdog checks must not mutate message/obligation state, wake roles, or write milestones by default.
 - Bare `tmux-team watchdog` remains a single-shot report command for debugging and scripts.
 - Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog pause`, `watchdog resume`, `watchdog stop`, `watchdog list`, and `watchdog status`.
 - `watchdog start` must create visible tmux infrastructure, not a hidden background process.
@@ -227,7 +227,7 @@ Watchdog checks are local supervision, not autonomous orchestration.
 - Watchdog runner panes must be self-describing: name, interval, scope, delivery label, last run, next run, last finding, backing pane, and safe-close guidance are visible in pane output.
 - Watchdog runner state is durable SQLite state and must appear in `status --verbose` and `dashboard`.
 - `tmux-team pane list --all` must mark watchdog panes as watchdog infrastructure, not as ordinary unmanaged shells.
-- Watches and watchdog runners are different: watches are role-owned deadlines/expectations; watchdog runners are schedulers/checkers that periodically inspect durable state.
+- Obligations and watchdog runners are different: obligations are role-owned commitments; watchdog runners are schedulers/checkers that periodically inspect durable state.
 
 ## State
 
@@ -235,7 +235,7 @@ The config and runtime store are the source of truth.
 
 - `.tmux-team/team.toml` records role names, pane targets, app-server endpoint, and Codex thread IDs.
 - Operator-facing team, role, and lifecycle configuration is TOML.
-- `team.sqlite` records messages, todos, notifications, role state, watches, events, and stable commits.
+- `team.sqlite` records messages, todos, notifications, role state, obligations, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
 - `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE` are pane-local process bindings for ergonomics only.
 - Bootstrap startup prompts must include explicit `--role <role>` commands because Codex tool shells may not inherit pane-local env.

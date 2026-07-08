@@ -11,7 +11,7 @@ from .config import TeamConfig, role_scratchpad_path
 from .store import (
     CLAIMABLE_STATES,
     STALE_CLAIMED_STATE,
-    WATCH_VISIBLE_STATES,
+    OBLIGATION_VISIBLE_STATES,
     Store,
     inspect_tmux_pane,
     parse_utc_datetime,
@@ -30,7 +30,7 @@ class DashboardSnapshot:
     collected_at: str
     roles: tuple[dict[str, object], ...]
     active_messages: tuple[dict[str, object], ...]
-    watches: tuple[dict[str, object], ...]
+    obligations: tuple[dict[str, object], ...]
     watchdog_runners: tuple[dict[str, object], ...]
     milestones: tuple[dict[str, object], ...]
     memories: tuple[dict[str, object], ...]
@@ -57,7 +57,7 @@ def collect_dashboard_snapshot(
     counts = store.active_counts(conn)
     role_rows: list[dict[str, object]] = []
     active_rows: list[dict[str, object]] = []
-    watch_rows: list[dict[str, object]] = []
+    obligation_rows: list[dict[str, object]] = []
     watchdog_rows: list[dict[str, object]] = []
     memory_rows: list[dict[str, object]] = []
     pane_rows: list[dict[str, object]] = []
@@ -119,28 +119,31 @@ def collect_dashboard_snapshot(
                 }
             )
 
-        for watch in store.list_watches(conn, role=role_name, states=WATCH_VISIBLE_STATES, limit=active_limit):
-            paused = watch["status"] == "paused"
-            overdue = not paused and is_overdue(watch["next_update_at"])
-            review_due = paused and is_overdue(watch["review_at"])
+        for obligation in store.list_obligations(
+            conn, role=role_name, states=OBLIGATION_VISIBLE_STATES, limit=active_limit
+        ):
+            paused = obligation["status"] == "paused"
+            overdue = not paused and is_overdue(obligation["next_update_at"])
+            review_due = paused and is_overdue(obligation["review_at"])
             if overdue:
-                alerts.append(f"{role_name}: watch overdue {watch['id']} {watch['current_summary']}")
+                alerts.append(f"{role_name}: obligation overdue {obligation['id']} {obligation['current_summary']}")
             if review_due:
                 alerts.append(
-                    f"{role_name}: watch review due {watch['id']} {watch['paused_reason'] or watch['current_summary']}"
+                    f"{role_name}: obligation review due "
+                    f"{obligation['id']} {obligation['paused_reason'] or obligation['current_summary']}"
                 )
-            watch_rows.append(
+            obligation_rows.append(
                 {
                     "role": role_name,
                     "source": "runtime-db",
                     "confidence": "authoritative",
-                    "watch_id": str(watch["id"]),
-                    "state": str(watch["status"]),
-                    "summary": str(watch["current_summary"]),
-                    "updated": format_age(str(watch["updated_at"])),
-                    "next_update": str(watch["next_update_at"] or "-"),
-                    "paused_reason": str(watch["paused_reason"] or "-"),
-                    "review_at": str(watch["review_at"] or "-"),
+                    "obligation_id": str(obligation["id"]),
+                    "state": str(obligation["status"]),
+                    "summary": str(obligation["current_summary"]),
+                    "updated": format_age(str(obligation["updated_at"])),
+                    "next_update": str(obligation["next_update_at"] or "-"),
+                    "paused_reason": str(obligation["paused_reason"] or "-"),
+                    "review_at": str(obligation["review_at"] or "-"),
                     "overdue": overdue,
                     "review_due": review_due,
                 }
@@ -216,7 +219,7 @@ def collect_dashboard_snapshot(
         collected_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
         roles=tuple(role_rows),
         active_messages=tuple(active_rows),
-        watches=tuple(watch_rows),
+        obligations=tuple(obligation_rows),
         watchdog_runners=tuple(watchdog_rows),
         milestones=tuple(milestone_rows),
         memories=tuple(memory_rows),
@@ -256,8 +259,8 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool =
     )
     lines.extend(["", "Active Work [source=runtime-db todo]"])
     lines.extend(indent_lines(active_lines(snapshot.active_messages, provenance=provenance), "  "))
-    lines.extend(["", "Watches [source=runtime-db]"])
-    lines.extend(indent_lines(watch_lines(snapshot.watches, provenance=provenance), "  "))
+    lines.extend(["", "Obligations [source=runtime-db]"])
+    lines.extend(indent_lines(obligation_lines(snapshot.obligations, provenance=provenance), "  "))
     lines.extend(["", "Watchdog Runners [source=watchdog/runtime-db]"])
     lines.extend(indent_lines(watchdog_lines(snapshot.watchdog_runners, provenance=provenance), "  "))
     lines.extend(["", "Milestones [source=milestone-jsonl]"])
@@ -313,7 +316,7 @@ def run_textual_dashboard(
             ("f", "filter_focused_role", "Filter role"),
             ("a", "show_section('alerts')", "Alerts"),
             ("t", "show_section('roles')", "Roles"),
-            ("w", "show_section('watches')", "Watches"),
+            ("o", "show_section('obligations')", "Obligations"),
             ("d", "show_section('watchdogs')", "Watchdogs"),
             ("m", "show_section('milestones')", "Milestones"),
             ("p", "show_section('panes')", "Panes"),
@@ -347,7 +350,7 @@ def run_textual_dashboard(
             yield Static(id="help")
             with VerticalScroll():
                 yield Static(id="active", classes="panel")
-                yield Static(id="watches", classes="panel")
+                yield Static(id="obligations", classes="panel")
                 yield Static(id="watchdogs", classes="panel")
                 yield Static(id="milestones", classes="panel")
                 yield Static(id="memory", classes="panel")
@@ -468,8 +471,11 @@ def run_textual_dashboard(
                     active_lines(snapshot.active_messages, rich=True, provenance=provenance),
                 )
             )
-            self.query_one("#watches", Static).update(
-                section_panel("Watches [runtime-db]", watch_lines(snapshot.watches, rich=True, provenance=provenance))
+            self.query_one("#obligations", Static).update(
+                section_panel(
+                    "Obligations [runtime-db]",
+                    obligation_lines(snapshot.obligations, rich=True, provenance=provenance),
+                )
             )
             self.query_one("#watchdogs", Static).update(
                 section_panel(
@@ -524,7 +530,7 @@ def help_text() -> str:
             "[b]tmux-team dashboard keys[/b]",
             "r refresh  q quit  h help  tab/shift-tab focus  escape team overview",
             "f filter to focused role row  1-9 role rows 1-9  0 role row 10",
-            "jumps: a alerts  t roles  w watches  d watchdogs  m milestones  p panes",
+            "jumps: a alerts  t roles  o obligations  d watchdogs  m milestones  p panes",
             "Sources: runtime-db is authoritative; memory-excerpt is prose; pane-capture is best-effort screen text.",
         ]
     )
@@ -557,7 +563,7 @@ def active_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, prove
     return lines
 
 
-def watch_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
+def obligation_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
     lines: list[str] = []
     seen = False
     for row in rows:
@@ -576,7 +582,7 @@ def watch_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, proven
                 f" review={safe_row_text(row, 'review_at', rich)} reason={safe_row_text(row, 'paused_reason', rich)}"
             )
         lines.append(
-            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'watch_id', rich)} {marker} "
+            f"{safe_row_text(row, 'role', rich)} {safe_row_text(row, 'obligation_id', rich)} {marker} "
             f"updated={safe_row_text(row, 'updated', rich)} next={safe_row_text(row, 'next_update', rich)}{pause} "
             f"{safe_row_text(row, 'summary', rich)}{provenance_suffix(row, provenance)}"
         )

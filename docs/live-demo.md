@@ -34,12 +34,12 @@ The scenario asks the orchestrator to exercise the main operating surfaces:
 - durable role dispatch with stable `--correlation-key` values;
 - completion replies back to the original sender;
 - `status --verbose`, `inbox list --verbose`, `pane list --all`, `pane capture --lines/--offset`, and `watchdog`;
-- watch start/update/complete state;
+- obligation start/update/complete state;
 - milestone recording by the orchestrator only;
 - stable commit approval and collector sync;
 - `broadcast --notice --only` and `broadcast --notice --exclude`.
 
-The verifier checks that the final target test passes in the collector worktree, the implementer produced a fix commit, the collector verified the approved stable commit in its own worktree, and the runtime database contains the expected messages, completion notices, notice broadcasts, a completed watch, stable approval, watch events, and milestones. It fails duplicate collector verification dispatches by requiring the exact expected correlation keys and message counts.
+The verifier checks that the final target test passes in the collector worktree, the implementer produced a fix commit, the collector verified the approved stable commit in its own worktree, and the runtime database contains the expected messages, completion notices, notice broadcasts, a completed obligation, stable approval, obligation events, and milestones. It fails duplicate collector verification dispatches by requiring the exact expected correlation keys and message counts.
 
 Lifecycle features such as `sleep`, `resume`, and role resizing are covered by the local integration tests rather than this live bugfix scenario.
 

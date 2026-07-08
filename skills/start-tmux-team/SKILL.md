@@ -116,6 +116,7 @@ tmux-team status
 tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
 tmux-team broadcast --from orchestrator --summary "collector check" --body "Report test status." --only collector
+tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team watchdog
 tmux-team watchdog start --name default --interval 15m
@@ -205,7 +206,7 @@ Use `tmux-team broadcast` when the orchestrator needs to send the same checkpoin
 
 Use `tmux-team pane capture <role> --lines N --offset N` for live supervision when memory and messages are not enough. `--lines` or `--limit` controls how much history to print; `--offset` pages back from the newest output. Pane capture lets the orchestrator or operator inspect recent visible pane output for progress, stuck commands, approval prompts, or intermediate test output. Pane capture is observation only; do not use it as proof of delivery or completion.
 
-Use native watchdog runners for repeated durable-state checks. Bare `tmux-team watchdog` is a single-shot checker. `tmux-team watchdog start --name <name> --interval <duration>` opens visible tmux infrastructure, records runner state in SQLite, and surfaces it through `watchdog list`, `status --verbose`, `dashboard`, and `pane list --all`. Use `watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown. Do not treat watchdog runners as role agents or watches.
+Use native watchdog runners for repeated durable-state checks. Bare `tmux-team watchdog` is a single-shot checker. `tmux-team watchdog start --name <name> --interval <duration>` opens visible tmux infrastructure, records runner state in SQLite, and surfaces it through `watchdog list`, `status --verbose`, `dashboard`, and `pane list --all`. Use `watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown. Do not treat watchdog runners as role agents or obligations.
 
 For freeze, checkpoint, restart, or do-not-continue instructions, send an urgent message. App-server wakes include the highest-priority pending sender, priority, and summary; urgent wakes tell the role to stop at the current safe point and claim the urgent message before continuing other work. Keep the full instruction in the durable message body.
 
