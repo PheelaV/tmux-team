@@ -930,7 +930,7 @@ if [ "$1" = "new-window" ]; then
   printf '%%9\\n'
   exit 0
 fi
-if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "kill-pane" ]; then
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "select-layout" ] || [ "$1" = "kill-pane" ]; then
   exit 0
 fi
 exit 9
@@ -955,12 +955,13 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("default state=running interval=1m scope=team", out)
         self.assertIn("pane=%9", out)
-        self.assertIn("tmux: tt-test:tt-watchdog-default pane=%9", out)
+        self.assertIn("tmux: tt-test:tt-watchdogs pane=%9", out)
         logged = log_path.read_text(encoding="utf-8")
-        self.assertIn("new-window -d -P -F #{pane_id} -t tt-test -n tt-watchdog-default", logged)
+        self.assertIn("new-window -d -P -F #{pane_id} -t tt-test -n tt-watchdogs", logged)
         self.assertIn("watchdog run --name default --interval 1m", logged)
         self.assertIn("set-option -p -t %9 @tmux-team-watchdog default", logged)
         self.assertIn("select-pane -t %9 -T tt-watchdog-default", logged)
+        self.assertIn("select-layout -t tt-test:tt-watchdogs tiled", logged)
 
         code, out, err = self.run_cli("status", "--verbose")
         self.assertEqual(code, 0, err)
@@ -973,6 +974,53 @@ exit 9
         self.assertIn("safe_to_close=yes", out)
         logged = log_path.read_text(encoding="utf-8")
         self.assertIn("kill-pane -t %9", logged)
+
+    def test_watchdog_start_reuses_shared_watchdog_window(self) -> None:
+        fake_dir = self.root / "watchdog-shared-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "watchdog-shared-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "list-windows" ]; then
+  printf 'tt-control\\ntt-watchdogs\\n'
+  exit 0
+fi
+if [ "$1" = "split-window" ]; then
+  printf '%%10\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "select-layout" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "second",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("second state=running interval=1m scope=team", out)
+        self.assertIn("tmux: tt-test:tt-watchdogs pane=%10", out)
+        logged = log_path.read_text(encoding="utf-8")
+        self.assertIn("split-window -d -P -F #{pane_id} -t tt-test:tt-watchdogs", logged)
+        self.assertNotIn("new-window", logged)
+        self.assertIn("select-pane -t %10 -T tt-watchdog-second", logged)
+        self.assertIn("select-layout -t tt-test:tt-watchdogs tiled", logged)
 
     def test_watchdog_update_changes_runner_config(self) -> None:
         fake_dir = self.root / "watchdog-update-bin"
@@ -1328,7 +1376,7 @@ exit 9
                 notify_role=None,
                 delivery_method="report-only",
                 pane="%9",
-                window="tt-test:tt-watchdog-default",
+                window="tt-test:tt-watchdogs",
                 process_id=123,
                 last_run_at="2026-01-01T00:00:00+00:00",
                 next_run_at="2026-01-01T00:01:00+00:00",
@@ -1819,7 +1867,7 @@ if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
 fi
 if [ "$1" = "display-message" ]; then
   case "$4" in
-    %9) printf 'tt-test:tt-watchdog-default\\n'; exit 0 ;;
+    %9) printf 'tt-test:tt-watchdogs\\n'; exit 0 ;;
   esac
 fi
 if [ "$1" = "list-panes" ]; then
@@ -1830,8 +1878,8 @@ if [ "$1" = "list-panes" ]; then
     test:orchestrator)
       printf '%%2\\ttest:orchestrator.0\\tcodex\\t/tmp/orchestrator\\n'
       ;;
-    tt-test:tt-watchdog-default)
-      printf '%%9\\ttt-test:tt-watchdog-default.0\\tzsh\\t/tmp/project\\n'
+    tt-test:tt-watchdogs)
+      printf '%%9\\ttt-test:tt-watchdogs.0\\tzsh\\t/tmp/project\\n'
       ;;
   esac
   exit 0
@@ -1859,7 +1907,7 @@ exit 9
 
         self.assertEqual(code, 0, err)
         self.assertIn(
-            "role=- managed=false pane=tt-test:tt-watchdog-default.0 pane_id=%9 "
+            "role=- managed=false pane=tt-test:tt-watchdogs.0 pane_id=%9 "
             "command=zsh path=/tmp/project watchdog=default infrastructure=watchdog",
             out,
         )
@@ -3111,8 +3159,8 @@ can_notify = ["orchestrator"]
                 goal="Keep collector pressure alive",
                 notify_role="orchestrator",
                 delivery_method="app-server-turn",
-                pane="tt:tt-watchdog-live.0",
-                window="tt:tt-watchdog-live",
+                pane="tt:tt-watchdogs.0",
+                window="tt:tt-watchdogs",
             )
         fake_dir, log_path = self.write_fake_lifecycle_tmux()
 
@@ -3192,8 +3240,8 @@ can_notify = ["orchestrator"]
         self.assertEqual(code, 0, err)
         self.assertIn("watchdogs: 1", out)
         self.assertIn("watchdog_panes:", out)
-        self.assertIn("live: pane=tt:tt-watchdog-live.0", out)
-        self.assertIn("-n tt-watchdog-live", out)
+        self.assertIn("live: pane=tt:tt-watchdogs.0", out)
+        self.assertIn("-n tt-watchdogs", out)
         self.assertIn("watchdog run --name live --interval 1m", out)
         self.assertIn("--delivery app-server-turn", out)
         self.assertIn("--notify-role orchestrator", out)
@@ -3212,8 +3260,8 @@ can_notify = ["orchestrator"]
                 goal="Recover pressure after abrupt shutdown",
                 notify_role="orchestrator",
                 delivery_method="app-server-turn",
-                pane="tt:tt-watchdog-pressure.0",
-                window="tt:tt-watchdog-pressure",
+                pane="tt:tt-watchdogs.0",
+                window="tt:tt-watchdogs",
             )
 
         code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server")
@@ -3394,14 +3442,14 @@ description = "Live recovery watchdog"
 goal = "Keep collector pressure alive"
 notify_role = "orchestrator"
 delivery_method = "app-server-turn"
-pane = "tt:tt-watchdog-live.0"
-window = "tt:tt-watchdog-live"
+pane = "tt:tt-watchdogs.0"
+window = "tt:tt-watchdogs"
 
 [watchdogs.live.tmux]
-target = "tt:tt-watchdog-live.0"
+target = "tt:tt-watchdogs.0"
 session = "tt"
 window_id = "@4"
-window_name = "tt-watchdog-live"
+window_name = "tt-watchdogs"
 pane_id = "%12"
 pane_title = "tt-watchdog-live"
 pane_dead = false
@@ -3502,13 +3550,13 @@ if [ "$1" = "display-message" ] && [ "$2" = "-p" ]; then
   case "$4" in
     tt:tt-agents.0) printf 'tt\\t@3\\ttt-agents\\t%%10\\ttt-orchestrator\\t0\\tbash\\n'; exit 0 ;;
     tt:tt-agents.1) printf 'tt\\t@3\\ttt-agents\\t%%11\\ttt-implementer\\t0\\tbash\\n'; exit 0 ;;
-    tt:tt-watchdog-live.0) printf 'tt\\t@4\\ttt-watchdog-live\\t%%12\\ttt-watchdog-live\\t0\\tbash\\n'; exit 0 ;;
+    tt:tt-watchdogs.0) printf 'tt\\t@4\\ttt-watchdogs\\t%%12\\ttt-watchdog-live\\t0\\tbash\\n'; exit 0 ;;
   esac
   printf 'unknown target %s\\n' "$4" >&2
   exit 1
 fi
 if [ "$1" = "list-windows" ]; then
-  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n@4\\ttt-watchdog-live\\n'
+  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n@4\\ttt-watchdogs\\n'
   exit 0
 fi
 if [ "$1" = "kill-window" ]; then

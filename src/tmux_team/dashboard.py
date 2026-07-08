@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
 from .config import TeamConfig, role_scratchpad_path
+from .display import (
+    codex_settings_summary,
+    format_seconds_duration,
+    role_capabilities,
+    watchdog_runner_display_state,
+)
 from .store import (
     CLAIMABLE_STATES,
     OBLIGATION_VISIBLE_STATES,
@@ -21,6 +26,9 @@ from .store import (
 
 class DashboardDependencyError(RuntimeError):
     pass
+
+
+ROLE_TABLE_HEADERS = ("role", "state", "pane", "pending", "claimed", "ack", "stale", "todos", "codex", "active")
 
 
 @dataclass(frozen=True)
@@ -243,26 +251,7 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool =
     ]
     lines.extend(f"  ! {alert}" for alert in snapshot.alerts) if snapshot.alerts else lines.append("  none")
     lines.extend(["", "Roles [source=runtime-db]"])
-    lines.extend(
-        format_table(
-            ("role", "state", "pane", "pending", "claimed", "ack", "stale", "todos", "codex", "active"),
-            (
-                (
-                    row_text(row, "name"),
-                    row_text(row, "state"),
-                    row_text(row, "pane"),
-                    row_text(row, "pending"),
-                    row_text(row, "claimed"),
-                    row_text(row, "acknowledged"),
-                    row_text(row, "stale_claimed"),
-                    row_text(row, "open_todos"),
-                    truncate(row_text(row, "codex_settings"), 32),
-                    truncate(row_text(row, "active_summary"), 54),
-                )
-                for row in snapshot.roles
-            ),
-        )
-    )
+    lines.extend(format_table(ROLE_TABLE_HEADERS, role_table_rows(snapshot, codex_limit=32, active_limit=54)))
     lines.extend(["", "Active Work [source=runtime-db todo]"])
     lines.extend(indent_lines(active_lines(snapshot.active_messages, provenance=provenance), "  "))
     lines.extend(["", "Obligations [source=runtime-db]"])
@@ -326,17 +315,7 @@ def run_textual_dashboard(
             ("d", "show_section('watchdogs')", "Watchdogs"),
             ("m", "show_section('milestones')", "Milestones"),
             ("p", "show_section('panes')", "Panes"),
-            ("1", "filter_role_1", "Role 1"),
-            ("2", "filter_role_2", "Role 2"),
-            ("3", "filter_role_3", "Role 3"),
-            ("4", "filter_role_4", "Role 4"),
-            ("5", "filter_role_5", "Role 5"),
-            ("6", "filter_role_6", "Role 6"),
-            ("7", "filter_role_7", "Role 7"),
-            ("8", "filter_role_8", "Role 8"),
-            ("9", "filter_role_9", "Role 9"),
-            ("0", "filter_role_10", "Role 10"),
-        ]
+        ] + [(str(number % 10), f"filter_role({number})", f"Role {number}") for number in range(1, 11)]
         CSS = """
         Screen { layout: vertical; }
         #top { height: 8; }
@@ -371,7 +350,7 @@ def run_textual_dashboard(
             table = self.query_one("#roles", DataTable)
             table.zebra_stripes = True
             table.cursor_type = "row"
-            table.add_columns("Role", "State", "Pane", "Pending", "Claimed", "Ack", "Stale", "Todos", "Codex", "Active")
+            table.add_columns(*(header.title() for header in ROLE_TABLE_HEADERS))
             self.refresh_dashboard()
             self.set_interval(refresh, self.refresh_dashboard)
 
@@ -401,41 +380,11 @@ def run_textual_dashboard(
                 self.role_filter = self.visible_roles[row_index]
                 self.refresh_dashboard()
 
-        def _filter_role_number(self, number: int) -> None:
-            index = number - 1
+        def action_filter_role(self, number: int | str) -> None:
+            index = int(number) - 1
             if 0 <= index < len(self.role_order):
                 self.role_filter = self.role_order[index]
                 self.refresh_dashboard()
-
-        def action_filter_role_1(self) -> None:
-            self._filter_role_number(1)
-
-        def action_filter_role_2(self) -> None:
-            self._filter_role_number(2)
-
-        def action_filter_role_3(self) -> None:
-            self._filter_role_number(3)
-
-        def action_filter_role_4(self) -> None:
-            self._filter_role_number(4)
-
-        def action_filter_role_5(self) -> None:
-            self._filter_role_number(5)
-
-        def action_filter_role_6(self) -> None:
-            self._filter_role_number(6)
-
-        def action_filter_role_7(self) -> None:
-            self._filter_role_number(7)
-
-        def action_filter_role_8(self) -> None:
-            self._filter_role_number(8)
-
-        def action_filter_role_9(self) -> None:
-            self._filter_role_number(9)
-
-        def action_filter_role_10(self) -> None:
-            self._filter_role_number(10)
 
         def refresh_dashboard(self) -> None:
             store = Store(config)
@@ -454,19 +403,8 @@ def run_textual_dashboard(
             cursor_row = getattr(table, "cursor_row", 0)
             table.clear(columns=False)
             self.visible_roles = tuple(row_text(row, "name") for row in snapshot.roles)
-            for row in snapshot.roles:
-                table.add_row(
-                    row_text(row, "name"),
-                    row_text(row, "state"),
-                    row_text(row, "pane"),
-                    row_text(row, "pending"),
-                    row_text(row, "claimed"),
-                    row_text(row, "acknowledged"),
-                    row_text(row, "stale_claimed"),
-                    row_text(row, "open_todos"),
-                    truncate(row_text(row, "codex_settings"), 40),
-                    truncate(row_text(row, "active_summary"), 64),
-                )
+            for row in role_table_rows(snapshot, codex_limit=40, active_limit=64):
+                table.add_row(*row)
             if snapshot.roles:
                 try:
                     table.move_cursor(row=min(cursor_row, len(snapshot.roles) - 1))
@@ -548,6 +486,22 @@ def section_panel(title: str, rows: Iterable[str]) -> str:
     if not values:
         values = ["none"]
     return f"[b]{title}[/b]\n" + "\n".join(values)
+
+
+def role_table_rows(snapshot: DashboardSnapshot, *, codex_limit: int, active_limit: int) -> Iterable[tuple[str, ...]]:
+    for row in snapshot.roles:
+        yield (
+            row_text(row, "name"),
+            row_text(row, "state"),
+            row_text(row, "pane"),
+            row_text(row, "pending"),
+            row_text(row, "claimed"),
+            row_text(row, "acknowledged"),
+            row_text(row, "stale_claimed"),
+            row_text(row, "open_todos"),
+            truncate(row_text(row, "codex_settings"), codex_limit),
+            truncate(row_text(row, "active_summary"), active_limit),
+        )
 
 
 def active_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, provenance: bool = False) -> list[str]:
@@ -806,63 +760,12 @@ def is_overdue(value: str | None) -> bool:
     return parse_utc_datetime(str(value)) <= datetime.now(UTC)
 
 
-def watchdog_runner_display_state(row, stale_grace_seconds: int) -> str:
-    if row["state"] != "running":
-        return str(row["state"])
-    next_run_at = row["next_run_at"]
-    if not next_run_at:
-        return "stale"
-    stale_at = parse_utc_datetime(str(next_run_at)) + timedelta(seconds=stale_grace_seconds)
-    if stale_at < datetime.now(UTC):
-        return "stale"
-    return "running"
-
-
-def format_seconds_duration(seconds: int) -> str:
-    if seconds % 86400 == 0:
-        return f"{seconds // 86400}d"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
-    return f"{seconds}s"
-
-
 def truncate(value: str, limit: int | None) -> str:
     if limit is None:
         return value
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 3)].rstrip() + "..."
-
-
-def role_capabilities(row) -> dict[str, object]:
-    try:
-        data = json.loads(row["capabilities_json"] or "{}")
-    except (KeyError, TypeError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def codex_settings_summary(capabilities: dict[str, object]) -> str:
-    parts: list[str] = []
-    if capabilities.get("codex_yolo") is True:
-        parts.append("yolo=yes")
-    for key, label in (
-        ("codex_profile", "profile"),
-        ("codex_model", "model"),
-        ("codex_reasoning_effort", "effort"),
-    ):
-        value = capabilities.get(key)
-        if value:
-            parts.append(f"{label}={value}")
-    config_overrides = capabilities.get("codex_config")
-    if isinstance(config_overrides, list):
-        parts.append(f"config_overrides={len(config_overrides)}")
-    elif config_overrides:
-        parts.append("config_overrides=1")
-    launch = " ".join(parts) if parts else "launch=unknown"
-    return f"{launch} fast=unknown"
 
 
 def row_text(row: dict[str, object], key: str) -> str:

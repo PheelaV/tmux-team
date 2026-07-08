@@ -5,6 +5,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 ## 0.4.0 - 2026-07-08
 
 - Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
+- Simplified watchdog/dashboard internals by sharing runner command construction and display formatting helpers.
+- Compressed MCP and permission-roadmap docs into a single experimental-surfaces note.
 - Updated repo-local marketplace metadata to install the upcoming `v0.4.0` plugin tag.
 - Replaced the long-running supervision `watch` command surface with `obligation`, including optional `--goal` metadata and obligation labels in status/dashboard/docs.
 - Added watchdog pressure delivery: delivery-enabled `watchdog run --once` and watchdog runners create durable inbox escalation messages, wake the target role, and suppress duplicate active escalations by correlation key.
@@ -15,6 +17,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made `tmux-team resume` replay configured role Codex launch settings from sleep snapshots, including model, reasoning effort, profile, raw Codex config overrides, and YOLO mode.
 - Made `tmux-team sleep` snapshot and tear down running watchdog runner panes, and made `tmux-team resume` reinstantiate running watchdog runners from the sleep snapshot.
 - Made `tmux-team resume` fall back to a recovery snapshot assembled from `team.toml` and SQLite runtime state when no graceful sleep snapshot exists.
+- Changed `watchdog start` to place runners as titled panes in one `tt-watchdogs` window instead of creating one tmux window per runner.
 - Expanded the live demo with an operator-triggered sleep/resume phase, resumed watchdog interval nudge, and a post-resume test operation.
 - Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, section jump keys, and a help overlay.
 - Added milestone subject classification with `recorded_by`, `scope`, `subject_roles`, `milestone add --subject-role/--team`, and matching list filters.
@@ -22,8 +25,9 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 Migration notes:
 
 - Replace `tmux-team watch ...` usage with `tmux-team obligation ...`. Old command names are not kept as compatibility aliases.
-- Existing `team.sqlite` stores migrate additively to schema version 9 when opened; old `watches` rows are copied into the new `obligations` table and new obligation ids use the `obligation_` prefix. Obligations and watchdog runners include pause/review metadata, and watchdog runners gain description, goal, and notify-role metadata.
+- Existing `team.sqlite` stores migrate additively to schema version 9 when opened. The old unreleased `watches` table is not converted automatically; if you dogfooded `tmux-team watch`, recreate those rows explicitly with `tmux-team obligation start`. New obligation ids use the `obligation_` prefix. Obligations and watchdog runners include pause/review metadata, and watchdog runners gain description, goal, and notify-role metadata.
 - Bare `tmux-team watchdog` remains report-only. Use `watchdog run --once --delivery app-server-turn --notify-role <role>` or `watchdog start ... --delivery app-server-turn --notify-role <role>` when you want durable inbox pressure.
+- Watchdog runner tmux layout changed: new runners default to panes inside `tt-watchdogs` with pane titles like `tt-watchdog-<name>`. If an existing dogfooded session has old per-runner windows such as `tt-watchdog-default`, sleep/resume or restart the runner to normalize the layout.
 - Existing sessions may add `[operator]` manually or with `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>`. Role `codex_model`, `codex_reasoning_effort`, `codex_profile`, `codex_config`, and `codex_yolo` values in `team.toml` are now included in sleep snapshots and replayed by `resume`; TUI-only state such as `/fast` remains unknown unless mapped through explicit Codex config.
 - Running watchdog runners are now part of lifecycle recovery. If a host or tmux session ends abruptly before `tmux-team sleep`, `tmux-team resume` can rebuild a recovery snapshot from current `team.toml` role bindings and SQLite watchdog runner rows, then restart the role panes and running watchdog panes.
 - Existing `milestones.jsonl` entries remain readable. New entries include `recorded_by`, `scope`, and `subject_roles`; legacy `role` remains as a single-subject compatibility field.

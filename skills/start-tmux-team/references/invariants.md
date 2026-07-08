@@ -131,7 +131,7 @@ Watchdog checks are local supervision, not autonomous orchestration.
 
 - Bare `tmux-team watchdog` is a single-shot report-only durable-state checker.
 - Use `tmux-team watchdog run --once --delivery app-server-turn --notify-role <role>` for one-shot durable pressure.
-- Use `tmux-team watchdog start --name <name> --interval <duration>` for repeated checks.
+- Use `tmux-team watchdog start --name <name> --interval <duration>` for repeated checks; runners should be grouped as titled panes in `tt-watchdogs`, not one tmux window per runner.
 - Use `tmux-team watchdog update <name>` to change interval, goal, scope, delivery, or notify target.
 - Use `tmux-team watchdog pause/resume` for non-terminal deferral with a reason and optional review time; use `watchdog stop` for terminal shutdown.
 - Watchdog runners must stay visible in tmux and self-describing in pane output.

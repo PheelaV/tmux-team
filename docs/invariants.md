@@ -223,7 +223,7 @@ Watchdog checks are local supervision, not autonomous orchestration.
 - Bare `tmux-team watchdog` remains a single-shot report command for debugging and scripts.
 - Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog update`, `watchdog pause`, `watchdog resume`, `watchdog stop`, `watchdog list`, and `watchdog status`.
 - `watchdog run --once` may be used as a one-shot pressure/checker surface for scripts.
-- `watchdog start` must create visible tmux infrastructure, not a hidden background process.
+- `watchdog start` must create visible tmux infrastructure, not a hidden background process. Multiple runners should share a `tt-watchdogs` window with one titled pane per runner.
 - Watchdog runners must carry inspectable description, goal, scope, delivery method, and notify target when configured.
 - Watchdog delivery must suppress duplicate escalation while a prior active watchdog message with the same correlation key is queued, notified, claimed, or acknowledged.
 - Paused watchdog runners must not emit repeated findings or wake roles while paused. They preserve the last finding summary plus pause reason, review time, paused timestamp, and actor. Use `watchdog stop` for terminal shutdown.

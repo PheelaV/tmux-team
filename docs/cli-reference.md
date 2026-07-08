@@ -196,7 +196,7 @@ tmux-team watchdog status default
 tmux-team watchdog stop default
 ```
 
-`watchdog start` opens a visible tmux window named `tt-watchdog-<name>` that runs `watchdog run`. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
+`watchdog start` opens or reuses a visible tmux window named `tt-watchdogs`. Each runner gets its own titled pane such as `tt-watchdog-default`, and the window is tiled after each spawn. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
 
 Bare `watchdog` is report-only. `watchdog run --once` and `watchdog start` create durable inbox pressure only when `--delivery` is not `report-only`. Use `--notify-role` to pick the escalation target; otherwise tmux-team uses the scoped `--role`, then `orchestrator`, then the first configured role. Duplicate pressure is suppressed while an active watchdog escalation with the same correlation key is still queued, notified, claimed, or acknowledged.
 

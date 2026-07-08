@@ -51,6 +51,12 @@ from .dashboard import (
     render_dashboard_snapshot,
     run_textual_dashboard,
 )
+from .display import (
+    codex_settings_summary,
+    format_seconds_duration,
+    role_capabilities,
+    watchdog_runner_display_state,
+)
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
@@ -70,12 +76,17 @@ from .store import (
     normalize_watchdog_runner_name,
     parse_utc_datetime,
 )
+from .watchdog_runner import (
+    watchdog_layout_command,
+    watchdog_pane_setup_commands,
+    watchdog_spawn_command,
+    watchdog_window_name,
+)
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 DEFAULT_PANE_SUMMARY_MAX_BYTES = 20_000
 DEFAULT_PANE_SUMMARY_TIMEOUT_SECONDS = 120.0
 DEFAULT_WATCHDOG_INTERVAL = "15m"
-WATCHDOG_PANE_OPTION = "@tmux-team-watchdog"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -682,7 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog_start.add_argument("--ack-warn-seconds", type=int, default=3600)
     watchdog_start.add_argument("--obligation-grace-seconds", type=int, default=0)
     watchdog_start.add_argument("--session", help="tmux session; defaults to current tmux session")
-    watchdog_start.add_argument("--window-name", help="tmux window name; defaults to tt-watchdog-<name>")
+    watchdog_start.add_argument("--window-name", help="tmux watchdog window name; defaults to tt-watchdogs")
     watchdog_start.add_argument("--tmux-bin", default="tmux")
     watchdog_start.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
     watchdog_stop = watchdog_sub.add_parser("stop", help="Stop a watchdog runner and optionally kill its tmux pane")
@@ -1245,35 +1256,6 @@ def operator_one_line(operator: OperatorConfig) -> str:
     pane = operator.pane or "unknown"
     thread = operator.codex_thread_id or "unknown"
     return f"pane={pane} codex_thread_id={thread}"
-
-
-def role_capabilities(row) -> dict[str, object]:
-    try:
-        data = json.loads(row["capabilities_json"] or "{}")
-    except (KeyError, TypeError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def codex_settings_summary(capabilities: dict[str, object]) -> str:
-    parts: list[str] = []
-    if capabilities.get("codex_yolo") is True:
-        parts.append("yolo=yes")
-    for key, label in (
-        ("codex_profile", "profile"),
-        ("codex_model", "model"),
-        ("codex_reasoning_effort", "effort"),
-    ):
-        value = capabilities.get(key)
-        if value:
-            parts.append(f"{label}={value}")
-    config_overrides = capabilities.get("codex_config")
-    if isinstance(config_overrides, list):
-        parts.append(f"config_overrides={len(config_overrides)}")
-    elif config_overrides:
-        parts.append("config_overrides=1")
-    launch = " ".join(parts) if parts else "launch=unknown"
-    return f"{launch} fast=unknown"
 
 
 def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
@@ -2200,56 +2182,30 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
     session = args.session or detect_current_tmux_session(args.tmux_bin)
     if not session:
         raise ValueError("watchdog start requires --session unless run inside tmux")
-    window_name = args.window_name or f"tt-watchdog-{name}"
+    window_name = watchdog_window_name(args.window_name)
     project_root = store.config.project_root or Path.cwd()
-    config_path = store.config.config_path
-    command = ["tmux-team"]
-    if config_path is not None:
-        command.extend(["--config", str(config_path)])
-    command.extend(
-        [
-            "watchdog",
-            "run",
-            "--name",
-            name,
-            "--interval",
-            args.interval,
-            "--delivery",
-            args.delivery,
-            "--unacked-warn-seconds",
-            str(args.unacked_warn_seconds),
-            "--ack-warn-seconds",
-            str(args.ack_warn_seconds),
-            "--obligation-grace-seconds",
-            str(args.obligation_grace_seconds),
-        ]
+    use_existing_window = False if args.dry_run else tmux_window_exists(args.tmux_bin, session, window_name)
+    tmux_command = watchdog_spawn_command(
+        tmux_bin=args.tmux_bin,
+        session=session,
+        config_path=store.config.config_path,
+        project_root=project_root,
+        name=name,
+        interval=args.interval,
+        delivery=args.delivery,
+        role=args.role,
+        description=args.description,
+        goal=args.goal,
+        notify_role=args.notify_role,
+        window_name=window_name,
+        unacked_warn_seconds=args.unacked_warn_seconds,
+        ack_warn_seconds=args.ack_warn_seconds,
+        obligation_grace_seconds=args.obligation_grace_seconds,
+        use_existing_window=use_existing_window,
     )
-    if args.role:
-        command.extend(["--role", args.role])
-    if args.description:
-        command.extend(["--description", args.description])
-    if args.goal:
-        command.extend(["--goal", args.goal])
-    if args.notify_role:
-        command.extend(["--notify-role", args.notify_role])
-    tmux_command = [
-        args.tmux_bin,
-        "new-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-t",
-        session,
-        "-n",
-        window_name,
-        "-c",
-        str(project_root),
-        shlex.join(command),
-    ]
     option_commands = [
-        [args.tmux_bin, "set-option", "-p", "-t", "{pane}", WATCHDOG_PANE_OPTION, name],
-        [args.tmux_bin, "select-pane", "-t", "{pane}", "-T", window_name],
+        *watchdog_pane_setup_commands(args.tmux_bin, "{pane}", name=name),
+        watchdog_layout_command(args.tmux_bin, session, window_name),
     ]
     if args.dry_run:
         print(format_command(tmux_command))
@@ -2279,8 +2235,13 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
     if not pane:
         raise ValueError(f"could not start watchdog runner {name}: tmux did not return a pane id")
     for command_template in option_commands:
-        option_command = [part if part != "{pane}" else pane for part in command_template]
-        subprocess.run(option_command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        subprocess.run(
+            [part if part != "{pane}" else pane for part in command_template],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
     row = store.upsert_watchdog_runner(
         conn,
         name=name,
@@ -2451,6 +2412,19 @@ def current_tmux_window() -> str | None:
         return None
 
 
+def tmux_window_exists(tmux_bin: str, session: str, window_name: str) -> bool:
+    result = subprocess.run(
+        [tmux_bin, "list-windows", "-t", session, "-F", "#{window_name}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return any(line.strip() == window_name for line in result.stdout.splitlines())
+
+
 def summarize_watchdog_findings(findings: list[dict[str, str]]) -> str:
     if not findings:
         return "ok"
@@ -2544,31 +2518,9 @@ def watchdog_runner_dict(row, stale_grace_seconds: int) -> dict[str, object]:
     }
 
 
-def watchdog_runner_display_state(row, stale_grace_seconds: int) -> str:
-    if row["state"] != "running":
-        return str(row["state"])
-    next_run_at = row["next_run_at"]
-    if not next_run_at:
-        return "stale"
-    stale_at = parse_utc_datetime(str(next_run_at)) + timedelta(seconds=stale_grace_seconds)
-    if stale_at < datetime.now(UTC):
-        return "stale"
-    return "running"
-
-
 def watchdog_runner_safe_to_close(row, stale_grace_seconds: int) -> str:
     state = watchdog_runner_display_state(row, stale_grace_seconds)
     return "yes" if state in ("stopped", "failed") else "no"
-
-
-def format_seconds_duration(seconds: int) -> str:
-    if seconds % 86400 == 0:
-        return f"{seconds // 86400}d"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
-    return f"{seconds}s"
 
 
 def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:

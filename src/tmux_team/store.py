@@ -225,7 +225,6 @@ class Store:
         self._ensure_column(conn, "messages", "related_to", "TEXT")
         self._ensure_column(conn, "messages", "supersedes", "TEXT")
         self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
-        self._migrate_watches_to_obligations(conn)
         self._ensure_column(conn, "obligations", "goal", "TEXT")
         for column in ("description", "goal", "notify_role"):
             self._ensure_column(conn, "watchdog_runners", column, "TEXT")
@@ -234,34 +233,6 @@ class Store:
             self._ensure_column(conn, "watchdog_runners", column, "TEXT")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
-
-    def _migrate_watches_to_obligations(self, conn: sqlite3.Connection) -> None:
-        if not self._table_exists(conn, "watches"):
-            return
-        for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
-            self._ensure_column(conn, "watches", column, "TEXT")
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO obligations(
-              id, role, status, summary, current_summary, goal, created_by, created_at,
-              updated_at, last_update_at, next_update_at, completed_at, paused_reason,
-              paused_at, paused_by, review_at
-            )
-            SELECT
-              id, role, status, summary, current_summary, NULL, created_by, created_at,
-              updated_at, last_update_at, next_update_at, completed_at, paused_reason,
-              paused_at, paused_by, review_at
-            FROM watches
-            """
-        )
-
-    @staticmethod
-    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (name,),
-        ).fetchone()
-        return row is not None
 
     def sync_roles(self, conn: sqlite3.Connection, roles: Iterable[RoleConfig]) -> None:
         now = utc_now()

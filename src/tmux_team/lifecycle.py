@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -28,11 +27,17 @@ from .bootstrap import (
     write_team_config,
 )
 from .config import OperatorConfig, TeamConfig, load_config
+from .display import format_seconds_duration
 from .store import Store, utc_now
+from .watchdog_runner import (
+    watchdog_layout_command,
+    watchdog_pane_setup_commands,
+    watchdog_spawn_command,
+    watchdog_window_name,
+)
 
 APP_SERVER_WINDOW = "tt-app-server"
 CONTROL_PLANE_WINDOW = "tt-control"
-WATCHDOG_PANE_OPTION = "@tmux-team-watchdog"
 SLEEP_SCHEMA_VERSION = 1
 
 
@@ -341,7 +346,7 @@ def resume_team(
         if reactivate_roles:
             store.set_role_state(conn, role, "active", actor="resume")
     resumed_watchdog_panes: dict[str, str] = {}
-    for name, data in watchdogs_data.items():
+    for index, (name, data) in enumerate(watchdogs_data.items()):
         pane = start_resumed_watchdog_runner(
             tmux_bin,
             session,
@@ -349,6 +354,7 @@ def resume_team(
             config.project_root or Path.cwd(),
             name,
             data,
+            use_existing_window=index > 0,
         )
         resumed_watchdog_panes[name] = pane
         store.upsert_watchdog_runner(
@@ -362,7 +368,7 @@ def resume_team(
             notify_role=optional_string(data.get("notify_role")),
             delivery_method=str(data.get("delivery_method") or "report-only"),
             pane=pane,
-            window=f"{session}:tt-watchdog-{name}",
+            window=f"{session}:{watchdog_window_name()}",
             actor="resume",
         )
     store.record_event(
@@ -663,19 +669,20 @@ def resume_watchdog_tmux_commands(
     watchdogs: dict[str, dict[str, Any]],
 ) -> list[list[str]]:
     commands: list[list[str]] = []
-    for name, data in watchdogs.items():
+    for index, (name, data) in enumerate(watchdogs.items()):
         commands.append(
-            watchdog_new_window_command(
-                tmux_bin,
-                session,
-                config_path,
-                project_root,
-                name,
-                data,
+            resumed_watchdog_new_window_command(
+                tmux_bin=tmux_bin,
+                session=session,
+                config_path=config_path,
+                project_root=project_root,
+                name=name,
+                data=data,
+                use_existing_window=index > 0,
             )
         )
-        commands.append([tmux_bin, "set-option", "-p", "-t", "<pane-id>", WATCHDOG_PANE_OPTION, name])
-        commands.append([tmux_bin, "select-pane", "-t", "<pane-id>", "-T", f"tt-watchdog-{name}"])
+        commands.extend(watchdog_pane_setup_commands(tmux_bin, "<pane-id>", name=name))
+        commands.append(watchdog_layout_command(tmux_bin, session))
     return commands
 
 
@@ -686,61 +693,51 @@ def start_resumed_watchdog_runner(
     project_root: Path,
     name: str,
     data: dict[str, Any],
+    use_existing_window: bool,
 ) -> str:
-    command = watchdog_new_window_command(tmux_bin, session, config_path, project_root, name, data)
+    command = resumed_watchdog_new_window_command(
+        tmux_bin=tmux_bin,
+        session=session,
+        config_path=config_path,
+        project_root=project_root,
+        name=name,
+        data=data,
+        use_existing_window=use_existing_window,
+    )
     result = subprocess_run_lifecycle(command)
     pane = result.stdout.strip()
     if not pane:
         raise LifecycleError(f"could not resume watchdog runner {name}: tmux did not return a pane id")
-    subprocess_run_lifecycle([tmux_bin, "set-option", "-p", "-t", pane, WATCHDOG_PANE_OPTION, name])
-    subprocess_run_lifecycle([tmux_bin, "select-pane", "-t", pane, "-T", f"tt-watchdog-{name}"])
+    for command in watchdog_pane_setup_commands(tmux_bin, pane, name=name):
+        subprocess_run_lifecycle(command)
+    subprocess_run_lifecycle(watchdog_layout_command(tmux_bin, session))
     return pane
 
 
-def watchdog_new_window_command(
+def resumed_watchdog_new_window_command(
+    *,
     tmux_bin: str,
     session: str,
     config_path: Path,
     project_root: Path,
     name: str,
     data: dict[str, Any],
+    use_existing_window: bool,
 ) -> list[str]:
-    command = [
-        "tmux-team",
-        "--config",
-        str(config_path),
-        "watchdog",
-        "run",
-        "--name",
-        name,
-        "--interval",
-        format_seconds_duration(int(data["interval_seconds"])),
-        "--delivery",
-        str(data.get("delivery_method") or "report-only"),
-    ]
-    if data.get("scope_role"):
-        command.extend(["--role", str(data["scope_role"])])
-    if data.get("description"):
-        command.extend(["--description", str(data["description"])])
-    if data.get("goal"):
-        command.extend(["--goal", str(data["goal"])])
-    if data.get("notify_role"):
-        command.extend(["--notify-role", str(data["notify_role"])])
-    return [
-        tmux_bin,
-        "new-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-t",
-        session,
-        "-n",
-        f"tt-watchdog-{name}",
-        "-c",
-        str(project_root),
-        shlex.join(command),
-    ]
+    return watchdog_spawn_command(
+        tmux_bin=tmux_bin,
+        session=session,
+        config_path=config_path,
+        project_root=project_root,
+        name=name,
+        interval=format_seconds_duration(int(data["interval_seconds"])),
+        delivery=str(data.get("delivery_method") or "report-only"),
+        role=str(data["scope_role"]) if data.get("scope_role") else None,
+        description=str(data["description"]) if data.get("description") else None,
+        goal=str(data["goal"]) if data.get("goal") else None,
+        notify_role=str(data["notify_role"]) if data.get("notify_role") else None,
+        use_existing_window=use_existing_window,
+    )
 
 
 def subprocess_run_lifecycle(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1173,13 +1170,3 @@ def optional_string(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(value)
-
-
-def format_seconds_duration(seconds: int) -> str:
-    if seconds % 86400 == 0:
-        return f"{seconds // 86400}d"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
-    return f"{seconds}s"
