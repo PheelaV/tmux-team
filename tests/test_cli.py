@@ -22,7 +22,12 @@ from tmux_team.bootstrap import (
 )
 from tmux_team.cli import infer_role_from_tmux_pane, main, sleep_watchdog_interval
 from tmux_team.config import RoleConfig, TeamConfig, load_config
-from tmux_team.dashboard import DashboardSnapshot, collect_dashboard_snapshot, textual_pane_preview_body
+from tmux_team.dashboard import (
+    DashboardSnapshot,
+    collect_dashboard_snapshot,
+    role_shortcut_target,
+    textual_pane_preview_body,
+)
 from tmux_team.store import Store
 
 
@@ -655,6 +660,27 @@ runtime_dir = "{other_runtime}"
         self.assertTrue(any("collector notification failed" in alert for alert in snapshot.alerts))
         self.assertFalse(any("trainer notification failed" in alert for alert in snapshot.alerts))
         self.assertFalse(any("trainer-pressure" in alert for alert in snapshot.alerts))
+
+    def test_dashboard_role_filter_includes_implicit_orchestrator_watchdog_target(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.upsert_watchdog_runner(
+                conn,
+                name="team-pressure",
+                state="running",
+                interval_seconds=60,
+                scope_role=None,
+                notify_role=None,
+                delivery_method="app-server-turn",
+            )
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="orchestrator", include_pane_preview=False)
+
+        self.assertEqual(tuple(row["name"] for row in snapshot.watchdog_runners), ("team-pressure",))
+
+    def test_dashboard_role_shortcuts_use_displayed_role_order(self) -> None:
+        self.assertEqual(role_shortcut_target(("collector", "orchestrator", "trainer"), 1), "collector")
+        self.assertEqual(role_shortcut_target(("collector", "orchestrator", "trainer"), 2), "orchestrator")
+        self.assertIsNone(role_shortcut_target(("collector",), 2))
 
     def test_textual_pane_preview_body_handles_enabled_previews(self) -> None:
         long_line = "long-" + ("x" * 180)

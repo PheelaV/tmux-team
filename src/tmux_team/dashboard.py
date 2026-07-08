@@ -64,7 +64,9 @@ def collect_dashboard_snapshot(
     memory_chars: int = 260,
     alert_limit: int = ALERTS_HISTORY_LIMIT,
 ) -> DashboardSnapshot:
-    roles = [role for role in store.list_roles(conn) if role_filter is None or role["name"] == role_filter]
+    all_roles = store.list_roles(conn)
+    all_role_names = tuple(str(role["name"]) for role in all_roles)
+    roles = [role for role in all_roles if role_filter is None or role["name"] == role_filter]
     if role_filter is not None and not roles:
         raise KeyError(f"Unknown role: {role_filter}")
 
@@ -188,7 +190,7 @@ def collect_dashboard_snapshot(
             )
 
     for runner in store.list_watchdog_runners(conn, limit=alert_limit):
-        if role_filter is not None and not watchdog_matches_role(runner, role_filter):
+        if role_filter is not None and not watchdog_matches_role(runner, role_filter, all_role_names=all_role_names):
             continue
         display_state = watchdog_runner_display_state(runner, stale_grace_seconds=60)
         review_due = runner["state"] == "paused" and is_overdue(runner["review_at"])
@@ -258,8 +260,26 @@ def collect_dashboard_snapshot(
     )
 
 
-def watchdog_matches_role(runner, role: str) -> bool:
-    return runner["scope_role"] == role or runner["notify_role"] == role
+def watchdog_matches_role(runner, role: str, *, all_role_names: tuple[str, ...]) -> bool:
+    return runner["scope_role"] == role or watchdog_effective_notify_role(runner, all_role_names) == role
+
+
+def watchdog_effective_notify_role(runner, all_role_names: tuple[str, ...]) -> str | None:
+    if runner["notify_role"]:
+        return str(runner["notify_role"])
+    if runner["scope_role"]:
+        return str(runner["scope_role"])
+    if "orchestrator" in all_role_names:
+        return "orchestrator"
+    return all_role_names[0] if all_role_names else None
+
+
+def role_shortcut_target(visible_roles: Iterable[str], number: int | str) -> str | None:
+    index = int(number) - 1
+    roles = tuple(visible_roles)
+    if 0 <= index < len(roles):
+        return roles[index]
+    return None
 
 
 def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool = False) -> str:
@@ -444,9 +464,9 @@ def run_textual_dashboard(
                 self.refresh_dashboard()
 
         def action_filter_role(self, number: int | str) -> None:
-            index = int(number) - 1
-            if 0 <= index < len(self.role_order):
-                self.role_filter = self.role_order[index]
+            target = role_shortcut_target(self.visible_roles, number)
+            if target is not None:
+                self.role_filter = target
                 self.refresh_dashboard()
 
         def refresh_dashboard(self) -> None:
