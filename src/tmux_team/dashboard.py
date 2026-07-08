@@ -47,6 +47,10 @@ class DashboardSnapshot:
     alerts: tuple[str, ...]
 
 
+ALERTS_RECENT_LIMIT = 5
+ALERTS_HISTORY_LIMIT = 50
+
+
 def collect_dashboard_snapshot(
     store: Store,
     conn,
@@ -58,6 +62,7 @@ def collect_dashboard_snapshot(
     active_limit: int = 5,
     milestone_limit: int = 8,
     memory_chars: int = 260,
+    alert_limit: int = ALERTS_HISTORY_LIMIT,
 ) -> DashboardSnapshot:
     roles = [role for role in store.list_roles(conn) if role_filter is None or role["name"] == role_filter]
     if role_filter is not None and not roles:
@@ -182,13 +187,17 @@ def collect_dashboard_snapshot(
                 }
             )
 
-    for runner in store.list_watchdog_runners(conn, limit=active_limit):
+    for runner in store.list_watchdog_runners(conn, limit=alert_limit):
+        if role_filter is not None and not watchdog_matches_role(runner, role_filter):
+            continue
         display_state = watchdog_runner_display_state(runner, stale_grace_seconds=60)
         review_due = runner["state"] == "paused" and is_overdue(runner["review_at"])
         if display_state in ("stale", "failed"):
             alerts.append(f"watchdog {runner['name']}: {display_state} {runner['last_finding_summary'] or ''}".rstrip())
         if review_due:
             alerts.append(f"watchdog {runner['name']}: review due {runner['paused_reason'] or ''}".rstrip())
+        if len(watchdog_rows) >= active_limit:
+            continue
         watchdog_rows.append(
             {
                 "name": str(runner["name"]),
@@ -213,14 +222,22 @@ def collect_dashboard_snapshot(
         )
 
     milestone_rows = store.list_milestones(role=role_filter, limit=milestone_limit)
+    notification_params: tuple[object, ...]
+    if role_filter is None:
+        notification_where = "state IN ('notify_failed', 'notify_deferred')"
+        notification_params = (alert_limit,)
+    else:
+        notification_where = "role = ? AND state IN ('notify_failed', 'notify_deferred')"
+        notification_params = (role_filter, alert_limit)
     recent_failures = conn.execute(
-        """
+        f"""
         SELECT role, method, state, details
         FROM notifications
-        WHERE state IN ('notify_failed', 'notify_deferred')
+        WHERE {notification_where}
         ORDER BY id DESC
-        LIMIT 8
-        """
+        LIMIT ?
+        """,
+        notification_params,
     ).fetchall()
     for row in recent_failures:
         alerts.append(f"{row['role']}: {row['state']} via {row['method']}: {row['details']}")
@@ -239,6 +256,10 @@ def collect_dashboard_snapshot(
         pane_previews=tuple(pane_rows),
         alerts=tuple(alerts),
     )
+
+
+def watchdog_matches_role(runner, role: str) -> bool:
+    return runner["scope_role"] == role or runner["notify_role"] == role
 
 
 def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool = False) -> str:
@@ -291,6 +312,7 @@ def run_textual_dashboard(
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Horizontal, VerticalScroll
+        from textual.screen import ModalScreen
         from textual.widgets import DataTable, Footer, Header, Static
     except ImportError as exc:
         raise DashboardDependencyError(
@@ -298,6 +320,26 @@ def run_textual_dashboard(
             "git+https://github.com/PheelaV/tmux-team.git'` or `pipx install 'tmux-team[dashboard] @ "
             "git+https://github.com/PheelaV/tmux-team.git'`."
         ) from exc
+
+    class HelpScreen(ModalScreen[None]):
+        CSS = """
+        HelpScreen { align: center middle; }
+        #help-dialog {
+            width: 82%;
+            max-width: 110;
+            height: auto;
+            border: heavy $warning;
+            padding: 1 2;
+            background: $surface;
+        }
+        """
+        BINDINGS: ClassVar = [("escape", "dismiss", "Close"), ("h", "dismiss", "Close")]
+
+        def compose(self) -> ComposeResult:
+            yield Static(help_text(), id="help-dialog")
+
+        def action_dismiss(self) -> None:
+            self.dismiss()
 
     class DashboardApp(App):
         TITLE = "tmux-team dashboard"
@@ -318,35 +360,56 @@ def run_textual_dashboard(
         ] + [(str(number % 10), f"filter_role({number})", f"Role {number}") for number in range(1, 11)]
         CSS = """
         Screen { layout: vertical; }
-        #top { height: 8; }
-        #summary, #alerts { width: 1fr; border: solid $primary; padding: 0 1; }
+        #top { height: 7; }
+        #summary, #alerts-recent { width: 1fr; border: solid $primary; padding: 0 1; }
         DataTable { height: 10; border: solid $accent; }
-        .panel { border: solid $secondary; padding: 0 1; margin: 1 0 0 0; }
-        #help { height: 8; border: heavy $warning; padding: 0 1; display: none; }
-        #help.visible { display: block; }
+        .section-row { height: 1fr; }
+        .section-scroll {
+            width: 1fr;
+            height: 1fr;
+            border: solid $secondary;
+            padding: 0 1;
+            margin: 1 1 0 0;
+        }
+        .section-scroll:focus { border: heavy $accent; }
         """
 
         def compose(self) -> ComposeResult:
             yield Header()
             with Horizontal(id="top"):
                 yield Static(id="summary")
-                yield Static(id="alerts")
+                yield Static(id="alerts-recent")
             yield DataTable(id="roles")
-            yield Static(id="help")
-            with VerticalScroll():
-                yield Static(id="active", classes="panel")
-                yield Static(id="obligations", classes="panel")
-                yield Static(id="watchdogs", classes="panel")
-                yield Static(id="milestones", classes="panel")
-                yield Static(id="memory", classes="panel")
-                yield Static(id="panes", classes="panel")
+            with Horizontal(id="section-row-1", classes="section-row"):
+                with VerticalScroll(id="alerts-scroll", classes="section-scroll"):
+                    yield Static(id="alerts-history")
+                with VerticalScroll(id="active-scroll", classes="section-scroll"):
+                    yield Static(id="active")
+                with VerticalScroll(id="obligations-scroll", classes="section-scroll"):
+                    yield Static(id="obligations")
+            with Horizontal(id="section-row-2", classes="section-row"):
+                with VerticalScroll(id="watchdogs-scroll", classes="section-scroll"):
+                    yield Static(id="watchdogs")
+                with VerticalScroll(id="milestones-scroll", classes="section-scroll"):
+                    yield Static(id="milestones")
+                with VerticalScroll(id="memory-scroll", classes="section-scroll"):
+                    yield Static(id="memory")
+                with VerticalScroll(id="panes-scroll", classes="section-scroll"):
+                    yield Static(id="panes")
             yield Footer()
 
         def on_mount(self) -> None:
             self.role_filter = role_filter
             self.role_order = tuple(config.roles)
             self.visible_roles = self.role_order
-            self.help_visible = False
+            self.section_targets = {
+                "alerts": "alerts-scroll",
+                "roles": "roles",
+                "obligations": "obligations-scroll",
+                "watchdogs": "watchdogs-scroll",
+                "milestones": "milestones-scroll",
+                "panes": "panes-scroll",
+            }
             table = self.query_one("#roles", DataTable)
             table.zebra_stripes = True
             table.cursor_type = "row"
@@ -358,18 +421,18 @@ def run_textual_dashboard(
             self.refresh_dashboard()
 
         def action_toggle_help(self) -> None:
-            self.help_visible = not self.help_visible
-            help_panel = self.query_one("#help", Static)
-            help_panel.set_class(self.help_visible, "visible")
-            help_panel.update(help_text())
+            self.push_screen(HelpScreen())
 
         def action_clear_filter(self) -> None:
             self.role_filter = None
             self.refresh_dashboard()
 
         def action_show_section(self, section_id: str) -> None:
+            target_id = self.section_targets.get(section_id, f"{section_id}-scroll")
             try:
-                self.query_one(f"#{section_id}").scroll_visible()
+                target = self.query_one(f"#{target_id}")
+                target.focus()
+                target.scroll_visible()
             except Exception:
                 pass
 
@@ -398,7 +461,15 @@ def run_textual_dashboard(
                     tmux_bin=tmux_bin,
                 )
             self.query_one("#summary", Static).update(summary_panel(snapshot, refresh, self.role_filter))
-            self.query_one("#alerts", Static).update(alerts_panel(snapshot.alerts))
+            self.query_one("#alerts-recent", Static).update(alerts_recent_panel(snapshot.alerts))
+            self.query_one("#alerts-history", Static).update(
+                lines_panel(
+                    "Alert History [runtime-db/watchdog]",
+                    alert_lines(snapshot.alerts),
+                    rich=True,
+                    truncate_at=None,
+                )
+            )
             table = self.query_one("#roles", DataTable)
             cursor_row = getattr(table, "cursor_row", 0)
             table.clear(columns=False)
@@ -441,8 +512,14 @@ def run_textual_dashboard(
                     memory_lines(snapshot.memories, truncate_at=140, rich=True, provenance=provenance),
                 )
             )
-            pane_body = textual_pane_preview_body(snapshot, include_pane_preview=include_pane_preview)
-            self.query_one("#panes", Static).update(section_panel("Pane Preview [best-effort pane-capture]", pane_body))
+            self.query_one("#panes", Static).update(
+                lines_panel(
+                    "Pane Preview [best-effort pane-capture]",
+                    textual_pane_preview_body(snapshot, include_pane_preview=include_pane_preview),
+                    rich=True,
+                    truncate_at=None,
+                )
+            )
 
     DashboardApp().run()
     return 0
@@ -462,11 +539,24 @@ def summary_panel(snapshot: DashboardSnapshot, refresh: float, role_filter: str 
     )
 
 
-def alerts_panel(alerts: Iterable[str]) -> str:
+def alerts_recent_panel(alerts: Iterable[str]) -> str:
     rows = list(alerts)
     if not rows:
         return "[b]alerts[/b]\nnone"
-    return "[b]alerts[/b]\n" + "\n".join(f"[red]![/red] {rich_escape(truncate(row, 120))}" for row in rows[:8])
+    visible = rows[:ALERTS_RECENT_LIMIT]
+    hidden = len(rows) - len(visible)
+    lines = ["[b]alerts[/b]"]
+    lines.extend(f"[red]![/red] {rich_escape(truncate(row, 120))}" for row in visible)
+    if hidden:
+        lines.append(f"[dim]+{hidden} more in alert history[/dim]")
+    return "\n".join(lines)
+
+
+def alert_lines(alerts: Iterable[str]) -> list[str]:
+    rows = list(alerts)
+    if not rows:
+        return ["none"]
+    return [f"! {row}" for row in rows]
 
 
 def help_text() -> str:
@@ -582,18 +672,58 @@ def watchdog_lines(rows: Iterable[dict[str, object]], *, rich: bool = False, pro
     return lines
 
 
-def lines_panel(title: str, rows: Iterable[str], *, rich: bool = False) -> str:
+def lines_panel(title: str, rows: Iterable[str], *, rich: bool = False, truncate_at: int | None = 140) -> str:
     values = list(rows)
     if not values:
         values = ["none"]
-    rendered = [rich_escape(truncate(row, 140)) if rich else truncate(row, 140) for row in values]
+    rendered = []
+    for row in values:
+        value = truncate(row, truncate_at) if truncate_at else row
+        rendered.append(rich_escape(value) if rich else value)
     return f"[b]{title}[/b]\n" + "\n".join(rendered)
 
 
 def textual_pane_preview_body(snapshot: DashboardSnapshot, *, include_pane_preview: bool) -> list[str]:
     if not include_pane_preview:
         return ["disabled"]
-    return format_pane_preview_lines(snapshot.pane_previews, tail_count=5, truncate_at=140, rich=True, provenance=True)
+    return format_pane_preview_grid_lines(snapshot.pane_previews, tail_count=5, provenance=True)
+
+
+def format_pane_preview_grid_lines(
+    rows: Iterable[dict[str, object]],
+    *,
+    tail_count: int,
+    rich: bool = False,
+    provenance: bool = False,
+) -> list[str]:
+    lines: list[str] = []
+    seen = False
+    header = ("role", "pane", "state", "tail")
+    lines.append(format_fixed_row(header, rich=rich))
+    lines.append(format_fixed_row(("-" * 12, "-" * 8, "-" * 32, "-" * 24), rich=rich))
+    for row in rows:
+        seen = True
+        state = f"cmd={row_text(row, 'current_command')} dead={row_text(row, 'dead')} copy={row_text(row, 'in_mode')}"
+        source = f"source={row_text(row, 'screen_source')}{provenance_suffix(row, provenance)}"
+        tail = row_text(row, "text").splitlines()[-tail_count:] or ["(empty)"]
+        lines.append(
+            format_fixed_row(
+                (row_text(row, "role"), row_text(row, "pane"), state, tail[0]),
+                rich=rich,
+            )
+        )
+        lines.append(format_fixed_row(("", "", source, ""), rich=rich))
+        for line in tail[1:]:
+            lines.append(format_fixed_row(("", "", "", line), rich=rich))
+    if not seen:
+        lines.append("none")
+    return lines
+
+
+def format_fixed_row(cells: tuple[str, str, str, str], *, rich: bool = False) -> str:
+    role, pane, state, tail = cells
+    row = f"{role:<12}  {pane:<8}  {state:<32}  {tail}"
+    return rich_escape(row) if rich else row
 
 
 def memory_lines(

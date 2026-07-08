@@ -63,7 +63,7 @@ tmux-team dashboard --refresh 2
 tmux-team dashboard --no-pane-preview
 ```
 
-Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. The live dashboard supports `r` refresh, `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, and direct jumps such as `a` alerts, `t` roles, `o` obligations, `d` watchdogs, `m` milestones, and `p` panes. Use inbox, obligations, milestones, and memory commands to mutate durable state.
+Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. Role filtering scopes roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the role. The live dashboard supports `r` refresh, modal `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, and direct jumps such as `a` alerts, `t` roles, `o` obligations, `d` watchdogs, `m` milestones, and `p` panes. Sections are independently scrollable; the top alert panel shows recent pressure while the alert-history section keeps the longer bounded list. Use inbox, obligations, milestones, and memory commands to mutate durable state.
 
 ## Messages And Routing
 

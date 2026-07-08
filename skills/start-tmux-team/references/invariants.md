@@ -66,6 +66,8 @@ Never use tmux stdin as the production wake path for Codex roles.
 
 ## Supervision
 
+Use `tmux-team status --verbose` and `tmux-team dashboard` before scraping pane output. Dashboard views are read-only. Role-filtered dashboard views must scope roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the selected role. The live dashboard should keep modal help, independently focusable/scrollable sections, and a compact recent alert panel plus scrollable alert history.
+
 The operator and orchestrator can inspect managed role panes for live progress:
 
 ```bash

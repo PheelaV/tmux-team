@@ -140,7 +140,9 @@ The operator and orchestrator may inspect managed role panes.
 - Use `tmux-team dashboard` for the live Textual operator dashboard only when the optional `tmux-team[dashboard]` extra is installed.
 - Dashboard sections must label provenance. Runtime database rows are authoritative, memory excerpts are prose, and pane previews are best-effort tmux captures with screen-text heuristic status only.
 - Textual dashboard rendering must escape arbitrary memory and pane text as plain text. Captured terminal output must not be treated as trusted Rich markup.
-- The live dashboard should remain keyboard-first: refresh/help, role filter shortcuts, team overview, and direct section jumps must work without mouse input.
+- The live dashboard should remain keyboard-first: refresh/help, role filter shortcuts, team overview, and direct section jumps must work without mouse input. Help must be an overlay, and dashboard sections should be independently focusable/scrollable.
+- Role-filtered dashboard views must scope roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the selected role.
+- Alert display should keep a compact recent panel plus a scrollable bounded alert-history section instead of dropping older alerts from the live view.
 - Dashboard views are observation surfaces. They must not mutate inbox, todo, obligation, milestone, memory, or role state.
 - Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.

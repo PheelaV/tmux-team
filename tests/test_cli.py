@@ -22,7 +22,7 @@ from tmux_team.bootstrap import (
 )
 from tmux_team.cli import infer_role_from_tmux_pane, main, sleep_watchdog_interval
 from tmux_team.config import RoleConfig, TeamConfig, load_config
-from tmux_team.dashboard import DashboardSnapshot, textual_pane_preview_body
+from tmux_team.dashboard import DashboardSnapshot, collect_dashboard_snapshot, textual_pane_preview_body
 from tmux_team.store import Store
 
 
@@ -603,7 +603,61 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn("source=runtime-db confidence=authoritative", out)
 
+    def test_dashboard_role_filter_scopes_watchdogs_and_notification_alerts(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.upsert_watchdog_runner(
+                conn,
+                name="collector-pressure",
+                state="running",
+                interval_seconds=60,
+                scope_role="collector",
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+            )
+            store.record_watchdog_runner_run(
+                conn,
+                name="trainer-pressure",
+                interval_seconds=60,
+                scope_role="trainer",
+                description=None,
+                goal=None,
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+                pane=None,
+                window=None,
+                process_id=None,
+                last_run_at="2026-01-01T00:00:00+00:00",
+                next_run_at="2026-01-01T00:01:00+00:00",
+                finding_count=1,
+                finding_summary="trainer finding",
+            )
+            store.record_notification(
+                conn,
+                None,
+                "collector",
+                "app-server-turn",
+                "notify_failed",
+                "collector notification failed",
+            )
+            store.record_notification(
+                conn,
+                None,
+                "trainer",
+                "app-server-turn",
+                "notify_failed",
+                "trainer notification failed",
+            )
+            conn.commit()
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
+
+        self.assertEqual(tuple(row["name"] for row in snapshot.watchdog_runners), ("collector-pressure",))
+        self.assertTrue(any("collector notification failed" in alert for alert in snapshot.alerts))
+        self.assertFalse(any("trainer notification failed" in alert for alert in snapshot.alerts))
+        self.assertFalse(any("trainer-pressure" in alert for alert in snapshot.alerts))
+
     def test_textual_pane_preview_body_handles_enabled_previews(self) -> None:
+        long_line = "long-" + ("x" * 180)
         snapshot = DashboardSnapshot(
             team="test-team",
             config_path=str(self.config),
@@ -625,7 +679,7 @@ runtime_dir = "{other_runtime}"
                     "dead": False,
                     "in_mode": True,
                     "current_command": "codex",
-                    "text": "first\n[red]second[/red]\nthird",
+                    "text": f"first\n[red]second[/red]\n{long_line}",
                 },
             ),
             alerts=(),
@@ -633,16 +687,16 @@ runtime_dir = "{other_runtime}"
 
         lines = textual_pane_preview_body(snapshot, include_pane_preview=True)
 
-        self.assertEqual(
-            lines,
-            [
-                "collector %7 [best-effort] command=codex dead=False copy_mode=True "
-                "screen_source=screen-text-heuristic source=pane-capture confidence=best-effort:",
-                "  first",
-                r"  \[red\]second\[/red\]",
-                "  third",
-            ],
-        )
+        rendered = "\n".join(lines)
+        self.assertIn("role", lines[0])
+        self.assertIn("pane", lines[0])
+        self.assertIn("state", lines[0])
+        self.assertIn("tail", lines[0])
+        self.assertIn("collector", rendered)
+        self.assertIn("%7", rendered)
+        self.assertIn("cmd=codex dead=False copy=True", rendered)
+        self.assertIn("[red]second[/red]", rendered)
+        self.assertIn(long_line, rendered)
         self.assertEqual(textual_pane_preview_body(snapshot, include_pane_preview=False), ["disabled"])
 
     def test_expired_claim_is_visible_and_reclaimable(self) -> None:

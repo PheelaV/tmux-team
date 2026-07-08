@@ -19,7 +19,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made `tmux-team resume` fall back to a recovery snapshot assembled from `team.toml` and SQLite runtime state when no graceful sleep snapshot exists.
 - Changed `watchdog start` to place runners as titled panes in one `tt-watchdogs` window instead of creating one tmux window per runner.
 - Expanded the live demo with an operator-triggered sleep/resume phase, resumed watchdog interval nudge, and a post-resume test operation.
-- Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, section jump keys, and a help overlay.
+- Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, scoped watchdog/notification alerts, recent plus scrollable alert history, independently scrollable live sections, section jump keys, and a help overlay.
 - Added milestone subject classification with `recorded_by`, `scope`, `subject_roles`, `milestone add --subject-role/--team`, and matching list filters.
 - Clarified role guidance so material p2p completion notices must be reconciled upward to the orchestrator instead of terminating at an intermediate role.
 - Slimmed the `start-tmux-team` runtime skill and made `references/invariants.md` a conditional reference instead of mandatory ordinary-startup context.
