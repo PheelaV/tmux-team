@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -212,8 +213,10 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
     if args.force_config:
         command.append("--force-config")
     run(command)
+    start_dashboard_pane(args.session, Path(metadata["project"]) / ".tmux-team" / "team.toml")
     print("LIVE DEMO BOOTSTRAP STARTED")
     print(f"session: {args.session}")
+    print("dashboard: tt-control split")
     print(f"attach: tmux attach -t {args.session}")
     print(f"project: {metadata['project']}")
     print(f"verify later: {Path(__file__).name} --root {root} verify")
@@ -243,6 +246,7 @@ def verify(root: Path) -> None:
             raise ScenarioError(f"{role} worktree mismatch: expected {expected}, got {actual}")
         if roles[role].get("codex_reasoning_effort") != "high":
             raise ScenarioError(f"{role} did not preserve configured Codex reasoning effort")
+    verify_tmux_truecolor(config)
 
     result = run_target_test(collector, check=False)
     if result.returncode != 0:
@@ -376,6 +380,41 @@ def verify(root: Path) -> None:
     print(f"target_test: {TARGET_TEST}")
 
 
+def verify_tmux_truecolor(config: dict[str, Any]) -> None:
+    operator = config.get("operator", {})
+    target = str(operator.get("pane") or "")
+    if not target:
+        roles = config.get("roles", {})
+        target = next((str(role.get("pane") or "") for role in roles.values() if role.get("pane")), "")
+    if not target:
+        raise ScenarioError("cannot verify tmux truecolor: no operator or role pane target in team.toml")
+
+    session = run(["tmux", "display-message", "-p", "-t", target, "#{session_name}"]).stdout.strip()
+    if not session:
+        raise ScenarioError(f"cannot verify tmux truecolor: could not resolve session for {target}")
+
+    default_terminal = tmux_option(session, "default-terminal")
+    if default_terminal != "tmux-256color":
+        raise ScenarioError(f"expected tmux default-terminal=tmux-256color, got {default_terminal or '-'}")
+
+    colorterm = run(["tmux", "show-environment", "-t", session, "COLORTERM"], check=False)
+    if colorterm.returncode != 0 or colorterm.stdout.strip() != "COLORTERM=truecolor":
+        raise ScenarioError(f"expected tmux COLORTERM=truecolor, got {colorterm.stdout.strip() or '-'}")
+
+    terminal_features = tmux_option(session, "terminal-features")
+    terminal_overrides = tmux_option(session, "terminal-overrides")
+    if "RGB" not in terminal_features and "Tc" not in terminal_overrides:
+        raise ScenarioError("expected tmux truecolor capability in terminal-features RGB or terminal-overrides Tc")
+
+
+def tmux_option(session: str, option: str) -> str:
+    result = run(["tmux", "show-options", "-qv", "-t", session, option], check=False)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    result = run(["tmux", "show-options", "-gqv", option], check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def clean(root: Path, args: argparse.Namespace) -> None:
     subprocess.run(
         ["tmux", "kill-session", "-t", args.session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
@@ -436,6 +475,33 @@ def nudge_resumed_watchdog(root: Path) -> None:
     print("LIVE DEMO WATCHDOG NUDGE OK")
     print(f"name: {WATCHDOG_RESUME_NAME}")
     print("interval: 5s")
+
+
+def start_dashboard_pane(session: str, config_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[1]
+    dashboard_command = (
+        f"uv run --with-editable . --extra dashboard tmux-team --config {shlex.quote(str(config_path))} dashboard"
+    )
+    result = run(
+        [
+            "tmux",
+            "split-window",
+            "-h",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            f"{session}:tt-control",
+            "-c",
+            str(source_root),
+            dashboard_command,
+        ]
+    )
+    pane = result.stdout.strip()
+    if pane:
+        run(["tmux", "select-pane", "-t", pane, "-T", "tt-dashboard"], check=False)
+    run(["tmux", "select-layout", "-t", f"{session}:tt-control", "even-horizontal"], check=False)
 
 
 def reset_root(root: Path, force: bool) -> None:

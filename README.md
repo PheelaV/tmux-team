@@ -48,6 +48,8 @@ verifier: LIVE DEMO VERIFY OK
 - Operator timelines, obligations, watchdog runners, pane capture, and an optional Textual dashboard.
 - Sleep/resume snapshots so a team can stop and come back without losing role bindings or watchdog runners.
 
+![tmux-team live dashboard preview](docs/assets/dashboard_preview.png)
+
 ## Install
 
 Prerequisites: `tmux`, Codex CLI authenticated locally, and either `uv` or `pipx`.
@@ -304,7 +306,7 @@ make live-demo-verify
 make live-demo-clean
 ```
 
-The live demo clones a public snapshot, seeds a real failing test, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. Its verifier checks the final test result and durable coordination state, including correlation-key discipline, completion replies, notice broadcasts, obligations, milestones, stable approval, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
+The live demo clones a public snapshot, seeds a real failing test, opens the dashboard beside `tt-control`, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. It remains a readable demo, but still includes the dashboard snapshot, sleep/resume, watchdog pressure, obligations, milestones, stable approval, completion replies, notice broadcasts, correlation-key discipline, truecolor session setup, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
 
 Opt-in real Codex integration:
 

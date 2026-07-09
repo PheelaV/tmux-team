@@ -70,6 +70,8 @@ Dashboard output is read-only. It labels source classes such as `runtime-db`, `t
 
 The live dashboard has two pages. The work/supervision page shows active work, obligations, and watchdog runners. The context/history page shows milestones, memory excerpts, and alert history. Pane preview is off by default in live mode because the operator is already in tmux; toggle it from the dashboard when you need a full-width pane tail. The live dashboard stores local preferences such as theme and concise/verbose item mode in `.tmux-team/runtime/dashboard_preferences.json`.
 
+![tmux-team live dashboard preview](assets/dashboard_preview.png)
+
 The live dashboard supports `r` refresh, modal `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, `[`/`]` page switching, `v` concise/verbose item mode, and direct jumps from the full `Ctrl-P` key menu. Sections are independently scrollable; the top alert panel shows recent pressure while the alert-history section keeps the longer bounded list. Use inbox, obligations, milestones, and memory commands to mutate durable state.
 
 ## Messages And Routing
