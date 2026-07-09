@@ -14,7 +14,7 @@ from pathlib import Path
 import tomli_w
 
 from .app_server import AppServerClient
-from .config import CONFIG_PATH_ENV, ENV_FILE_PATH, ROLE_ENV, load_config, role_scratchpad_path
+from .config import CONFIG_PATH_ENV, ENV_FILE_PATH, ROLE_ENV, OperatorConfig, load_config, role_scratchpad_path
 from .store import Store
 
 ROLE_CONTRACT_VERSION = "2026-07-04.1"
@@ -36,6 +36,8 @@ class BootstrapResult:
     config_path: Path
     role_threads: dict[str, str]
     role_panes: dict[str, str]
+    operator_pane: str | None = None
+    operator_thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ class RoleLaunchOptions:
     reasoning_effort: str | None = None
     profile: str | None = None
     config_overrides: tuple[str, ...] = ()
+    yolo: bool | None = None
 
 
 class BootstrapError(RuntimeError):
@@ -84,6 +87,7 @@ def bootstrap_team(
     worktree_base_ref: str = "HEAD",
     allow_shared_worktree_groups: tuple[frozenset[str], ...] = (),
     allow_dirty_roles: frozenset[str] = frozenset(),
+    enable_truecolor: bool = True,
 ) -> BootstrapResult:
     project_root = project_root.expanduser().resolve()
     config_path = config_path.expanduser()
@@ -134,6 +138,7 @@ def bootstrap_team(
             role_profile=role_profile,
             role_launch_options=role_launch_options,
             control_mode=control_mode,
+            enable_truecolor=enable_truecolor,
         ):
             print(shell_join(command))
         print(
@@ -146,6 +151,7 @@ def bootstrap_team(
                 role_profile,
                 role_launch_options,
                 role_scratchpad_values,
+                operator=OperatorConfig(pane=f"{session}:{control_window}.0"),
             )
         )
         return BootstrapResult(
@@ -154,6 +160,7 @@ def bootstrap_team(
             config_path=config_path,
             role_threads={role: binding.thread_id for role, binding in role_bindings.items()},
             role_panes={role: binding.pane for role, binding in role_bindings.items()},
+            operator_pane=f"{session}:{control_window}.0",
         )
 
     provisional_bindings = {
@@ -173,7 +180,11 @@ def bootstrap_team(
     write_role_env_files(config_path, provisional_bindings)
     write_role_scratchpads(config_path, initial_goal=goal)
 
-    ensure_control_plane_window(tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode)
+    operator_pane = ensure_control_plane_window(
+        tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
+    )
+    if enable_truecolor:
+        configure_session_truecolor(tmux_bin, session)
     if start_app_server:
         for command in app_server_tmux_commands(tmux_bin, codex_bin, session, endpoint, project_root):
             run(command, check=True)
@@ -204,6 +215,7 @@ def bootstrap_team(
         role_launch_options,
         role_scratchpad_values,
         force=True,
+        operator=OperatorConfig(pane=operator_pane),
     )
     write_role_env_files(config_path, role_bindings)
     write_role_scratchpads(config_path, initial_goal=goal)
@@ -217,6 +229,7 @@ def bootstrap_team(
         config_path=config_path,
         role_threads={role: binding.thread_id for role, binding in role_bindings.items()},
         role_panes={role: binding.pane for role, binding in role_bindings.items()},
+        operator_pane=operator_pane,
     )
 
 
@@ -237,12 +250,15 @@ def dry_run_tmux_commands(
     role_profile: str | None,
     role_launch_options: dict[str, RoleLaunchOptions],
     control_mode: str,
+    enable_truecolor: bool,
 ) -> list[list[str]]:
     commands: list[list[str]] = [
         control_plane_session_command(
             tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
         )
     ]
+    if enable_truecolor:
+        commands.extend(session_truecolor_tmux_commands(tmux_bin, session))
     if start_app_server:
         commands.append(
             new_window_command(
@@ -281,6 +297,27 @@ def dry_run_tmux_commands(
     return commands
 
 
+def session_truecolor_tmux_commands(tmux_bin: str, session: str) -> list[list[str]]:
+    return [
+        [tmux_bin, "set-option", "-t", session, "default-terminal", "tmux-256color"],
+        [tmux_bin, "set-option", "-as", "-t", session, "terminal-features", ",*:RGB"],
+        [tmux_bin, "set-environment", "-t", session, "COLORTERM", "truecolor"],
+    ]
+
+
+def session_truecolor_fallback_command(tmux_bin: str, session: str) -> list[str]:
+    return [tmux_bin, "set-option", "-as", "-t", session, "terminal-overrides", ",*:Tc"]
+
+
+def configure_session_truecolor(tmux_bin: str, session: str) -> None:
+    commands = session_truecolor_tmux_commands(tmux_bin, session)
+    run(commands[0], check=False)
+    feature_result = run(commands[1], check=False)
+    if feature_result.returncode != 0:
+        run(session_truecolor_fallback_command(tmux_bin, session), check=False)
+    run(commands[2], check=False)
+
+
 def app_server_tmux_commands(
     tmux_bin: str,
     codex_bin: str,
@@ -304,7 +341,7 @@ def ensure_control_plane_window(
     config_path: Path,
     control_window: str,
     control_mode: str,
-) -> None:
+) -> str | None:
     if not tmux_session_exists(tmux_bin, session):
         run(
             control_plane_session_command(
@@ -312,18 +349,19 @@ def ensure_control_plane_window(
             ),
             check=True,
         )
-        return
+        return first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
 
     current_session = detect_current_tmux_session(tmux_bin)
     if current_session == session:
         current_window_id = detect_current_tmux_window_id(tmux_bin)
         if current_window_id:
             run([tmux_bin, "rename-window", "-t", current_window_id, control_window], check=True)
-            return
+            return detect_current_tmux_pane_id(tmux_bin) or first_pane_id(tmux_bin, current_window_id)
 
     if not tmux_window_exists(tmux_bin, session, control_window):
         command = control_plane_shell_command(codex_bin, project_root, config_path, control_mode)
         run(new_window_command(tmux_bin, session, control_window, project_root, command), check=True)
+    return first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
 
 
 def start_role_panes_and_discover_threads(
@@ -511,6 +549,7 @@ def write_team_config(
     role_scratchpads: dict[str, str],
     *,
     force: bool,
+    operator: OperatorConfig | None = None,
 ) -> None:
     if path.exists() and not force:
         raise BootstrapError(f"config already exists: {path} (use --force-config to replace)")
@@ -525,6 +564,7 @@ def write_team_config(
             role_profile,
             role_launch_options,
             role_scratchpads,
+            operator=operator,
         ),
         encoding="utf-8",
     )
@@ -603,6 +643,7 @@ def render_team_config(
     role_profile: str | None = None,
     role_launch_options: dict[str, RoleLaunchOptions] | None = None,
     role_scratchpads: dict[str, str] | None = None,
+    operator: OperatorConfig | None = None,
 ) -> str:
     role_launch_options = role_launch_options or {}
     role_scratchpads = role_scratchpads or {}
@@ -619,7 +660,7 @@ def render_team_config(
             "app_server_endpoint": endpoint,
             "codex_thread_id": binding.thread_id,
         }
-        if role_yolo:
+        if role_yolo or launch_options.yolo:
             role_data["codex_yolo"] = True
         profile = launch_options.profile or role_profile
         if profile:
@@ -631,7 +672,22 @@ def render_team_config(
         if launch_options.config_overrides:
             role_data["codex_config"] = list(launch_options.config_overrides)
         roles[role] = role_data
-    return tomli_w.dumps({"team": {"name": team_name, "runtime_dir": runtime_dir}, "roles": roles})
+    data: dict[str, object] = {"team": {"name": team_name, "runtime_dir": runtime_dir}, "roles": roles}
+    operator_data = render_operator_config(operator)
+    if operator_data:
+        data["operator"] = operator_data
+    return tomli_w.dumps(data)
+
+
+def render_operator_config(operator: OperatorConfig | None) -> dict[str, object]:
+    if operator is None:
+        return {}
+    data: dict[str, object] = dict(operator.capabilities)
+    if operator.pane:
+        data["pane"] = operator.pane
+    if operator.codex_thread_id:
+        data["codex_thread_id"] = operator.codex_thread_id
+    return data
 
 
 def wait_for_app_server(endpoint: str, timeout: float) -> None:
@@ -698,6 +754,18 @@ def detect_current_tmux_window_id(tmux_bin: str = "tmux") -> str | None:
         return None
     window_id = result.stdout.strip()
     return window_id or None
+
+
+def detect_current_tmux_pane_id(tmux_bin: str = "tmux") -> str | None:
+    if "TMUX" not in os.environ:
+        return None
+    if shutil.which(tmux_bin) is None:
+        return None
+    result = run([tmux_bin, "display-message", "-p", "#{pane_id}"], check=False)
+    if result.returncode != 0:
+        return None
+    pane_id = result.stdout.strip()
+    return pane_id or None
 
 
 def tmux_session_exists(tmux_bin: str, session: str) -> bool:
@@ -821,7 +889,7 @@ def role_shell_command(
     codex_args = [codex_bin]
     if profile:
         codex_args.extend(["--profile", profile])
-    if role_yolo:
+    if role_yolo or role_launch_options.yolo:
         codex_args.append("--dangerously-bypass-approvals-and-sandbox")
     if role_launch_options.model:
         codex_args.extend(["--model", role_launch_options.model])
@@ -854,7 +922,7 @@ def role_resume_shell_command(
     codex_args = [codex_bin, "resume"]
     if profile:
         codex_args.extend(["--profile", profile])
-    if role_yolo:
+    if role_yolo or role_launch_options.yolo:
         codex_args.append("--dangerously-bypass-approvals-and-sandbox")
     if role_launch_options.model:
         codex_args.extend(["--model", role_launch_options.model])

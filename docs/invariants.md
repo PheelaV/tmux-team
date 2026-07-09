@@ -80,7 +80,7 @@ Shared explicitly mapped role worktrees must be explicit with `--allow-shared-wo
 Each role has a scratchpad memory file declared in config.
 
 - Bootstrap creates missing scratchpads before role Codex panes start.
-- A newly spawned role receives a startup prompt to load the `start-tmux-team` skill, read invariants, read memory, then claim inbox work or park.
+- A newly spawned role receives a startup prompt to load the `start-tmux-team` skill, read memory, then claim inbox work or park. It reads invariants only when changing behavior, debugging delivery/layout/lifecycle/recovery, migrating a team, or resolving a state conflict.
 - Scratchpad memory preserves long-term goals across context compression, sleep/resume, and pane restarts.
 - Scratchpad memory is also an observability surface for the role, other agents, and the human overseer.
 - Keep the latest and most important state at the top.
@@ -100,6 +100,8 @@ The milestone log is the operator-facing timeline.
 - Use milestones to answer questions like "what happened today?", "what changed in the last 4h?", and "what did this team accomplish while I was away?"
 - Record team start, task routing, evidence accepted, blockers found/resolved, tests passing, stable commit approval, sleep/resume, and team resize.
 - Keep milestones concise. They are not command transcripts, chat logs, scratchpad replacements, or message transport.
+- New milestones should separate writer from subject: `recorded_by` is who wrote the entry, while `--subject-role` or `--team` describes what the milestone is about. Legacy `--role` remains a single-subject compatibility alias.
+- Role-filtered milestone views must filter by subject role, not only by writer.
 - Only the operator/control plane and orchestrator record milestones by default. Other roles report evidence or blockers through inbox completion; the orchestrator decides whether the result is milestone-worthy.
 - Query from the control plane with `tmux-team milestone list --today` or `tmux-team milestone list --since -4h`.
 
@@ -134,9 +136,16 @@ The orchestrator is on the critical path for team throughput and should not seri
 The operator and orchestrator may inspect managed role panes.
 
 - Use `tmux-team status --verbose` first when aggregate counts are unclear. It must show bounded active message summaries from durable state without scraping panes.
-- Use `tmux-team dashboard --once` for a deterministic read-only snapshot of roles, active messages, todos, watches, milestones, memory excerpts, alerts, and optional pane tails.
+- Use `tmux-team dashboard --once` for a deterministic read-only snapshot of roles, active messages, todos, obligations, milestones, memory excerpts, alerts, and optional pane tails.
 - Use `tmux-team dashboard` for the live Textual operator dashboard only when the optional `tmux-team[dashboard]` extra is installed.
-- Dashboard views are observation surfaces. They must not mutate inbox, todo, watch, milestone, memory, or role state.
+- Dashboard sections must label provenance. Runtime database rows are authoritative, memory excerpts are prose, and pane previews are best-effort tmux captures with screen-text heuristic status only.
+- Textual dashboard rendering must escape arbitrary memory and pane text as plain text. Captured terminal output must not be treated as trusted Rich markup.
+- The live dashboard should remain keyboard-first: refresh/help, role filter shortcuts, team overview, page switching, concise/verbose item mode, and direct section jumps must work without mouse input. Help must be an overlay, and dashboard sections should be independently focusable/scrollable.
+- The live dashboard should separate work/supervision from context/history instead of squeezing all sections into one crowded view. Pane preview should be toggleable and off by default in live mode.
+- Role-filtered dashboard views must scope roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the selected role.
+- Alert display should keep a compact recent panel plus a scrollable bounded alert-history section instead of dropping older alerts from the live view.
+- Dashboard-local operator preferences belong under `.tmux-team/runtime/`, not in project source, role memory, or docs.
+- Dashboard views are observation surfaces. They must not mutate inbox, todo, obligation, milestone, memory, or role state.
 - Use `tmux-team pane list --all` to show unmanaged panes in managed role windows. Unmanaged panes must be marked `managed=false`; lifecycle commands must not silently treat them as role panes.
 - Use `tmux-team pane capture <role> --lines N --offset N` to read tmux stdout/history for a role.
 - Use `tmux-team pane capture <role> --summary` when raw scrollback would flood context; summaries must be generated from bounded capture, use a compact JSON shape, and remain observational only.
@@ -192,34 +201,41 @@ Message completion is durable state. Conversational completion replies are expli
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.
 - Completion replies must be stored as `message_kind='completion_notice'`.
 - `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
+- Material completion notices must not terminate at an intermediate non-orchestrator role. If a delegated result affects the team goal, stable commit, blocker state, external run state, or operator-visible outcome, the recipient must reconcile upward to `orchestrator` with a concise durable message or by completing the still-active orchestrator-owned task.
 - A dispatcher must keep the message id returned by `tmux-team send`.
 - After fan-out, the dispatcher checks `tmux-team status`, `inbox list`, or events for that message's state before routing follow-up work.
 - For one logical work thread, reuse one stable `--correlation-key` across retries, follow-ups, and verification. Different keys are treated as different work, so near-synonym keys create avoidable duplicate work. Use `--allow-duplicate` only when redundant independent work is deliberate.
 - Plain `complete` remains available for scripts and operator-originated tasks that should not generate reply traffic.
 
-## Supervision Watches
+## Obligations
 
 Long-running monitoring work must not be hidden as an indefinitely acknowledged inbox task.
 
-- Use `tmux-team watch start/update/complete` for ongoing supervision with heartbeat-style updates.
-- Watches are durable role-owned state with a current summary, last update, optional next expected update, and terminal status.
-- Watches appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
-- Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
-- A role may manage its own watches. The orchestrator and operator may manage or inspect watches across roles.
+- Use `tmux-team obligation start/update/complete` for ongoing role-owned commitments with expected updates.
+- Obligations are durable role-owned state with a current summary, optional goal, last update, optional next expected update, and terminal status.
+- Use `tmux-team obligation pause/resume` for non-terminal deferral. A paused obligation preserves its previous summary, stores a pause reason, optional review time, paused timestamp, and actor, and must not count as overdue while paused.
+- When a paused obligation review time passes, `tmux-team watchdog` reports `obligation_review_due`. Use `obligation complete --status cancelled` for terminal cancellation.
+- Obligations appear in `tmux-team status --verbose` so the operator can distinguish healthy ongoing supervision from stale one-shot inbox work.
+- Obligations are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+- A role may manage its own obligations. The orchestrator and operator may manage or inspect obligations across roles.
 
 ## Watchdog
 
 Watchdog checks are local supervision, not autonomous orchestration.
 
-- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, and overdue watches.
-- Watchdog checks must not mutate message/watch state, wake roles, or write milestones by default.
+- `tmux-team watchdog` reports durable-state findings such as urgent pending work, stale claims, claimed-but-unacked messages, old acknowledged tasks, overdue obligations, and review-due paused obligations/runners.
+- Bare watchdog checks are report-only. Delivery-enabled runners may create one durable inbox escalation and wake the target role; they must not mutate existing message/obligation state or write milestones.
 - Bare `tmux-team watchdog` remains a single-shot report command for debugging and scripts.
-- Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog stop`, `watchdog list`, and `watchdog status`.
-- `watchdog start` must create visible tmux infrastructure, not a hidden background process.
+- Repeated checks should use the native visible runner lifecycle: `watchdog run`, `watchdog start`, `watchdog update`, `watchdog pause`, `watchdog resume`, `watchdog stop`, `watchdog list`, and `watchdog status`.
+- `watchdog run --once` may be used as a one-shot pressure/checker surface for scripts.
+- `watchdog start` must create visible tmux infrastructure, not a hidden background process. Multiple runners should share a `tt-watchdogs` window with one titled pane per runner.
+- Watchdog runners must carry inspectable description, goal, scope, delivery method, and notify target when configured.
+- Watchdog delivery must suppress duplicate escalation while a prior active watchdog message with the same correlation key is queued, notified, claimed, or acknowledged.
+- Paused watchdog runners must not emit repeated findings or wake roles while paused. They preserve the last finding summary plus pause reason, review time, paused timestamp, and actor. Use `watchdog stop` for terminal shutdown.
 - Watchdog runner panes must be self-describing: name, interval, scope, delivery label, last run, next run, last finding, backing pane, and safe-close guidance are visible in pane output.
 - Watchdog runner state is durable SQLite state and must appear in `status --verbose` and `dashboard`.
 - `tmux-team pane list --all` must mark watchdog panes as watchdog infrastructure, not as ordinary unmanaged shells.
-- Watches and watchdog runners are different: watches are role-owned deadlines/expectations; watchdog runners are schedulers/checkers that periodically inspect durable state.
+- Obligations and watchdog runners are different: obligations are role-owned commitments; watchdog runners are schedulers/checkers that periodically inspect durable state.
 
 ## State
 
@@ -227,13 +243,14 @@ The config and runtime store are the source of truth.
 
 - `.tmux-team/team.toml` records role names, pane targets, app-server endpoint, and Codex thread IDs.
 - Operator-facing team, role, and lifecycle configuration is TOML.
-- `team.sqlite` records messages, todos, notifications, role state, watches, events, and stable commits.
+- `team.sqlite` records messages, todos, notifications, role state, obligations, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
 - `TMUX_TEAM_CONFIG` and `TMUX_TEAM_ROLE` are pane-local process bindings for ergonomics only.
 - Bootstrap startup prompts must include explicit `--role <role>` commands because Codex tool shells may not inherit pane-local env.
 - Role worktrees also get a `.tmux-team/team.env` pointer back to the current team config, so commands from Codex tool shells can rediscover the team even when process env is not inherited.
 - `.tmux-team/team.env` may include `TMUX_TEAM_ROLE` only when exactly one role owns that worktree. Shared worktrees must stay config-only because a single role value would be ambiguous.
 - Tmux pane option `@tmux-team-role` is the pane-local role fallback when `TMUX_PANE` is available.
+- The optional `[operator]` table records control-pane recovery metadata such as `pane` and `codex_thread_id`. It is not a managed role and must not receive inbox work.
 - Explicit CLI flags override env, pointer-file discovery, and pane/cwd inference.
 - Spawned or respawned role panes must receive fresh process env, pointer files, pane labels, and pane options from the current config; do not use tmux session-global role env.
 - Skill availability is not enough for reset safety. A role that has lost context must recover the role contract from the startup prompt, skill/invariants files, scratchpad memory, and bound config before claiming new work.
@@ -244,13 +261,16 @@ If a role pane target changes, config must change with it.
 
 `tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
 
-- It snapshots role state, pane targets, tmux session/window/pane IDs, and app-server thread bindings before teardown.
+- It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, running watchdog runners, operator mapping metadata, and configured Codex launch settings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
-- It tears down managed role/app-server windows by default and leaves `tt-control` alive.
+- It tears down managed role, app-server, and watchdog windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
-- Resume reads the latest or specified sleep snapshot, recreates the app-server/role panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids.
+- Resume reads the latest or specified sleep snapshot, recreates the app-server, role, and running watchdog panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
+- Resume restores configured model, reasoning effort, profile, raw Codex config overrides, and YOLO mode when present. TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown and must be verified manually if important.
+- Bootstrap and resume set tmux truecolor options on the managed session by default. They should use `tmux-256color`, prefer RGB terminal features when supported, set `COLORTERM=truecolor`, and keep `--no-truecolor` as the opt-out for unusual terminal stacks.
 - Resume must update config/runtime pane and app-server bindings after recreating panes.
 - Resume reactivates roles by default; use `--no-reactivate-roles` when the operator wants to inspect before accepting work.
+- If no graceful sleep snapshot exists after an abrupt host or tmux shutdown, resume must build a recovery snapshot from durable `team.toml` and SQLite runtime state when role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.
 
 ## Resizing
 

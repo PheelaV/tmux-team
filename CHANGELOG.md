@@ -2,10 +2,55 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
-## Unreleased
+## 0.4.1 - 2026-07-08
+
+- Reworked the optional live Textual dashboard into two operator pages: work/supervision for active work, obligations, and watchdog runners; context/history for milestones, memory excerpts, and alert history.
+- Made live dashboard pane previews opt-in with the pane preview toggle, while keeping `dashboard --once` and explicit pane-preview CLI behavior intact.
+- Added dashboard-local preferences in `.tmux-team/runtime/dashboard_preferences.json` for theme and concise/verbose item mode.
+- Added concise/verbose row rendering for obligations and watchdog runners, cleaner live headings, theme-aware semantic styling, role-table Codex chips for known structured launch settings, and scratchpad mtime timestamps for memory excerpts.
+- Made dashboard alert panels distinguish recent live alerts from stale notification failures; older notification failures move into alert history with age and timestamp context instead of staying in the current-pressure panel.
+- Made `bootstrap` and `resume` set tmux truecolor session options by default, including `COLORTERM=truecolor`; use `--no-truecolor` for unusual terminal stacks.
+- Kept `/fast` out of dashboard role-table metadata because it is not durable structured tmux-team state today.
+- Updated repo-local marketplace metadata to install the upcoming `v0.4.1` plugin tag.
+
+Migration notes:
+
+- Existing dashboard users should upgrade the optional `tmux-team[dashboard]` install. The first live launch uses concise mode with pane previews off; operators can toggle verbosity and pane previews from the dashboard, and preferences are saved under the runtime directory.
+- New bootstrap/resume runs set tmux truecolor options on the managed session. Pass `--no-truecolor` if your terminal/tmux stack mis-renders color.
+
+## 0.4.0 - 2026-07-08
 
 - Reworked README and docs navigation so quickstart/demo guidance stays concise and the full command map lives in `docs/cli-reference.md`.
-- Updated repo-local marketplace metadata to install the current `v0.3.1` plugin tag.
+- Simplified watchdog/dashboard internals by sharing runner command construction and display formatting helpers.
+- Compressed MCP and permission-roadmap docs into a single experimental-surfaces note.
+- Updated repo-local marketplace metadata to install the upcoming `v0.4.0` plugin tag.
+- Replaced the long-running supervision `watch` command surface with `obligation`, including optional `--goal` metadata and obligation labels in status/dashboard/docs.
+- Added watchdog pressure delivery: delivery-enabled `watchdog run --once` and watchdog runners create durable inbox escalation messages, wake the target role, and suppress duplicate active escalations by correlation key.
+- Added watchdog runner `--description`, `--goal`, `--notify-role`, one-shot `--once`, and `watchdog update` for interval/scope/delivery/target changes.
+- Added non-terminal pause/resume lifecycle commands for obligations and watchdog runners, with review-due findings in `tmux-team watchdog`.
+- Surfaced paused obligations/runners in `status --verbose`, `obligation list`, `watchdog list/status`, and `dashboard`.
+- Added operator recovery metadata through `[operator]`, `tmux-team operator show/bind`, and sleep snapshots.
+- Made `tmux-team resume` replay configured role Codex launch settings from sleep snapshots, including model, reasoning effort, profile, raw Codex config overrides, and YOLO mode.
+- Made `tmux-team sleep` snapshot and tear down running watchdog runner panes, and made `tmux-team resume` reinstantiate running watchdog runners from the sleep snapshot.
+- Made `tmux-team resume` fall back to a recovery snapshot assembled from `team.toml` and SQLite runtime state when no graceful sleep snapshot exists.
+- Changed `watchdog start` to place runners as titled panes in one `tt-watchdogs` window instead of creating one tmux window per runner.
+- Expanded the live demo with an operator-triggered sleep/resume phase, resumed watchdog interval nudge, and a post-resume test operation.
+- Added dashboard provenance/source labels, `dashboard --provenance`, safe Textual escaping for memory and pane preview text, tmux pane metadata in previews, role shortcut filtering, scoped watchdog/notification alerts, recent plus scrollable alert history, independently scrollable live sections, section jump keys, and a help overlay.
+- Fixed live dashboard role shortcuts to follow the displayed role order, and fixed role-filtered dashboard views so implicit team watchdog pressure targets appear under the effective recipient role.
+- Added milestone subject classification with `recorded_by`, `scope`, `subject_roles`, `milestone add --subject-role/--team`, and matching list filters.
+- Clarified role guidance so material p2p completion notices must be reconciled upward to the orchestrator instead of terminating at an intermediate role.
+- Slimmed the `start-tmux-team` runtime skill and made `references/invariants.md` a conditional reference instead of mandatory ordinary-startup context.
+
+Migration notes:
+
+- Replace `tmux-team watch ...` usage with `tmux-team obligation ...`. Old command names are not kept as compatibility aliases.
+- Existing `team.sqlite` stores migrate additively to schema version 9 when opened. Legacy dogfooded `watches` rows are copied into `obligations` on first open with their existing ids and status. New obligation ids use the `obligation_` prefix. Obligations and watchdog runners include pause/review metadata, and watchdog runners gain description, goal, and notify-role metadata.
+- Bare `tmux-team watchdog` remains report-only. Use `watchdog run --once --delivery app-server-turn --notify-role <role>` or `watchdog start ... --delivery app-server-turn --notify-role <role>` when you want durable inbox pressure.
+- Watchdog runner tmux layout changed: new runners default to panes inside `tt-watchdogs` with pane titles like `tt-watchdog-<name>`. If an existing dogfooded session has old per-runner windows such as `tt-watchdog-default`, sleep/resume or restart the runner to normalize the layout.
+- Existing sessions may add `[operator]` manually or with `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>`. Role `codex_model`, `codex_reasoning_effort`, `codex_profile`, `codex_config`, and `codex_yolo` values in `team.toml` are now included in sleep snapshots and replayed by `resume`; TUI-only state such as `/fast` remains unknown unless mapped through explicit Codex config.
+- Running watchdog runners are now part of lifecycle recovery. If a host or tmux session ends abruptly before `tmux-team sleep`, `tmux-team resume` can rebuild a recovery snapshot from current `team.toml` role bindings and SQLite watchdog runner rows, then restart the role panes and running watchdog panes.
+- Existing `milestones.jsonl` entries remain readable. New entries include `recorded_by`, `scope`, and `subject_roles`; legacy `role` remains as a single-subject compatibility field.
+- Update the installed plugin/skill after pulling this release. Ordinary role startup now loads the compact runtime skill and reads invariants only for behavior changes, lifecycle/delivery debugging, migration, or state-conflict resolution.
 
 ## 0.3.1 - 2026-07-04
 

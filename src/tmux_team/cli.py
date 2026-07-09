@@ -26,6 +26,7 @@ from .bootstrap import (
     RoleLaunchOptions,
     bootstrap_team,
     default_session_name,
+    detect_current_tmux_pane_id,
     detect_current_tmux_session,
     free_local_endpoint,
     parse_roles,
@@ -37,16 +38,24 @@ from .config import (
     ROLE_ENV,
     RUNTIME_HOME_ENV,
     ConfigError,
+    OperatorConfig,
     load_config,
     role_scratchpad_path,
     runtime_dir_env,
     write_default_config,
+    write_operator_config,
 )
 from .dashboard import (
     DashboardDependencyError,
     collect_dashboard_snapshot,
     render_dashboard_snapshot,
     run_textual_dashboard,
+)
+from .display import (
+    codex_settings_summary,
+    format_seconds_duration,
+    role_capabilities,
+    watchdog_runner_display_state,
 )
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
@@ -55,22 +64,29 @@ from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
 from .store import (
     CLAIMABLE_STATES,
+    OBLIGATION_ACTIVE_STATES,
+    OBLIGATION_PAUSED_STATE,
+    OBLIGATION_STATES,
+    OBLIGATION_VISIBLE_STATES,
     ROLE_STATES,
     STALE_CLAIMED_STATE,
     TODO_STATES,
-    WATCH_ACTIVE_STATES,
-    WATCH_STATES,
     Store,
     normalize_priority,
     normalize_watchdog_runner_name,
     parse_utc_datetime,
+)
+from .watchdog_runner import (
+    watchdog_layout_command,
+    watchdog_pane_setup_commands,
+    watchdog_spawn_command,
+    watchdog_window_name,
 )
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 DEFAULT_PANE_SUMMARY_MAX_BYTES = 20_000
 DEFAULT_PANE_SUMMARY_TIMEOUT_SECONDS = 120.0
 DEFAULT_WATCHDOG_INTERVAL = "15m"
-WATCHDOG_PANE_OPTION = "@tmux-team-watchdog"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -109,6 +125,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_status(args, store, conn)
             if args.command == "dashboard":
                 return cmd_dashboard(args, store, conn, config)
+            if args.command == "operator":
+                return cmd_operator(args, config)
             if args.command == "ext":
                 return cmd_ext(args, config)
 
@@ -125,8 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_todo(args, store, conn)
             if args.command == "milestone":
                 return cmd_milestone(args, store, conn)
-            if args.command == "watch":
-                return cmd_watch(args, store, conn)
+            if args.command == "obligation":
+                return cmd_obligation(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
             if args.command == "pane":
@@ -134,7 +152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "notify":
                 return cmd_notify(args, service, conn)
             if args.command == "watchdog":
-                return cmd_watchdog(args, store, conn)
+                return cmd_watchdog(args, store, service, conn)
             if args.command == "sleep":
                 return cmd_sleep(args, store, conn, config)
             if args.command == "resume":
@@ -234,7 +252,18 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--role", help="Limit the dashboard to one role")
     dashboard.add_argument("--no-pane-preview", action="store_true", help="Do not capture role pane tails")
     dashboard.add_argument("--pane-lines", type=int, default=8, help="Pane tail lines to show when preview is enabled")
+    dashboard.add_argument(
+        "--provenance", action="store_true", help="Show row-level dashboard source/confidence labels"
+    )
     dashboard.add_argument("--tmux-bin", default="tmux")
+
+    operator = subparsers.add_parser("operator", help="Inspect or update operator recovery metadata")
+    operator_sub = operator.add_subparsers(dest="operator_command", required=True)
+    operator_bind = operator_sub.add_parser("bind", help="Record the operator/control pane metadata in team.toml")
+    operator_bind.add_argument("--pane", help="Operator tmux pane id/target; defaults to current tmux pane")
+    operator_bind.add_argument("--codex-thread-id", help="Operator Codex thread id, when known")
+    operator_bind.add_argument("--tmux-bin", default="tmux")
+    operator_sub.add_parser("show", help="Show operator recovery metadata")
 
     ext = subparsers.add_parser("ext", help="Inspect tmux-team extensions")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
@@ -361,6 +390,11 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--force-config", action="store_true", help="Replace an existing .tmux-team/team.toml")
     bootstrap.add_argument(
         "--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint"
+    )
+    bootstrap.add_argument(
+        "--no-truecolor",
+        action="store_true",
+        help="Do not set tmux truecolor options on the managed session",
     )
     bootstrap.add_argument(
         "--dry-run", action="store_true", help="Print planned tmux commands and generated config without executing"
@@ -507,7 +541,18 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_sub = milestone.add_subparsers(dest="milestone_command", required=True)
     milestone_add = milestone_sub.add_parser("add", help="Append a milestone to runtime milestones.jsonl")
     milestone_add.add_argument("--summary", required=True, help="Concise milestone summary")
-    milestone_add.add_argument("--role", help=f"Role associated with the milestone; defaults to --actor or ${ROLE_ENV}")
+    milestone_add.add_argument(
+        "--role",
+        help=f"Legacy single subject role; defaults to --actor or ${ROLE_ENV} when no --subject-role/--team is set",
+    )
+    milestone_subject = milestone_add.add_mutually_exclusive_group()
+    milestone_subject.add_argument(
+        "--subject-role",
+        action="append",
+        default=[],
+        help="Role the milestone is about; repeatable or comma-separated",
+    )
+    milestone_subject.add_argument("--team", action="store_true", help="Record a team-wide milestone")
     milestone_add.add_argument("--kind", default="milestone", help="Milestone kind, e.g. result, blocker, routing")
     milestone_add.add_argument("--ref", dest="ref_id", help="Related message id, commit, job id, or artifact id")
     milestone_add.add_argument("--tag", action="append", default=[], help="Tag for filtering; repeatable")
@@ -520,36 +565,53 @@ def build_parser() -> argparse.ArgumentParser:
     milestone_list.add_argument("--since", help="Start time: ISO timestamp or relative duration like -4h, 30m, 2d")
     milestone_list.add_argument("--until", help="End time: ISO timestamp or relative duration")
     milestone_list.add_argument("--today", action="store_true", help="Show milestones since local midnight")
-    milestone_list.add_argument("--role", help="Filter by role")
+    milestone_list.add_argument("--role", help="Filter by legacy role or subject role")
+    milestone_list.add_argument("--subject-role", help="Filter by subject role")
+    milestone_list.add_argument("--team", action="store_true", help="Show team-wide milestones")
     milestone_list.add_argument("--kind", help="Filter by kind")
     milestone_list.add_argument("--tag", action="append", default=[], help="Require tag; repeatable")
     milestone_list.add_argument("--limit", type=int, default=50)
     milestone_list.add_argument("--json", action="store_true", help="Print JSON array instead of human output")
 
-    watch = subparsers.add_parser("watch", help="Track long-running role supervision work")
-    watch_sub = watch.add_subparsers(dest="watch_command", required=True)
-    watch_start = watch_sub.add_parser("start", help="Start a long-running supervision watch")
-    watch_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_start.add_argument("--summary", required=True, help="Concise supervision summary")
-    watch_start.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+    obligation = subparsers.add_parser("obligation", help="Track role-owned commitments with expected updates")
+    obligation_sub = obligation.add_subparsers(dest="obligation_command", required=True)
+    obligation_start = obligation_sub.add_parser("start", help="Start a role-owned obligation")
+    obligation_start.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_start.add_argument("--summary", required=True, help="Concise obligation summary")
+    obligation_start.add_argument("--goal", help="Done condition or longer-lived objective")
+    obligation_start.add_argument("--next-update-in", help="Expected next update duration, e.g. 15m")
 
-    watch_update = watch_sub.add_parser("update", help="Record a watch heartbeat or blocker")
-    watch_update.add_argument("watch_id")
-    watch_update.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_update.add_argument("--summary", required=True, help="Current watch state")
-    watch_update.add_argument("--state", default="active", choices=WATCH_ACTIVE_STATES)
-    watch_update.add_argument("--next-update-in", help="Expected next heartbeat duration, e.g. 15m")
+    obligation_update = obligation_sub.add_parser("update", help="Record an obligation update or blocker")
+    obligation_update.add_argument("obligation_id")
+    obligation_update.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_update.add_argument("--summary", required=True, help="Current obligation state")
+    obligation_update.add_argument("--state", default="active", choices=OBLIGATION_ACTIVE_STATES)
+    obligation_update.add_argument("--next-update-in", help="Expected next update duration, e.g. 15m")
 
-    watch_complete = watch_sub.add_parser("complete", help="Complete a supervision watch")
-    watch_complete.add_argument("watch_id")
-    watch_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
-    watch_complete.add_argument("--status", default="done", choices=("done", "failed", "cancelled"))
-    watch_complete.add_argument("--summary", required=True, help="Terminal watch summary")
+    obligation_pause = obligation_sub.add_parser("pause", help="Pause an obligation until resume or review")
+    obligation_pause.add_argument("obligation_id")
+    obligation_pause.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_pause.add_argument("--reason", required=True, help="Why the obligation is intentionally paused")
+    obligation_pause_review = obligation_pause.add_mutually_exclusive_group()
+    obligation_pause_review.add_argument("--review-in", help="When to review the pause, e.g. 30m")
+    obligation_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
 
-    watch_list = watch_sub.add_parser("list", help="List supervision watches")
-    watch_list.add_argument("--role", help="Owning role; defaults to --actor or all roles for operator")
-    watch_list.add_argument("--state", action="append", choices=WATCH_STATES, help="Filter state; repeatable")
-    watch_list.add_argument("--limit", type=int, default=50)
+    obligation_resume = obligation_sub.add_parser("resume", help="Resume a paused obligation")
+    obligation_resume.add_argument("obligation_id")
+    obligation_resume.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_resume.add_argument("--summary", required=True, help="Fresh resumed obligation state")
+    obligation_resume.add_argument("--next-update-in", help="Expected next update duration, e.g. 15m")
+
+    obligation_complete = obligation_sub.add_parser("complete", help="Complete an obligation")
+    obligation_complete.add_argument("obligation_id")
+    obligation_complete.add_argument("--role", help=f"Owning role; defaults to --actor or ${ROLE_ENV}")
+    obligation_complete.add_argument("--status", default="done", choices=("done", "failed", "cancelled"))
+    obligation_complete.add_argument("--summary", required=True, help="Terminal obligation summary")
+
+    obligation_list = obligation_sub.add_parser("list", help="List obligations")
+    obligation_list.add_argument("--role", help="Owning role; defaults to --actor or all roles for operator")
+    obligation_list.add_argument("--state", action="append", choices=OBLIGATION_STATES, help="Filter state; repeatable")
+    obligation_list.add_argument("--limit", type=int, default=50)
 
     role = subparsers.add_parser("role", help="Inspect or change role state")
     role_sub = role.add_subparsers(dest="role_command", required=True)
@@ -608,34 +670,59 @@ def build_parser() -> argparse.ArgumentParser:
     watchdog.add_argument("--role", help="Limit checks to one role")
     watchdog.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog.add_argument("--ack-warn-seconds", type=int, default=3600)
-    watchdog.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog.add_argument("--obligation-grace-seconds", type=int, default=0)
     watchdog.add_argument("--json", action="store_true", help="Print findings as JSON")
     watchdog_sub = watchdog.add_subparsers(dest="watchdog_command")
     watchdog_run = watchdog_sub.add_parser("run", help="Run a visible periodic watchdog loop in this pane")
     watchdog_run.add_argument("--name", default="default", help="Runner name")
     watchdog_run.add_argument("--interval", default=DEFAULT_WATCHDOG_INTERVAL, help="Run interval such as 15m")
     watchdog_run.add_argument("--role", help="Limit checks to one role")
+    watchdog_run.add_argument("--description", help="Human-readable runner purpose")
+    watchdog_run.add_argument("--goal", help="Pressure goal or done condition")
+    watchdog_run.add_argument("--notify-role", help="Role to receive durable escalation messages")
     watchdog_run.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
     watchdog_run.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog_run.add_argument("--ack-warn-seconds", type=int, default=3600)
-    watchdog_run.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog_run.add_argument("--obligation-grace-seconds", type=int, default=0)
+    watchdog_run.add_argument("--once", action="store_true", help="Run once, record state, deliver pressure, and stop")
     watchdog_run.add_argument("--iterations", type=int, help="Exit after this many iterations; useful for tests")
     watchdog_start = watchdog_sub.add_parser("start", help="Start a watchdog runner in a visible tmux window")
     watchdog_start.add_argument("--name", default="default", help="Runner name")
     watchdog_start.add_argument("--interval", default=DEFAULT_WATCHDOG_INTERVAL, help="Run interval such as 15m")
     watchdog_start.add_argument("--role", help="Limit checks to one role")
+    watchdog_start.add_argument("--description", help="Human-readable runner purpose")
+    watchdog_start.add_argument("--goal", help="Pressure goal or done condition")
+    watchdog_start.add_argument("--notify-role", help="Role to receive durable escalation messages")
     watchdog_start.add_argument("--delivery", default="report-only", help="Delivery method label for status output")
     watchdog_start.add_argument("--unacked-warn-seconds", type=int, default=300)
     watchdog_start.add_argument("--ack-warn-seconds", type=int, default=3600)
-    watchdog_start.add_argument("--watch-grace-seconds", type=int, default=0)
+    watchdog_start.add_argument("--obligation-grace-seconds", type=int, default=0)
     watchdog_start.add_argument("--session", help="tmux session; defaults to current tmux session")
-    watchdog_start.add_argument("--window-name", help="tmux window name; defaults to tt-watchdog-<name>")
+    watchdog_start.add_argument("--window-name", help="tmux watchdog window name; defaults to tt-watchdogs")
     watchdog_start.add_argument("--tmux-bin", default="tmux")
     watchdog_start.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
     watchdog_stop = watchdog_sub.add_parser("stop", help="Stop a watchdog runner and optionally kill its tmux pane")
     watchdog_stop.add_argument("name", nargs="?", default="default")
     watchdog_stop.add_argument("--tmux-bin", default="tmux")
     watchdog_stop.add_argument("--no-kill-pane", action="store_true", help="Only mark the runner stopped in state")
+    watchdog_pause = watchdog_sub.add_parser("pause", help="Pause a watchdog runner without terminalizing it")
+    watchdog_pause.add_argument("name", nargs="?", default="default")
+    watchdog_pause.add_argument("--reason", required=True, help="Why the runner is intentionally paused")
+    watchdog_pause_review = watchdog_pause.add_mutually_exclusive_group()
+    watchdog_pause_review.add_argument("--review-in", help="When to review the pause, e.g. 30m")
+    watchdog_pause_review.add_argument("--review-at", help="Absolute ISO review timestamp")
+    watchdog_resume = watchdog_sub.add_parser("resume", help="Resume a paused watchdog runner")
+    watchdog_resume.add_argument("name", nargs="?", default="default")
+    watchdog_update = watchdog_sub.add_parser("update", help="Update a running or paused watchdog runner")
+    watchdog_update.add_argument("name", nargs="?", default="default")
+    watchdog_update.add_argument("--interval", help="Run interval such as 15m")
+    watchdog_update.add_argument("--role", help="Limit checks to one role")
+    watchdog_update.add_argument("--team", action="store_true", help="Clear role scope and inspect the whole team")
+    watchdog_update.add_argument("--description", help="Human-readable runner purpose")
+    watchdog_update.add_argument("--goal", help="Pressure goal or done condition")
+    watchdog_update.add_argument("--notify-role", help="Role to receive durable escalation messages")
+    watchdog_update.add_argument("--no-notify-role", action="store_true", help="Clear the explicit notify target")
+    watchdog_update.add_argument("--delivery", help="Delivery method label or app-server-turn for pressure")
     watchdog_list = watchdog_sub.add_parser("list", help="List watchdog runner lifecycle state")
     watchdog_list.add_argument("--json", action="store_true")
     watchdog_list.add_argument("--limit", type=int, default=50)
@@ -684,6 +771,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--role-codex-config", action="append", default=[], metavar="ROLE=KEY=VALUE")
     resume.add_argument("--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint")
     resume.add_argument("--no-reactivate-roles", action="store_true", help="Do not set resumed roles active")
+    resume.add_argument(
+        "--no-truecolor",
+        action="store_true",
+        help="Do not set tmux truecolor options on the restored session",
+    )
     resume.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
 
     codex = subparsers.add_parser("codex", help="Manage Codex app-server role bindings")
@@ -779,6 +871,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             worktree_base_ref=args.worktree_base_ref,
             allow_shared_worktree_groups=shared_worktrees,
             allow_dirty_roles=allow_dirty_roles,
+            enable_truecolor=not args.no_truecolor,
             dry_run=args.dry_run,
         )
     except BootstrapError as exc:
@@ -925,15 +1018,17 @@ def apply_actor_defaults(args: argparse.Namespace, policy_context: PolicyContext
         if args.role is None:
             raise ValueError(f"todo --role is required unless --actor or ${ROLE_ENV} is set")
     if args.command == "milestone" and args.milestone_command == "add":
-        if args.role is None:
+        if args.role is None and not args.subject_role and not args.team:
             args.role = policy_context.actor
         if args.actor is None:
             args.actor = policy_context.actor or "operator"
-    if args.command == "watch":
+    if args.command == "obligation":
         if getattr(args, "role", None) is None and policy_context.actor is not None:
             args.role = policy_context.actor
-        if args.watch_command != "list" and args.role is None:
-            raise ValueError(f"watch {args.watch_command} --role is required unless --actor or ${ROLE_ENV} is set")
+        if args.obligation_command != "list" and args.role is None:
+            raise ValueError(
+                f"obligation {args.obligation_command} --role is required unless --actor or ${ROLE_ENV} is set"
+            )
     if args.command == "codex" and args.codex_command == "session-context" and args.role is None:
         args.role = policy_context.actor
         if args.role is None:
@@ -1023,8 +1118,8 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
             authorize(config, policy_context, "milestone.list", role=args.role or "")
         return
 
-    if args.command == "watch":
-        authorize(config, policy_context, f"watch.{args.watch_command}", role=args.role or "")
+    if args.command == "obligation":
+        authorize(config, policy_context, f"obligation.{args.obligation_command}", role=args.role or "")
         return
 
     if args.command == "role" and args.role_command != "list":
@@ -1057,6 +1152,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "team.resume")
         return
 
+    if args.command == "operator" and args.operator_command == "bind":
+        authorize(config, policy_context, "operator.metadata")
+        return
+
     if args.command == "codex" and args.codex_command == "bind":
         authorize(config, policy_context, "codex.bind", role=args.role)
         return
@@ -1081,6 +1180,7 @@ def cmd_config(args: argparse.Namespace, config) -> int:
     print(f"config: {config.config_path or '(none)'}")
     print(f"project_root: {config.project_root}")
     print(f"runtime_dir: {config.runtime_dir}")
+    print(f"operator: {operator_one_line(config.operator)}")
     print("roles:")
     for role in sorted(config.roles.values(), key=lambda item: item.name):
         pane = role.pane or "-"
@@ -1093,6 +1193,8 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
     counts = store.active_counts(conn)
     print(f"team: {store.config.name}")
     print(f"runtime_dir: {store.runtime_dir}")
+    if args.verbose:
+        print(f"operator: {operator_one_line(store.config.operator)}")
     print("roles:")
     for role in store.list_roles(conn):
         role_counts = counts.get(role["name"], {})
@@ -1108,6 +1210,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
         if args.verbose:
+            print(f"    codex: {codex_settings_summary(role_capabilities(role))}")
             rows = store.list_active_messages(conn, role=role["name"], limit=args.active_limit)
             if not rows:
                 print("    active: none")
@@ -1120,11 +1223,13 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
                     if open_todos:
                         line = f"{line} todos_open={open_todos}"
                     print(f"      {line}")
-            watches = store.list_watches(conn, role=role["name"], states=WATCH_ACTIVE_STATES, limit=args.active_limit)
-            if watches:
-                print("    watches:")
-                for watch in watches:
-                    print(f"      {watch_one_line(watch)}")
+            obligations = store.list_obligations(
+                conn, role=role["name"], states=OBLIGATION_VISIBLE_STATES, limit=args.active_limit
+            )
+            if obligations:
+                print("    obligations:")
+                for obligation in obligations:
+                    print(f"      {obligation_one_line(obligation)}")
     if args.verbose:
         runners = store.list_watchdog_runners(conn, limit=args.active_limit)
         print("watchdog_runners:")
@@ -1134,6 +1239,34 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             for runner in runners:
                 print(f"  {watchdog_runner_one_line(runner, stale_grace_seconds=60)}")
     return 0
+
+
+def cmd_operator(args: argparse.Namespace, config) -> int:
+    if args.operator_command == "show":
+        print(f"operator: {operator_one_line(config.operator)}")
+        return 0
+    if args.operator_command == "bind":
+        if config.config_path is None:
+            raise ConfigError("operator bind requires a config file")
+        pane = args.pane or detect_current_tmux_pane_id(args.tmux_bin) or config.operator.pane
+        thread_id = args.codex_thread_id or config.operator.codex_thread_id
+        if not pane and not thread_id:
+            raise ValueError("operator bind needs --pane, --codex-thread-id, or a current tmux pane")
+        operator = OperatorConfig(
+            pane=pane,
+            codex_thread_id=thread_id,
+            capabilities=config.operator.capabilities,
+        )
+        write_operator_config(config.config_path, operator)
+        print(f"operator: {operator_one_line(operator)}")
+        return 0
+    return 2
+
+
+def operator_one_line(operator: OperatorConfig) -> str:
+    pane = operator.pane or "unknown"
+    thread = operator.codex_thread_id or "unknown"
+    return f"pane={pane} codex_thread_id={thread}"
 
 
 def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
@@ -1152,7 +1285,7 @@ def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
             pane_lines=args.pane_lines,
             tmux_bin=args.tmux_bin,
         )
-        print(render_dashboard_snapshot(snapshot), end="")
+        print(render_dashboard_snapshot(snapshot, provenance=args.provenance), end="")
         return 0
 
     try:
@@ -1163,6 +1296,7 @@ def cmd_dashboard(args: argparse.Namespace, store: Store, conn, config) -> int:
             include_pane_preview=include_pane_preview,
             pane_line_count=args.pane_lines,
             tmux_bin=args.tmux_bin,
+            provenance=args.provenance,
         )
     except DashboardDependencyError as exc:
         raise ValueError(str(exc)) from exc
@@ -1318,10 +1452,14 @@ def cmd_todo_recover(args: argparse.Namespace, store: Store, conn) -> int:
 def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
     if args.milestone_command == "add":
         body = read_optional_body(args)
+        subject_roles = milestone_subject_roles(args)
+        scope = "team" if args.team else None
         milestone = store.record_milestone(
             conn,
             actor=args.actor or "operator",
             role=args.role,
+            subject_roles=subject_roles,
+            scope=scope,
             kind=args.kind,
             summary=args.summary,
             body=body,
@@ -1329,7 +1467,11 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
             tags=tuple(args.tag),
             metadata=parse_metadata(args.meta),
         )
-        print(f"{milestone['created_at']} {milestone['kind']} role={milestone['role'] or '-'} {milestone['summary']}")
+        print(
+            f"{milestone['created_at']} {milestone['kind']} "
+            f"recorded_by={milestone['recorded_by']} subject={milestone_subject_label(milestone)} "
+            f"{milestone['summary']}"
+        )
         print(f"path: {store.milestones_path}")
         return 0
 
@@ -1339,6 +1481,8 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
             since=since,
             until=until,
             role=args.role,
+            subject_role=args.subject_role,
+            scope="team" if args.team else None,
             kind=args.kind,
             tags=tuple(args.tag),
             limit=args.limit,
@@ -1356,52 +1500,77 @@ def cmd_milestone(args: argparse.Namespace, store: Store, conn) -> int:
     return 2
 
 
-def cmd_watch(args: argparse.Namespace, store: Store, conn) -> int:
-    if args.watch_command == "start":
-        row = store.start_watch(
+def cmd_obligation(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.obligation_command == "start":
+        row = store.start_obligation(
             conn,
             role=args.role,
             summary=args.summary,
+            goal=args.goal,
             created_by=args.actor or "operator",
-            next_update_at=watch_next_update_at(args.next_update_in),
+            next_update_at=obligation_next_update_at(args.next_update_in),
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "update":
-        row = store.update_watch(
+    if args.obligation_command == "update":
+        row = store.update_obligation(
             conn,
             role=args.role,
-            watch_id=args.watch_id,
+            obligation_id=args.obligation_id,
             summary=args.summary,
             status=args.state,
-            next_update_at=watch_next_update_at(args.next_update_in),
+            next_update_at=obligation_next_update_at(args.next_update_in),
             actor=args.actor or "operator",
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "complete":
-        row = store.complete_watch(
+    if args.obligation_command == "pause":
+        row = store.pause_obligation(
             conn,
             role=args.role,
-            watch_id=args.watch_id,
+            obligation_id=args.obligation_id,
+            reason=args.reason,
+            review_at=review_at_from_args(args.review_in, args.review_at),
+            actor=args.actor or "operator",
+        )
+        print(obligation_one_line(row))
+        return 0
+
+    if args.obligation_command == "resume":
+        row = store.resume_obligation(
+            conn,
+            role=args.role,
+            obligation_id=args.obligation_id,
+            summary=args.summary,
+            next_update_at=obligation_next_update_at(args.next_update_in),
+            actor=args.actor or "operator",
+        )
+        print(obligation_one_line(row))
+        return 0
+
+    if args.obligation_command == "complete":
+        row = store.complete_obligation(
+            conn,
+            role=args.role,
+            obligation_id=args.obligation_id,
             status=args.status,
             summary=args.summary,
             actor=args.actor or "operator",
         )
-        print(watch_one_line(row))
+        print(obligation_one_line(row))
         return 0
 
-    if args.watch_command == "list":
-        states = tuple(args.state) if args.state else WATCH_ACTIVE_STATES
-        rows = store.list_watches(conn, role=args.role, states=states, limit=args.limit)
+    if args.obligation_command == "list":
+        states = tuple(args.state) if args.state else OBLIGATION_VISIBLE_STATES
+        rows = store.list_obligations(conn, role=args.role, states=states, limit=args.limit)
         if not rows:
             role = args.role or "all roles"
-            print(f"no watches for {role}")
+            print(f"no obligations for {role}")
             return 0
         for row in rows:
-            print(watch_one_line(row))
+            print(obligation_one_line(row))
         return 0
 
     return 2
@@ -1730,13 +1899,19 @@ def cmd_notify(args: argparse.Namespace, service: TeamService, conn) -> int:
     return 1
 
 
-def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_watchdog(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
     if args.watchdog_command == "run":
-        return cmd_watchdog_run(args, store, conn)
+        return cmd_watchdog_run(args, store, service, conn)
     if args.watchdog_command == "start":
         return cmd_watchdog_start(args, store, conn)
     if args.watchdog_command == "stop":
         return cmd_watchdog_stop(args, store, conn)
+    if args.watchdog_command == "pause":
+        return cmd_watchdog_pause(args, store, conn)
+    if args.watchdog_command == "resume":
+        return cmd_watchdog_resume(args, store, conn)
+    if args.watchdog_command == "update":
+        return cmd_watchdog_update(args, store, conn)
     if args.watchdog_command in ("list", "status"):
         return cmd_watchdog_list(args, store, conn)
 
@@ -1746,7 +1921,7 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
         role=args.role,
         unacked_warn_seconds=args.unacked_warn_seconds,
         ack_warn_seconds=args.ack_warn_seconds,
-        watch_grace_seconds=args.watch_grace_seconds,
+        obligation_grace_seconds=args.obligation_grace_seconds,
     )
     if args.json:
         print(json_dumps(findings))
@@ -1758,11 +1933,14 @@ def cmd_watchdog(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
-def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
+def cmd_watchdog_run(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
     name = normalize_watchdog_runner_name(args.name)
     interval_seconds = parse_positive_duration_seconds(args.interval, "--interval")
+    if args.once and args.iterations is not None:
+        raise ValueError("watchdog run accepts either --once or --iterations, not both")
     if args.iterations is not None and args.iterations <= 0:
         raise ValueError("watchdog run --iterations must be greater than 0")
+    max_iterations = 1 if args.once else args.iterations
 
     pane = os.environ.get("TMUX_PANE")
     window = current_tmux_window()
@@ -1770,23 +1948,52 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
     iteration = 0
     try:
         while True:
+            try:
+                existing = store.get_watchdog_runner(conn, name)
+            except KeyError:
+                existing = None
+            if existing is not None and existing["state"] in ("stopped", "failed"):
+                existing = None
+            if existing is not None and existing["state"] == "paused":
+                print_watchdog_runner_header(existing, stale_grace_seconds=0)
+                print("watchdog paused")
+                sys.stdout.flush()
+                if not sleep_watchdog_interval(
+                    store,
+                    conn,
+                    name=name,
+                    interval_seconds=paused_watchdog_sleep_seconds(existing, interval_seconds),
+                    wake_on_pause=False,
+                ):
+                    print(f"watchdog runner {name} stopped by durable state")
+                    return 0
+                continue
+            effective_interval = int(existing["interval_seconds"]) if existing is not None else interval_seconds
+            effective_role = existing["scope_role"] if existing is not None else args.role
+            effective_description = existing["description"] if existing is not None else args.description
+            effective_goal = existing["goal"] if existing is not None else args.goal
+            effective_notify_role = existing["notify_role"] if existing is not None else args.notify_role
+            effective_delivery = existing["delivery_method"] if existing is not None else args.delivery
             now = datetime.now(UTC).replace(microsecond=0)
-            next_run = (now + timedelta(seconds=interval_seconds)).isoformat()
+            next_run = None if args.once else (now + timedelta(seconds=effective_interval)).isoformat()
             findings = watchdog_findings(
                 store,
                 conn,
-                role=args.role,
+                role=effective_role,
                 unacked_warn_seconds=args.unacked_warn_seconds,
                 ack_warn_seconds=args.ack_warn_seconds,
-                watch_grace_seconds=args.watch_grace_seconds,
+                obligation_grace_seconds=args.obligation_grace_seconds,
             )
             summary = summarize_watchdog_findings(findings)
             row = store.record_watchdog_runner_run(
                 conn,
                 name=name,
-                interval_seconds=interval_seconds,
-                scope_role=args.role,
-                delivery_method=args.delivery,
+                interval_seconds=effective_interval,
+                scope_role=effective_role,
+                description=effective_description,
+                goal=effective_goal,
+                notify_role=effective_notify_role,
+                delivery_method=effective_delivery,
                 pane=pane,
                 window=window,
                 process_id=process_id,
@@ -1796,19 +2003,40 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
                 finding_summary=summary,
                 actor=name,
             )
+            if row["state"] == "paused":
+                # The runner may be paused between the preflight read above and
+                # the run write; the store returns the paused row without
+                # mutating it back to running.
+                print_watchdog_runner_header(row, stale_grace_seconds=0)
+                print("watchdog paused")
+                sys.stdout.flush()
+                continue
             print_watchdog_runner_header(row, stale_grace_seconds=0)
             if findings:
                 for finding in findings:
                     print(format_watchdog_finding(finding))
+                pressure = deliver_watchdog_pressure(
+                    service,
+                    conn,
+                    name=name,
+                    findings=findings,
+                    scope_role=effective_role,
+                    notify_role=effective_notify_role,
+                    delivery_method=effective_delivery,
+                    description=effective_description,
+                    goal=effective_goal,
+                )
+                if pressure:
+                    print(pressure)
             else:
                 print("watchdog ok")
             sys.stdout.flush()
 
             iteration += 1
-            if args.iterations is not None and iteration >= args.iterations:
+            if max_iterations is not None and iteration >= max_iterations:
                 store.stop_watchdog_runner(conn, name=name, actor=name)
                 return 0
-            if not sleep_watchdog_interval(store, conn, name=name, interval_seconds=interval_seconds):
+            if not sleep_watchdog_interval(store, conn, name=name, interval_seconds=effective_interval):
                 print(f"watchdog runner {name} stopped by durable state")
                 return 0
     except KeyboardInterrupt:
@@ -1820,61 +2048,178 @@ def cmd_watchdog_run(args: argparse.Namespace, store: Store, conn) -> int:
         raise
 
 
+def deliver_watchdog_pressure(
+    service: TeamService,
+    conn,
+    *,
+    name: str,
+    findings: list[dict[str, str]],
+    scope_role: str | None,
+    notify_role: str | None,
+    delivery_method: str,
+    description: str | None,
+    goal: str | None,
+) -> str:
+    if not findings or not watchdog_delivery_enabled(delivery_method):
+        return ""
+    recipient = watchdog_notify_target(service.store, conn, scope_role=scope_role, notify_role=notify_role)
+    correlation_key = watchdog_pressure_correlation_key(name, scope_role, recipient)
+    duplicates = service.store.find_duplicate_messages(
+        conn,
+        recipient=recipient,
+        summary="",
+        correlation_key=correlation_key,
+    )
+    if duplicates:
+        duplicate = duplicates[0]
+        return (
+            f"pressure_skipped: active message {duplicate['id']} "
+            f"state={duplicate['state']} to={recipient} correlation_key={correlation_key}"
+        )
+
+    sender = f"watchdog:{name}"
+    summary = watchdog_pressure_summary(findings)
+    result = service.send_message(
+        conn,
+        sender=sender,
+        recipient=recipient,
+        priority=watchdog_pressure_priority(findings),
+        summary=summary,
+        body=watchdog_pressure_body(
+            name=name,
+            findings=findings,
+            scope_role=scope_role,
+            description=description,
+            goal=goal,
+        ),
+        force=True,
+        wake=True,
+        notify_method=delivery_method,
+        correlation_key=correlation_key,
+        actor=sender,
+    )
+    line = (
+        f"pressure: {result.message.id} state={result.message.state} "
+        f"to={recipient} priority={result.message.priority} correlation_key={correlation_key}"
+    )
+    if result.notification is not None:
+        if result.notification.ok:
+            line = f"{line} notify={result.notification.details}"
+        else:
+            line = f"{line} notify_failed={result.notification.details}"
+    return line
+
+
+def watchdog_delivery_enabled(delivery_method: str) -> bool:
+    return delivery_method.strip().lower() not in ("", "none", "report-only")
+
+
+def watchdog_notify_target(store: Store, conn, *, scope_role: str | None, notify_role: str | None) -> str:
+    if notify_role:
+        if store.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
+        return notify_role
+    if scope_role:
+        if store.get_role(conn, scope_role) is None:
+            raise KeyError(f"Unknown role: {scope_role}")
+        return scope_role
+    if store.get_role(conn, "orchestrator") is not None:
+        return "orchestrator"
+    roles = store.list_roles(conn)
+    if not roles:
+        raise KeyError("No roles configured for watchdog pressure delivery")
+    return str(roles[0]["name"])
+
+
+def watchdog_pressure_correlation_key(name: str, scope_role: str | None, recipient: str) -> str:
+    scope = scope_role or "team"
+    return f"watchdog:{name}:{scope}:to:{recipient}"
+
+
+def watchdog_pressure_priority(findings: list[dict[str, str]]) -> str:
+    return "urgent" if any(finding["severity"] == "urgent" for finding in findings) else "high"
+
+
+def watchdog_pressure_summary(findings: list[dict[str, str]]) -> str:
+    first = findings[0]
+    extra = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+    return f"Watchdog findings: {first['kind']} {first['role']} {first['ref']}{extra}"
+
+
+def watchdog_pressure_body(
+    *,
+    name: str,
+    findings: list[dict[str, str]],
+    scope_role: str | None,
+    description: str | None,
+    goal: str | None,
+) -> str:
+    lines = [
+        f"Watchdog: {name}",
+        f"Scope: {scope_role or 'team'}",
+    ]
+    if description:
+        lines.append(f"Description: {description}")
+    if goal:
+        lines.append(f"Goal: {goal}")
+    lines.extend(
+        [
+            "",
+            "Findings:",
+        ]
+    )
+    for finding in findings:
+        lines.append(
+            f"- severity={finding['severity']} kind={finding['kind']} "
+            f"role={finding['role']} ref={finding['ref']} summary={finding['summary']}"
+        )
+    lines.extend(
+        [
+            "",
+            "Reconcile these findings from durable state. Update or complete the relevant obligation/message, "
+            "or update/pause/stop this watchdog runner if the pressure is no longer useful.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
     name = normalize_watchdog_runner_name(args.name)
     interval_seconds = parse_positive_duration_seconds(args.interval, "--interval")
     if args.role and store.get_role(conn, args.role) is None:
         raise KeyError(f"Unknown role: {args.role}")
+    if args.notify_role and store.get_role(conn, args.notify_role) is None:
+        raise KeyError(f"Unknown notify role: {args.notify_role}")
     existing = store.list_watchdog_runners(conn, name=name)
     if existing and watchdog_runner_display_state(existing[0], stale_grace_seconds=60) == "running":
         raise ValueError(f"watchdog runner {name} is already running; stop it first")
     session = args.session or detect_current_tmux_session(args.tmux_bin)
     if not session:
         raise ValueError("watchdog start requires --session unless run inside tmux")
-    window_name = args.window_name or f"tt-watchdog-{name}"
+    window_name = watchdog_window_name(args.window_name)
     project_root = store.config.project_root or Path.cwd()
-    config_path = store.config.config_path
-    command = ["tmux-team"]
-    if config_path is not None:
-        command.extend(["--config", str(config_path)])
-    command.extend(
-        [
-            "watchdog",
-            "run",
-            "--name",
-            name,
-            "--interval",
-            args.interval,
-            "--delivery",
-            args.delivery,
-            "--unacked-warn-seconds",
-            str(args.unacked_warn_seconds),
-            "--ack-warn-seconds",
-            str(args.ack_warn_seconds),
-            "--watch-grace-seconds",
-            str(args.watch_grace_seconds),
-        ]
+    use_existing_window = False if args.dry_run else tmux_window_exists(args.tmux_bin, session, window_name)
+    tmux_command = watchdog_spawn_command(
+        tmux_bin=args.tmux_bin,
+        session=session,
+        config_path=store.config.config_path,
+        project_root=project_root,
+        name=name,
+        interval=args.interval,
+        delivery=args.delivery,
+        role=args.role,
+        description=args.description,
+        goal=args.goal,
+        notify_role=args.notify_role,
+        window_name=window_name,
+        unacked_warn_seconds=args.unacked_warn_seconds,
+        ack_warn_seconds=args.ack_warn_seconds,
+        obligation_grace_seconds=args.obligation_grace_seconds,
+        use_existing_window=use_existing_window,
     )
-    if args.role:
-        command.extend(["--role", args.role])
-    tmux_command = [
-        args.tmux_bin,
-        "new-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-t",
-        session,
-        "-n",
-        window_name,
-        "-c",
-        str(project_root),
-        shlex.join(command),
-    ]
     option_commands = [
-        [args.tmux_bin, "set-option", "-p", "-t", "{pane}", WATCHDOG_PANE_OPTION, name],
-        [args.tmux_bin, "select-pane", "-t", "{pane}", "-T", window_name],
+        *watchdog_pane_setup_commands(args.tmux_bin, "{pane}", name=name),
+        watchdog_layout_command(args.tmux_bin, session, window_name),
     ]
     if args.dry_run:
         print(format_command(tmux_command))
@@ -1891,6 +2236,9 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
             state="failed",
             interval_seconds=interval_seconds,
             scope_role=args.role,
+            description=args.description,
+            goal=args.goal,
+            notify_role=args.notify_role,
             delivery_method=args.delivery,
             window=f"{session}:{window_name}",
             actor=args.actor or "operator",
@@ -1901,14 +2249,22 @@ def cmd_watchdog_start(args: argparse.Namespace, store: Store, conn) -> int:
     if not pane:
         raise ValueError(f"could not start watchdog runner {name}: tmux did not return a pane id")
     for command_template in option_commands:
-        option_command = [part if part != "{pane}" else pane for part in command_template]
-        subprocess.run(option_command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        subprocess.run(
+            [part if part != "{pane}" else pane for part in command_template],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
     row = store.upsert_watchdog_runner(
         conn,
         name=name,
         state="running",
         interval_seconds=interval_seconds,
         scope_role=args.role,
+        description=args.description,
+        goal=args.goal,
+        notify_role=args.notify_role,
         delivery_method=args.delivery,
         pane=pane,
         window=f"{session}:{window_name}",
@@ -1936,6 +2292,47 @@ def cmd_watchdog_stop(args: argparse.Namespace, store: Store, conn) -> int:
             raise ValueError(f"could not kill watchdog pane {pane}: {details}")
     updated = store.stop_watchdog_runner(conn, name=args.name, actor=args.actor or "operator")
     print(watchdog_runner_one_line(updated, stale_grace_seconds=60))
+    return 0
+
+
+def cmd_watchdog_pause(args: argparse.Namespace, store: Store, conn) -> int:
+    row = store.pause_watchdog_runner(
+        conn,
+        name=args.name,
+        reason=args.reason,
+        review_at=review_at_from_args(args.review_in, args.review_at),
+        actor=args.actor or "operator",
+    )
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
+    return 0
+
+
+def cmd_watchdog_resume(args: argparse.Namespace, store: Store, conn) -> int:
+    row = store.resume_watchdog_runner(conn, name=args.name, actor=args.actor or "operator")
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
+    return 0
+
+
+def cmd_watchdog_update(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.role and args.team:
+        raise ValueError("watchdog update accepts either --role or --team, not both")
+    if args.notify_role and args.no_notify_role:
+        raise ValueError("watchdog update accepts either --notify-role or --no-notify-role, not both")
+    interval_seconds = parse_positive_duration_seconds(args.interval, "--interval") if args.interval else None
+    row = store.update_watchdog_runner(
+        conn,
+        name=args.name,
+        interval_seconds=interval_seconds,
+        scope_role=args.role,
+        clear_scope_role=args.team,
+        description=args.description,
+        goal=args.goal,
+        notify_role=args.notify_role,
+        clear_notify_role=args.no_notify_role,
+        delivery_method=args.delivery,
+        actor=args.actor or "operator",
+    )
+    print(watchdog_runner_one_line(row, stale_grace_seconds=60))
     return 0
 
 
@@ -1970,8 +2367,16 @@ def stop_watchdog_runner_if_exists(
         return
 
 
-def sleep_watchdog_interval(store: Store, conn, *, name: str, interval_seconds: int) -> bool:
+def sleep_watchdog_interval(
+    store: Store,
+    conn,
+    *,
+    name: str,
+    interval_seconds: int,
+    wake_on_pause: bool = True,
+) -> bool:
     deadline = time.monotonic() + interval_seconds
+    started_interval = interval_seconds
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1981,8 +2386,22 @@ def sleep_watchdog_interval(store: Store, conn, *, name: str, interval_seconds: 
             row = store.get_watchdog_runner(conn, name)
         except KeyError:
             return False
-        if row["state"] != "running":
+        if row["state"] == "paused" and wake_on_pause:
+            return True
+        if row["state"] not in ("running", "paused"):
             return False
+        if int(row["interval_seconds"]) != started_interval:
+            return True
+
+
+def paused_watchdog_sleep_seconds(row, default_interval_seconds: int) -> int:
+    review_at = row["review_at"]
+    if review_at:
+        remaining = parse_utc_datetime(str(review_at)) - datetime.now(UTC)
+        seconds = int(remaining.total_seconds())
+        if seconds > 0:
+            return min(default_interval_seconds, seconds)
+    return default_interval_seconds
 
 
 def parse_positive_duration_seconds(value: str, flag: str) -> int:
@@ -2007,6 +2426,19 @@ def current_tmux_window() -> str | None:
         return None
 
 
+def tmux_window_exists(tmux_bin: str, session: str, window_name: str) -> bool:
+    result = subprocess.run(
+        [tmux_bin, "list-windows", "-t", session, "-F", "#{window_name}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return any(line.strip() == window_name for line in result.stdout.splitlines())
+
+
 def summarize_watchdog_findings(findings: list[dict[str, str]]) -> str:
     if not findings:
         return "ok"
@@ -2021,10 +2453,18 @@ def print_watchdog_runner_header(row, *, stale_grace_seconds: int) -> None:
     print(f"state: {watchdog_runner_display_state(row, stale_grace_seconds)}")
     print(f"interval: {format_seconds_duration(int(row['interval_seconds']))}")
     print(f"scope: {row['scope_role'] or 'team'}")
+    print(f"description: {row['description'] or '-'}")
+    print(f"goal: {row['goal'] or '-'}")
+    print(f"notify role: {row['notify_role'] or '-'}")
     print(f"delivery: {row['delivery_method']}")
     print(f"last run: {row['last_run_at'] or '-'}")
     print(f"next run: {row['next_run_at'] or '-'}")
     print(f"last finding: {row['last_finding_summary'] or '-'}")
+    if row["state"] == "paused":
+        print(f"paused reason: {row['paused_reason'] or '-'}")
+        print(f"paused at: {row['paused_at'] or '-'}")
+        print(f"paused by: {row['paused_by'] or '-'}")
+        print(f"review at: {row['review_at'] or '-'}")
     print(f"backing pane: {row['pane'] or '-'}")
     print(f"safe to close: {watchdog_runner_safe_to_close(row, stale_grace_seconds)}")
 
@@ -2036,6 +2476,7 @@ def watchdog_runner_one_line(row, *, stale_grace_seconds: int) -> str:
         f"state={state}",
         f"interval={format_seconds_duration(int(row['interval_seconds']))}",
         f"scope={row['scope_role'] or 'team'}",
+        f"notify_role={row['notify_role'] or '-'}",
         f"delivery={row['delivery_method']}",
         f"last_run={row['last_run_at'] or '-'}",
         f"next_run={row['next_run_at'] or '-'}",
@@ -2046,6 +2487,17 @@ def watchdog_runner_one_line(row, *, stale_grace_seconds: int) -> str:
         f"pid={row['process_id'] or '-'}",
         f"safe_to_close={watchdog_runner_safe_to_close(row, stale_grace_seconds)}",
     ]
+    if row["description"]:
+        parts.append(f"description={row['description']}")
+    if row["goal"]:
+        parts.append(f"goal={row['goal']}")
+    if row["state"] == "paused":
+        if row["review_at"]:
+            parts.append(f"review_at={row['review_at']}")
+        if row["paused_by"]:
+            parts.append(f"paused_by={row['paused_by']}")
+        if row["paused_reason"]:
+            parts.append(f"reason={row['paused_reason']}")
     if row["last_error"]:
         parts.append(f"error={row['last_error']}")
     return " ".join(parts)
@@ -2058,6 +2510,9 @@ def watchdog_runner_dict(row, stale_grace_seconds: int) -> dict[str, object]:
         "display_state": watchdog_runner_display_state(row, stale_grace_seconds),
         "interval_seconds": int(row["interval_seconds"]),
         "scope_role": row["scope_role"],
+        "description": row["description"],
+        "goal": row["goal"],
+        "notify_role": row["notify_role"],
         "delivery_method": row["delivery_method"],
         "pane": row["pane"],
         "window": row["window"],
@@ -2069,35 +2524,17 @@ def watchdog_runner_dict(row, stale_grace_seconds: int) -> dict[str, object]:
         "last_finding_count": int(row["last_finding_count"]),
         "last_finding_summary": row["last_finding_summary"],
         "last_error": row["last_error"],
+        "paused_reason": row["paused_reason"],
+        "paused_at": row["paused_at"],
+        "paused_by": row["paused_by"],
+        "review_at": row["review_at"],
         "safe_to_close": watchdog_runner_safe_to_close(row, stale_grace_seconds),
     }
-
-
-def watchdog_runner_display_state(row, stale_grace_seconds: int) -> str:
-    if row["state"] != "running":
-        return str(row["state"])
-    next_run_at = row["next_run_at"]
-    if not next_run_at:
-        return "stale"
-    stale_at = parse_utc_datetime(str(next_run_at)) + timedelta(seconds=stale_grace_seconds)
-    if stale_at < datetime.now(UTC):
-        return "stale"
-    return "running"
 
 
 def watchdog_runner_safe_to_close(row, stale_grace_seconds: int) -> str:
     state = watchdog_runner_display_state(row, stale_grace_seconds)
     return "yes" if state in ("stopped", "failed") else "no"
-
-
-def format_seconds_duration(seconds: int) -> str:
-    if seconds % 86400 == 0:
-        return f"{seconds // 86400}d"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
-    return f"{seconds}s"
 
 
 def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
@@ -2115,6 +2552,7 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
     print(f"sleep_id: {result.sleep_id}")
     print(f"session: {result.session or '-'}")
     print(f"roles: {result.role_count}")
+    print(f"watchdogs: {result.watchdog_count}")
     if result.snapshot_path:
         print(f"snapshot: {result.snapshot_path}")
         print(f"latest: {result.latest_path}")
@@ -2124,8 +2562,10 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
     if result.managed_windows:
         for window in result.managed_windows:
             roles = ",".join(window.get("roles") or []) or "-"
+            watchdogs = ",".join(window.get("watchdogs") or []) or "-"
             print(
-                f"  {window['kind']}: target={window['target']} window={window.get('window_name') or '-'} roles={roles}"
+                f"  {window['kind']}: target={window['target']} window={window.get('window_name') or '-'} "
+                f"roles={roles} watchdogs={watchdogs}"
             )
     else:
         print("  none")
@@ -2165,17 +2605,25 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
         role_launch_options=role_launch_options,
         start_app_server=not args.no_start_app_server,
         reactivate_roles=not args.no_reactivate_roles,
+        enable_truecolor=not args.no_truecolor,
         dry_run=args.dry_run,
     )
     print(f"snapshot: {result.snapshot_path}")
     print(f"session: {result.session}")
     print(f"endpoint: {result.endpoint}")
     print(f"roles: {result.role_count}")
+    print(f"watchdogs: {len(result.watchdog_panes)}")
     print(f"reactivated_roles: {'yes' if result.reactivated_roles else 'no'}")
+    restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
+    print(f"codex_launch_settings: restored={restored} fast=unknown")
     print("role_threads:")
     for role, thread_id in result.role_threads.items():
         pane = result.role_panes.get(role) or "-"
         print(f"  {role}: thread_id={thread_id} pane={pane}")
+    if result.watchdog_panes:
+        print("watchdog_panes:")
+        for name, pane in result.watchdog_panes.items():
+            print(f"  {name}: pane={pane or '-'}")
     print("commands:")
     if result.commands:
         for command in result.commands:
@@ -2440,6 +2888,17 @@ def parse_metadata(values: Sequence[str]) -> dict[str, str]:
     return metadata
 
 
+def milestone_subject_roles(args: argparse.Namespace) -> tuple[str, ...]:
+    roles = split_csv_values(args.subject_role or ())
+    if roles:
+        return roles
+    if args.team:
+        return ()
+    if args.role:
+        return (args.role,)
+    return ()
+
+
 def milestone_time_window(args: argparse.Namespace) -> tuple[datetime | None, datetime | None]:
     if args.today and args.since:
         raise ValueError("milestone list accepts either --today or --since, not both")
@@ -2498,16 +2957,29 @@ def json_dumps(value) -> str:
 
 
 def format_milestone(row: dict) -> str:
-    role = row.get("role") or "-"
     kind = row.get("kind") or "milestone"
     ref_id = row.get("ref_id") or "-"
     tags = ",".join(row.get("tags") or []) or "-"
-    line = f"{row.get('created_at')} [{kind}] role={role} ref={ref_id} tags={tags} {row.get('summary')}"
+    recorded_by = row.get("recorded_by") or row.get("actor") or "-"
+    line = (
+        f"{row.get('created_at')} [{kind}] recorded_by={recorded_by} "
+        f"subject={milestone_subject_label(row)} ref={ref_id} tags={tags} {row.get('summary')}"
+    )
     body = str(row.get("body") or "").strip()
     if body:
         first_line = body.splitlines()[0]
         line += f"\n  {first_line}"
     return line
+
+
+def milestone_subject_label(row: dict) -> str:
+    scope = row.get("scope")
+    if scope == "team":
+        return "team"
+    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
+    if subject_roles:
+        return ",".join(subject_roles)
+    return str(row.get("role") or "-")
 
 
 def watchdog_findings(
@@ -2517,14 +2989,14 @@ def watchdog_findings(
     role: str | None,
     unacked_warn_seconds: int,
     ack_warn_seconds: int,
-    watch_grace_seconds: int,
+    obligation_grace_seconds: int,
 ) -> list[dict[str, str]]:
     roles = [role] if role else [row["name"] for row in store.list_roles(conn)]
     findings: list[dict[str, str]] = []
     now = datetime.now(UTC).replace(microsecond=0)
     unacked_cutoff = (now - timedelta(seconds=unacked_warn_seconds)).isoformat()
     ack_cutoff = (now - timedelta(seconds=ack_warn_seconds)).isoformat()
-    watch_cutoff = (now - timedelta(seconds=watch_grace_seconds)).isoformat()
+    obligation_cutoff = (now - timedelta(seconds=obligation_grace_seconds)).isoformat()
 
     for role_name in roles:
         if store.get_role(conn, role_name) is None:
@@ -2572,24 +3044,67 @@ def watchdog_findings(
 
         for row in conn.execute(
             """
-            SELECT * FROM watches
+            SELECT * FROM obligations
             WHERE role = ?
               AND status IN ('active', 'blocked')
               AND next_update_at IS NOT NULL
               AND next_update_at <= ?
             ORDER BY next_update_at
             """,
-            (role_name, watch_cutoff),
+            (role_name, obligation_cutoff),
         ):
             findings.append(
                 {
                     "severity": "warning",
-                    "kind": "watch_overdue",
+                    "kind": "obligation_overdue",
                     "role": row["role"],
                     "ref": row["id"],
                     "summary": row["current_summary"],
                 }
             )
+
+        for row in conn.execute(
+            """
+            SELECT * FROM obligations
+            WHERE role = ?
+              AND status = 'paused'
+              AND review_at IS NOT NULL
+              AND review_at <= ?
+            ORDER BY review_at
+            """,
+            (role_name, now.isoformat()),
+        ):
+            findings.append(
+                {
+                    "severity": "warning",
+                    "kind": "obligation_review_due",
+                    "role": row["role"],
+                    "ref": row["id"],
+                    "summary": row["paused_reason"] or row["current_summary"],
+                }
+            )
+    runner_clauses = ["state = 'paused'", "review_at IS NOT NULL", "review_at <= ?"]
+    runner_params: list[str] = [now.isoformat()]
+    if role:
+        runner_clauses.append("scope_role = ?")
+        runner_params.append(role)
+    for row in conn.execute(
+        f"""
+        SELECT * FROM watchdog_runners
+        WHERE {" AND ".join(runner_clauses)}
+        ORDER BY review_at
+        """,
+        tuple(runner_params),
+    ):
+        findings.append(
+            {
+                "severity": "warning",
+                "kind": "watchdog_runner_review_due",
+                "role": row["scope_role"] or "team",
+                "ref": row["name"],
+                "summary": row["paused_reason"] or row["last_finding_summary"] or "paused watchdog runner review due",
+            }
+        )
     return findings
 
 
@@ -2681,7 +3196,7 @@ def active_message_line(row, unacked_warn_seconds: int | None = None) -> str:
     return " ".join(parts)
 
 
-def watch_one_line(row) -> str:
+def obligation_one_line(row) -> str:
     parts = [
         row["id"],
         f"role={row['role']}",
@@ -2689,8 +3204,19 @@ def watch_one_line(row) -> str:
         f"age={format_age(row['created_at'])}",
         f"updated={row['updated_at']}",
     ]
+    if row["goal"]:
+        parts.append(f"goal={row['goal']}")
     if row["next_update_at"]:
         parts.append(f"next_update_at={row['next_update_at']}")
+    if row["status"] == OBLIGATION_PAUSED_STATE:
+        if row["review_at"]:
+            parts.append(f"review_at={row['review_at']}")
+        if row["paused_by"]:
+            parts.append(f"paused_by={row['paused_by']}")
+        if row["paused_at"]:
+            parts.append(f"paused_at={row['paused_at']}")
+        if row["paused_reason"]:
+            parts.append(f"reason={row['paused_reason']}")
     parts.append(f"summary={row['current_summary']}")
     return " ".join(parts)
 
@@ -2720,7 +3246,7 @@ def claimed_unacked_warning(row, threshold_seconds: int | None) -> bool:
     return int(age.total_seconds()) >= threshold_seconds
 
 
-def watch_next_update_at(value: str | None) -> str | None:
+def obligation_next_update_at(value: str | None) -> str | None:
     if value is None:
         return None
     raw = value.strip()
@@ -2732,6 +3258,25 @@ def watch_next_update_at(value: str | None) -> str | None:
     if duration is None or duration.total_seconds() <= 0:
         raise ValueError("--next-update-in must be a positive duration such as 15m, 1h, or 2d")
     return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
+
+
+def review_at_from_args(review_in: str | None, review_at: str | None) -> str | None:
+    if review_in:
+        raw = review_in.strip()
+        if not raw:
+            return None
+        if raw[0] not in ("-", "+"):
+            raw = f"+{raw}"
+        duration = parse_duration(raw)
+        if duration is None or duration.total_seconds() <= 0:
+            raise ValueError("--review-in must be a positive duration such as 30m, 1h, or 2d")
+        return (datetime.now(UTC) + duration).replace(microsecond=0).isoformat()
+    if review_at:
+        parsed = parse_time_arg(review_at)
+        if parsed is None:
+            raise ValueError("--review-at must be an ISO timestamp or relative duration")
+        return parsed.replace(microsecond=0).isoformat()
+    return None
 
 
 def pane_window_target(tmux_bin: str, pane: str) -> str | None:

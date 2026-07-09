@@ -11,6 +11,7 @@ tmux-team bootstrap --project-root . --goal "Fix the failing test and report the
 tmux-team bootstrap --project-root . --roles orchestrator,implementer,collector,trainer
 tmux-team bootstrap --project-root . --agent-layout grouped
 tmux-team bootstrap --project-root . --agent-layout separate-windows
+tmux-team bootstrap --project-root . --no-truecolor
 ```
 
 Use `init` only when you want a config/runtime scaffold without launching Codex role panes.
@@ -43,6 +44,8 @@ tmux-team bootstrap \
   --worktree-base-ref HEAD
 ```
 
+Bootstrap sets tmux truecolor options on the managed session by default: `default-terminal` to `tmux-256color`, RGB terminal features when supported, and `COLORTERM=truecolor`. Use `--no-truecolor` only for terminal stacks that mis-render color.
+
 ## Status And Inspection
 
 Use `status` for durable state first. It does not scrape panes.
@@ -52,17 +55,22 @@ tmux-team status
 tmux-team status --verbose
 ```
 
-`status --verbose` shows bounded active message summaries, open todo counts, watches, watchdog runners, stale claimed work, and claimed-but-not-acknowledged warnings.
+`status --verbose` shows bounded active message summaries, open todo counts, obligations, watchdog runners, stale claimed work, and claimed-but-not-acknowledged warnings.
 
 Use `dashboard` for an operator snapshot. `dashboard --once` works in the base install; the live refreshing dashboard requires the optional `tmux-team[dashboard]` extra.
 
 ```bash
 tmux-team dashboard --once
+tmux-team dashboard --once --provenance
 tmux-team dashboard --refresh 2
 tmux-team dashboard --no-pane-preview
 ```
 
-Dashboard output is read-only. Use inbox, watches, milestones, and memory commands to mutate durable state.
+Dashboard output is read-only. It labels source classes such as `runtime-db`, `todo`, `milestone-jsonl`, `memory-excerpt`, and best-effort `pane-capture`. Use `--provenance` for row-level source/confidence labels. Role filtering scopes roles, active work, obligations, milestones, memory, pane previews, role notification alerts, and watchdog runners whose scope or notify target matches the role.
+
+The live dashboard has two pages. The work/supervision page shows active work, obligations, and watchdog runners. The context/history page shows milestones, memory excerpts, and alert history. Pane preview is off by default in live mode because the operator is already in tmux; toggle it from the dashboard when you need a full-width pane tail. The live dashboard stores local preferences such as theme and concise/verbose item mode in `.tmux-team/runtime/dashboard_preferences.json`.
+
+The live dashboard supports `r` refresh, modal `h` help, `escape` team overview, `f` filter to the focused role row, `1`-`9` and `0` role shortcuts, `[`/`]` page switching, `v` concise/verbose item mode, and direct jumps from the full `Ctrl-P` key menu. Sections are independently scrollable; the top alert panel shows recent pressure while the alert-history section keeps the longer bounded list. Use inbox, obligations, milestones, and memory commands to mutate durable state.
 
 ## Messages And Routing
 
@@ -121,7 +129,9 @@ tmux-team inbox list --role collector --verbose
 tmux-team inbox reclaimable --role collector
 ```
 
-Use `--reply-to-sender` for delegated role work so the original sender receives a completion notice and wake. After reading acknowledged completion notices, close the bookkeeping with:
+Use `--reply-to-sender` for delegated role work so the original sender receives a completion notice and wake. A completion notice is local bookkeeping until the goal owner reconciles it. If a non-orchestrator role receives a material delegated result, it should send a concise upward report to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`.
+
+After reading acknowledged completion notices, close pure bookkeeping with:
 
 ```bash
 tmux-team inbox complete-replies --role orchestrator
@@ -156,35 +166,50 @@ Append only high-value durable updates near the top. Avoid routine startup, park
 Use milestones for the operator timeline.
 
 ```bash
-tmux-team milestone add --kind result --summary "Targeted test fixed and passed" --tag test
+tmux-team milestone add --kind result --summary "Targeted test fixed and passed" --subject-role implementer --tag test
+tmux-team milestone add --kind routing --summary "Team started" --team
 tmux-team milestone list --today
+tmux-team milestone list --subject-role implementer
+tmux-team milestone list --team
 tmux-team milestone list --since -4h
 ```
 
-By default, the operator/control plane and orchestrator record milestones. Other roles report evidence through inbox completion and let the orchestrator decide what deserves a milestone.
+By default, the operator/control plane and orchestrator record milestones. Other roles report evidence through inbox completion and let the orchestrator decide what deserves a milestone. New milestones separate the writer (`recorded_by`) from the subject (`--subject-role`, repeated or comma-separated, or `--team`). The older `--role` flag remains as a legacy single-subject alias.
 
-## Watches And Watchdogs
+## Obligations And Watchdogs
 
-Use `watch` for long-running supervision that should not stay as an acknowledged inbox task for hours.
+Use `obligation` for long-running role commitments that should not stay as acknowledged inbox tasks for hours.
 
 ```bash
-tmux-team watch start --role collector --summary "Monitor external run" --next-update-in 15m
-tmux-team watch update <watch-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
-tmux-team watch complete <watch-id> --role collector --summary "Run terminalized"
+tmux-team obligation start --role collector --summary "Monitor external run" --goal "Report terminal result" --next-update-in 15m
+tmux-team obligation update <obligation-id> --role collector --summary "Heartbeat ok" --next-update-in 15m
+tmux-team obligation pause <obligation-id> --role collector --reason "Blocked by prerequisite" --review-in 30m
+tmux-team obligation resume <obligation-id> --role collector --summary "Prerequisite resolved" --next-update-in 15m
+tmux-team obligation complete <obligation-id> --role collector --summary "Run terminalized"
 ```
 
-Use `watchdog` for built-in durable-state checks.
+Paused obligations keep their previous summary, store a pause reason and optional review time, and do not count as overdue. When the review time passes, `watchdog` reports `obligation_review_due`. Use `obligation complete --status cancelled` when the obligation is truly terminal.
+
+Use `watchdog` for built-in durable-state checks and optional pressure delivery.
 
 ```bash
 tmux-team watchdog
 tmux-team watchdog --json
-tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team watchdog start --name default --interval 15m --description "Keep team state fresh" --goal "Escalate stale work" --notify-role orchestrator --delivery app-server-turn
+tmux-team watchdog update default --interval 10m --goal "Escalate stale collector obligations"
+tmux-team watchdog pause default --reason "Operator review" --review-in 30m
+tmux-team watchdog resume default
 tmux-team watchdog list
 tmux-team watchdog status default
 tmux-team watchdog stop default
 ```
 
-`watchdog start` opens a visible tmux window named `tt-watchdog-<name>` that runs `watchdog run`. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
+`watchdog start` opens or reuses a visible tmux window named `tt-watchdogs`. Each runner gets its own titled pane such as `tt-watchdog-default`, and the window is tiled after each spawn. Runner state is stored in SQLite, appears in `status --verbose` and `dashboard`, and `pane list --all` marks watchdog panes as `infrastructure=watchdog`.
+
+Bare `watchdog` is report-only. `watchdog run --once` and `watchdog start` create durable inbox pressure only when `--delivery` is not `report-only`. Use `--notify-role` to pick the escalation target; otherwise tmux-team uses the scoped `--role`, then `orchestrator`, then the first configured role. Duplicate pressure is suppressed while an active watchdog escalation with the same correlation key is still queued, notified, claimed, or acknowledged.
+
+Paused watchdog runners remain non-terminal, preserve the last finding summary, suppress repeated findings from that runner, and surface review-due reminders through single-shot `tmux-team watchdog`. Use `watchdog stop` when the runner should end.
 
 ## Pane Supervision
 
@@ -221,7 +246,7 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
 
-- `team.sqlite` for messages, todos, watches, role state, notifications, events, and stable commits;
+- `team.sqlite` for messages, todos, obligations, role state, notifications, events, and stable commits;
 - `events.jsonl` for append-only audit;
 - `milestones.jsonl` for append-only operator milestones;
 - `messages/*.md` for message bodies;
@@ -231,21 +256,35 @@ Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime
 
 ## Sleep And Resume
 
-Use `sleep` to snapshot and stop managed role/app-server windows without killing `tt-control`.
+Use `sleep` to snapshot and stop managed role, app-server, and watchdog windows without killing `tt-control`.
 
 ```bash
 tmux-team sleep
 tmux-team sleep --dry-run
 ```
 
-Use `resume` to restore from `.tmux-team/runtime/sleeps/latest.toml` or a chosen snapshot.
+Use `resume` to restore from `.tmux-team/runtime/sleeps/latest.toml` or a chosen snapshot. If no graceful sleep snapshot exists, `resume` builds a recovery snapshot from durable `team.toml` and SQLite runtime state when the role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.
 
 ```bash
 tmux-team resume
 tmux-team resume --dry-run
 tmux-team resume --snapshot .tmux-team/runtime/sleeps/<snapshot>.toml
 tmux-team resume --no-reactivate-roles
+tmux-team resume --no-truecolor
 ```
+
+Resume replays configured role Codex launch settings from the sleep or recovery snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. It also reinstantiates running watchdog runner panes from durable runner state. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `resume` warns when they matter and the live dashboard omits them rather than showing a noisy unknown chip.
+
+Resume also reapplies the default tmux truecolor session options unless `--no-truecolor` is passed.
+
+Record or inspect operator recovery metadata:
+
+```bash
+tmux-team operator show
+tmux-team operator bind --pane %0 --codex-thread-id <thread-id>
+```
+
+The `[operator]` table is metadata for the human/control pane. It is not a managed role and does not receive inbox work.
 
 ## Extensions
 

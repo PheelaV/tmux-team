@@ -6,7 +6,7 @@
 
 Plain tmux is great until you have four agents: prompts collide, panes enter copy mode, messages disappear into scrollback, and nobody knows what is actually done.
 
-`tmux-team` keeps the useful part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: SQLite inboxes, ack/complete tracking, role-owned todos, scratchpad memory, app-server wakeups, milestones, watchdogs, and sleep/resume snapshots.
+`tmux-team` keeps the useful part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: SQLite inboxes, ack/complete tracking, role-owned todos, obligations, scratchpad memory, app-server wakeups, milestones, watchdogs, and sleep/resume snapshots.
 
 The bias is boring reliability: visible panes, explicit states, recoverable claims, and no terminal stdin as production transport.
 
@@ -30,7 +30,7 @@ Expected shape:
 orchestrator: routed failing test to implementer
 implementer: fixed regression and produced a commit
 collector: verified the approved commit in a separate worktree
-watchdog: no stale claims or overdue watches
+watchdog: no stale claims or overdue obligations
 stable: approved commit recorded
 verifier: LIVE DEMO VERIFY OK
 ```
@@ -45,8 +45,8 @@ verifier: LIVE DEMO VERIFY OK
 - Durable SQLite inboxes with claim, ack, complete, completion replies, and reclaimable stale work.
 - App-server wake turns instead of production `tmux send-keys`.
 - Per-role scratchpad memory for long-lived state and active-message todos for reset-safe substeps.
-- Operator timelines, watches, watchdog runners, pane capture, and an optional Textual dashboard.
-- Sleep/resume snapshots so a team can stop and come back without losing role bindings.
+- Operator timelines, obligations, watchdog runners, pane capture, and an optional Textual dashboard.
+- Sleep/resume snapshots so a team can stop and come back without losing role bindings or watchdog runners.
 
 ## Install
 
@@ -172,6 +172,10 @@ For advanced Codex config, pass repeatable per-role `-c` overrides:
 tmux-team bootstrap --project-root . --role-codex-config collector='model_reasoning_effort="high"'
 ```
 
+Configured role Codex launch settings are recorded in `team.toml`, included in sleep snapshots, and replayed by `tmux-team resume`. Running watchdog runners are also reinstantiated on resume. If a host or tmux session ends before a graceful sleep, resume can build a recovery snapshot from `team.toml` and SQLite runtime state. Live TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown; verify it manually after recovery if it matters.
+
+Bootstrap and resume set tmux truecolor options on the managed session by default: `default-terminal` to `tmux-256color`, RGB terminal features when supported, and `COLORTERM=truecolor`. Use `--no-truecolor` only for unusual terminal stacks that mis-render color.
+
 The default agent layout is grouped:
 
 ```bash
@@ -217,18 +221,27 @@ After bootstrap, most operator work uses a small command set. Use the full [CLI 
 
 ```bash
 tmux-team status --verbose
-tmux-team dashboard --once
+tmux-team dashboard --once --provenance
 tmux-team send --to implementer --summary "Fix failing parser test" --body-file task.md
 tmux-team inbox next --role orchestrator --auto-ack
 tmux-team inbox complete <message-id> --role orchestrator --summary "routed" --reply-to-sender
 tmux-team todo recover --role collector
+tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team watchdog
-tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team watchdog start --name default --interval 15m --notify-role orchestrator --delivery app-server-turn
+tmux-team watchdog update default --interval 10m --goal "Escalate stale work"
+tmux-team watchdog pause default --reason "blocked by prerequisite" --review-in 30m
+tmux-team watchdog resume default
+tmux-team milestone add --team --kind routing --summary "Team started"
 tmux-team milestone list --today
 tmux-team sleep
 tmux-team resume
+tmux-team operator bind --pane %0 --codex-thread-id <thread-id>
 ```
+
+The optional live dashboard is optimized for an operator tmux split: work/supervision and context/history are separate pages, pane preview starts off by default, and local theme plus concise/verbose preferences are stored under `.tmux-team/runtime/dashboard_preferences.json`.
 
 The important loop is durable and one-message-at-a-time:
 
@@ -236,7 +249,7 @@ The important loop is durable and one-message-at-a-time:
 send -> app-server wake -> inbox next -> ack -> work -> complete -> optional reply-to-sender
 ```
 
-Use scratchpad memory for long-lived role state, todos for active-message substeps, milestones for operator summaries, watches for long-running supervision, and pane capture only for live observation. Pane text is never the source of truth for delivery or completion.
+Use scratchpad memory for long-lived role state, todos for active-message substeps, milestones for operator summaries, obligations for long-running commitments, and pane capture only for live observation. Pane text is never the source of truth for delivery or completion.
 
 ## Tests
 
@@ -291,7 +304,7 @@ make live-demo-verify
 make live-demo-clean
 ```
 
-The live demo clones a public snapshot, seeds a real failing test, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. Its verifier checks the final test result and durable coordination state, including correlation-key discipline, completion replies, notice broadcasts, watches, milestones, stable approval, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
+The live demo clones a public snapshot, seeds a real failing test, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. Its verifier checks the final test result and durable coordination state, including correlation-key discipline, completion replies, notice broadcasts, obligations, milestones, stable approval, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
 
 Opt-in real Codex integration:
 

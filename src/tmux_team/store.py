@@ -19,12 +19,14 @@ MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
 STALE_CLAIMED_STATE = "stale_claimed"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
 ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
-WATCH_ACTIVE_STATES = ("active", "blocked")
-WATCH_STATES = WATCH_ACTIVE_STATES + ("done", "failed", "cancelled")
+OBLIGATION_ACTIVE_STATES = ("active", "blocked")
+OBLIGATION_PAUSED_STATE = "paused"
+OBLIGATION_VISIBLE_STATES = OBLIGATION_ACTIVE_STATES + (OBLIGATION_PAUSED_STATE,)
+OBLIGATION_STATES = OBLIGATION_VISIBLE_STATES + ("done", "failed", "cancelled")
 TODO_STATES = ("open", "done", "superseded")
-WATCHDOG_RUNNER_STATES = ("running", "stopped", "failed")
+WATCHDOG_RUNNER_STATES = ("running", "paused", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -151,22 +153,27 @@ class Store:
               payload_json TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS watches (
+            CREATE TABLE IF NOT EXISTS obligations (
               id TEXT PRIMARY KEY,
               role TEXT NOT NULL,
               status TEXT NOT NULL,
               summary TEXT NOT NULL,
               current_summary TEXT NOT NULL,
+              goal TEXT,
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               last_update_at TEXT NOT NULL,
               next_update_at TEXT,
-              completed_at TEXT
+              completed_at TEXT,
+              paused_reason TEXT,
+              paused_at TEXT,
+              paused_by TEXT,
+              review_at TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_watches_role_status_updated
-              ON watches(role, status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_obligations_role_status_updated
+              ON obligations(role, status, updated_at);
 
             CREATE TABLE IF NOT EXISTS todos (
               id TEXT PRIMARY KEY,
@@ -190,6 +197,9 @@ class Store:
               state TEXT NOT NULL,
               interval_seconds INTEGER NOT NULL,
               scope_role TEXT,
+              description TEXT,
+              goal TEXT,
+              notify_role TEXT,
               delivery_method TEXT NOT NULL,
               pane TEXT,
               window TEXT,
@@ -200,7 +210,11 @@ class Store:
               next_run_at TEXT,
               last_finding_count INTEGER NOT NULL DEFAULT 0,
               last_finding_summary TEXT,
-              last_error TEXT
+              last_error TEXT,
+              paused_reason TEXT,
+              paused_at TEXT,
+              paused_by TEXT,
+              review_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_watchdog_runners_state_updated
@@ -211,8 +225,44 @@ class Store:
         self._ensure_column(conn, "messages", "related_to", "TEXT")
         self._ensure_column(conn, "messages", "supersedes", "TEXT")
         self._ensure_column(conn, "messages", "message_kind", "TEXT NOT NULL DEFAULT 'task'")
+        self._ensure_column(conn, "obligations", "goal", "TEXT")
+        for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
+            self._ensure_column(conn, "obligations", column, "TEXT")
+        self._migrate_watches_to_obligations(conn)
+        for column in ("description", "goal", "notify_role"):
+            self._ensure_column(conn, "watchdog_runners", column, "TEXT")
+        for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
+            self._ensure_column(conn, "watchdog_runners", column, "TEXT")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
+
+    def _migrate_watches_to_obligations(self, conn: sqlite3.Connection) -> None:
+        if not self._table_exists(conn, "watches"):
+            return
+        for column in ("paused_reason", "paused_at", "paused_by", "review_at"):
+            self._ensure_column(conn, "watches", column, "TEXT")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO obligations(
+              id, role, status, summary, current_summary, goal, created_by, created_at,
+              updated_at, last_update_at, next_update_at, completed_at, paused_reason,
+              paused_at, paused_by, review_at
+            )
+            SELECT
+              id, role, status, summary, current_summary, NULL, created_by, created_at,
+              updated_at, last_update_at, next_update_at, completed_at, paused_reason,
+              paused_at, paused_by, review_at
+            FROM watches
+            """
+        )
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     def sync_roles(self, conn: sqlite3.Connection, roles: Iterable[RoleConfig]) -> None:
         now = utc_now()
@@ -793,57 +843,58 @@ class Store:
             )
         )
 
-    def start_watch(
+    def start_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
         summary: str,
+        goal: str | None,
         created_by: str,
         next_update_at: str | None = None,
     ) -> sqlite3.Row:
         if self.get_role(conn, role) is None:
             raise KeyError(f"Unknown role: {role}")
         now = utc_now()
-        watch_id = new_watch_id()
+        obligation_id = new_obligation_id()
         conn.execute(
             """
-            INSERT INTO watches(
-              id, role, status, summary, current_summary,
+            INSERT INTO obligations(
+              id, role, status, summary, current_summary, goal,
               created_by, created_at, updated_at, last_update_at, next_update_at
             )
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (watch_id, role, summary, summary, created_by, now, now, now, next_update_at),
+            (obligation_id, role, summary, summary, empty_to_none(goal), created_by, now, now, now, next_update_at),
         )
         self.record_event(
             conn,
-            "watch.started",
+            "obligation.started",
             created_by,
-            watch_id,
-            {"role": role, "summary": summary, "next_update_at": next_update_at},
+            obligation_id,
+            {"role": role, "summary": summary, "goal": empty_to_none(goal), "next_update_at": next_update_at},
         )
         conn.commit()
-        return self.get_watch(conn, watch_id)
+        return self.get_obligation(conn, obligation_id)
 
-    def update_watch(
+    def update_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
-        watch_id: str,
+        obligation_id: str,
         summary: str,
         status: str = "active",
         next_update_at: str | None = None,
         actor: str = "operator",
     ) -> sqlite3.Row:
-        if status not in WATCH_ACTIVE_STATES:
-            raise ValueError(f"Invalid active watch status: {status}")
-        row = self._watch_for_role(conn, role, watch_id)
+        if status not in OBLIGATION_ACTIVE_STATES:
+            raise ValueError(f"Invalid active obligation status: {status}")
+        row = self._obligation_for_role(conn, role, obligation_id)
         now = utc_now()
         updated = conn.execute(
             """
-            UPDATE watches
+            UPDATE obligations
             SET status = ?,
                 current_summary = ?,
                 updated_at = ?,
@@ -852,61 +903,162 @@ class Store:
             WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
             RETURNING *
             """,
-            (status, summary, now, now, next_update_at, watch_id, role),
+            (status, summary, now, now, next_update_at, obligation_id, role),
         ).fetchone()
         if updated is None:
-            raise ValueError(f"Cannot update watch {watch_id} in state {row['status']}")
+            raise ValueError(f"Cannot update obligation {obligation_id} in state {row['status']}")
         self.record_event(
             conn,
-            "watch.updated",
+            "obligation.updated",
             actor,
-            watch_id,
+            obligation_id,
             {"role": role, "status": status, "summary": summary, "next_update_at": next_update_at},
         )
         conn.commit()
         return updated
 
-    def complete_watch(
+    def pause_obligation(
         self,
         conn: sqlite3.Connection,
         *,
         role: str,
-        watch_id: str,
+        obligation_id: str,
+        reason: str,
+        review_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        row = self._obligation_for_role(conn, role, obligation_id)
+        if row["status"] not in OBLIGATION_VISIBLE_STATES:
+            raise ValueError(f"Cannot pause obligation {obligation_id} in state {row['status']}")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE obligations
+            SET status = 'paused',
+                updated_at = ?,
+                next_update_at = NULL,
+                paused_reason = ?,
+                paused_at = ?,
+                paused_by = ?,
+                review_at = ?
+            WHERE id = ? AND role = ?
+            RETURNING *
+            """,
+            (now, reason, now, actor, review_at, obligation_id, role),
+        ).fetchone()
+        if updated is None:
+            raise KeyError(f"Unknown obligation: {obligation_id}")
+        self.record_event(
+            conn,
+            "obligation.paused",
+            actor,
+            obligation_id,
+            {
+                "role": role,
+                "reason": reason,
+                "review_at": review_at,
+                "previous_status": row["status"],
+                "previous_summary": row["current_summary"],
+            },
+        )
+        conn.commit()
+        return updated
+
+    def resume_obligation(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        obligation_id: str,
+        summary: str,
+        next_update_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        row = self._obligation_for_role(conn, role, obligation_id)
+        if row["status"] != OBLIGATION_PAUSED_STATE:
+            raise ValueError(f"Cannot resume obligation {obligation_id} in state {row['status']}")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE obligations
+            SET status = 'active',
+                current_summary = ?,
+                updated_at = ?,
+                last_update_at = ?,
+                next_update_at = ?,
+                completed_at = NULL,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL
+            WHERE id = ? AND role = ? AND status = 'paused'
+            RETURNING *
+            """,
+            (summary, now, now, next_update_at, obligation_id, role),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot resume obligation {obligation_id} in state {row['status']}")
+        self.record_event(
+            conn,
+            "obligation.resumed",
+            actor,
+            obligation_id,
+            {
+                "role": role,
+                "summary": summary,
+                "next_update_at": next_update_at,
+                "paused_reason": row["paused_reason"],
+                "paused_at": row["paused_at"],
+            },
+        )
+        conn.commit()
+        return updated
+
+    def complete_obligation(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        role: str,
+        obligation_id: str,
         status: str,
         summary: str,
         actor: str = "operator",
     ) -> sqlite3.Row:
         if status not in ("done", "failed", "cancelled"):
-            raise ValueError(f"Invalid terminal watch status: {status}")
-        row = self._watch_for_role(conn, role, watch_id)
+            raise ValueError(f"Invalid terminal obligation status: {status}")
+        row = self._obligation_for_role(conn, role, obligation_id)
         now = utc_now()
         updated = conn.execute(
             """
-            UPDATE watches
+            UPDATE obligations
             SET status = ?,
                 current_summary = ?,
                 updated_at = ?,
                 last_update_at = ?,
                 completed_at = ?,
-                next_update_at = NULL
-            WHERE id = ? AND role = ? AND status IN ('active', 'blocked')
+                next_update_at = NULL,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL
+            WHERE id = ? AND role = ? AND status IN ('active', 'blocked', 'paused')
             RETURNING *
             """,
-            (status, summary, now, now, now, watch_id, role),
+            (status, summary, now, now, now, obligation_id, role),
         ).fetchone()
         if updated is None:
-            raise ValueError(f"Cannot complete watch {watch_id} in state {row['status']}")
+            raise ValueError(f"Cannot complete obligation {obligation_id} in state {row['status']}")
         self.record_event(
             conn,
-            "watch.completed",
+            "obligation.completed",
             actor,
-            watch_id,
+            obligation_id,
             {"role": role, "status": status, "summary": summary},
         )
         conn.commit()
         return updated
 
-    def list_watches(
+    def list_obligations(
         self,
         conn: sqlite3.Connection,
         *,
@@ -920,9 +1072,9 @@ class Store:
             clauses.append("role = ?")
             params.append(role)
         if states:
-            invalid = tuple(state for state in states if state not in WATCH_STATES)
+            invalid = tuple(state for state in states if state not in OBLIGATION_STATES)
             if invalid:
-                raise ValueError(f"Invalid watch state: {invalid[0]}")
+                raise ValueError(f"Invalid obligation state: {invalid[0]}")
             placeholders = ", ".join("?" for _ in states)
             clauses.append(f"status IN ({placeholders})")
             params.extend(states)
@@ -931,15 +1083,16 @@ class Store:
         return list(
             conn.execute(
                 f"""
-                SELECT * FROM watches
+                SELECT * FROM obligations
                 {where}
                 ORDER BY
                   CASE status
                     WHEN 'blocked' THEN 0
-                    WHEN 'active' THEN 1
-                    WHEN 'failed' THEN 2
-                    WHEN 'done' THEN 3
-                    ELSE 4
+                    WHEN 'paused' THEN 1
+                    WHEN 'active' THEN 2
+                    WHEN 'failed' THEN 3
+                    WHEN 'done' THEN 4
+                    ELSE 5
                   END,
                   updated_at DESC
                 LIMIT ?
@@ -956,6 +1109,9 @@ class Store:
         state: str,
         interval_seconds: int,
         scope_role: str | None = None,
+        description: str | None = None,
+        goal: str | None = None,
+        notify_role: str | None = None,
         delivery_method: str = "report-only",
         pane: str | None = None,
         window: str | None = None,
@@ -970,31 +1126,44 @@ class Store:
             raise ValueError("watchdog runner interval_seconds must be positive")
         if scope_role and self.get_role(conn, scope_role) is None:
             raise KeyError(f"Unknown role: {scope_role}")
+        if notify_role and self.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
         now = utc_now()
         conn.execute(
             """
             INSERT INTO watchdog_runners(
-              name, state, interval_seconds, scope_role, delivery_method, pane, window, process_id,
+              name, state, interval_seconds, scope_role, description, goal, notify_role,
+              delivery_method, pane, window, process_id,
               created_at, updated_at, next_run_at, last_error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             ON CONFLICT(name) DO UPDATE SET
               state = excluded.state,
               interval_seconds = excluded.interval_seconds,
               scope_role = excluded.scope_role,
+              description = excluded.description,
+              goal = excluded.goal,
+              notify_role = excluded.notify_role,
               delivery_method = excluded.delivery_method,
               pane = COALESCE(excluded.pane, watchdog_runners.pane),
               window = COALESCE(excluded.window, watchdog_runners.window),
               process_id = COALESCE(excluded.process_id, watchdog_runners.process_id),
               updated_at = excluded.updated_at,
               next_run_at = excluded.next_run_at,
-              last_error = NULL
+              last_error = NULL,
+              paused_reason = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.paused_reason ELSE NULL END,
+              paused_at = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.paused_at ELSE NULL END,
+              paused_by = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.paused_by ELSE NULL END,
+              review_at = CASE WHEN excluded.state = 'paused' THEN watchdog_runners.review_at ELSE NULL END
             """,
             (
                 normalized_name,
                 state,
                 interval_seconds,
                 empty_to_none(scope_role),
+                empty_to_none(description),
+                empty_to_none(goal),
+                empty_to_none(notify_role),
                 delivery_method,
                 empty_to_none(pane),
                 empty_to_none(window),
@@ -1013,6 +1182,9 @@ class Store:
                 "state": state,
                 "interval_seconds": interval_seconds,
                 "scope_role": empty_to_none(scope_role),
+                "description": empty_to_none(description),
+                "goal": empty_to_none(goal),
+                "notify_role": empty_to_none(notify_role),
                 "delivery_method": delivery_method,
                 "pane": empty_to_none(pane),
                 "window": empty_to_none(window),
@@ -1030,6 +1202,9 @@ class Store:
         name: str,
         interval_seconds: int,
         scope_role: str | None,
+        description: str | None,
+        goal: str | None,
+        notify_role: str | None,
         delivery_method: str,
         pane: str | None,
         window: str | None,
@@ -1043,21 +1218,30 @@ class Store:
         normalized_name = normalize_watchdog_runner_name(name)
         if interval_seconds <= 0:
             raise ValueError("watchdog runner interval_seconds must be positive")
+        existing = conn.execute("SELECT * FROM watchdog_runners WHERE name = ?", (normalized_name,)).fetchone()
+        if existing is not None and existing["state"] == "paused":
+            return existing
         if scope_role and self.get_role(conn, scope_role) is None:
             raise KeyError(f"Unknown role: {scope_role}")
+        if notify_role and self.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
         now = utc_now()
         conn.execute(
             """
             INSERT INTO watchdog_runners(
-              name, state, interval_seconds, scope_role, delivery_method, pane, window, process_id,
+              name, state, interval_seconds, scope_role, description, goal, notify_role,
+              delivery_method, pane, window, process_id,
               created_at, updated_at, last_run_at, next_run_at, last_finding_count,
               last_finding_summary, last_error
             )
-            VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             ON CONFLICT(name) DO UPDATE SET
               state = 'running',
               interval_seconds = excluded.interval_seconds,
               scope_role = excluded.scope_role,
+              description = excluded.description,
+              goal = excluded.goal,
+              notify_role = excluded.notify_role,
               delivery_method = excluded.delivery_method,
               pane = COALESCE(excluded.pane, watchdog_runners.pane),
               window = COALESCE(excluded.window, watchdog_runners.window),
@@ -1067,12 +1251,19 @@ class Store:
               next_run_at = excluded.next_run_at,
               last_finding_count = excluded.last_finding_count,
               last_finding_summary = excluded.last_finding_summary,
-              last_error = NULL
+              last_error = NULL,
+              paused_reason = NULL,
+              paused_at = NULL,
+              paused_by = NULL,
+              review_at = NULL
             """,
             (
                 normalized_name,
                 interval_seconds,
                 empty_to_none(scope_role),
+                empty_to_none(description),
+                empty_to_none(goal),
+                empty_to_none(notify_role),
                 delivery_method,
                 empty_to_none(pane),
                 empty_to_none(window),
@@ -1092,6 +1283,9 @@ class Store:
             normalized_name,
             {
                 "scope_role": empty_to_none(scope_role),
+                "description": empty_to_none(description),
+                "goal": empty_to_none(goal),
+                "notify_role": empty_to_none(notify_role),
                 "finding_count": finding_count,
                 "finding_summary": finding_summary,
                 "last_run_at": last_run_at,
@@ -1100,6 +1294,81 @@ class Store:
         )
         conn.commit()
         return self.get_watchdog_runner(conn, normalized_name)
+
+    def update_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        interval_seconds: int | None = None,
+        scope_role: str | None = None,
+        clear_scope_role: bool = False,
+        description: str | None = None,
+        goal: str | None = None,
+        notify_role: str | None = None,
+        clear_notify_role: bool = False,
+        delivery_method: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = self.get_watchdog_runner(conn, normalized_name)
+        if interval_seconds is not None and interval_seconds <= 0:
+            raise ValueError("watchdog runner interval_seconds must be positive")
+        if scope_role and self.get_role(conn, scope_role) is None:
+            raise KeyError(f"Unknown role: {scope_role}")
+        if notify_role and self.get_role(conn, notify_role) is None:
+            raise KeyError(f"Unknown notify role: {notify_role}")
+
+        next_scope_role = (
+            None if clear_scope_role else empty_to_none(scope_role) if scope_role is not None else row["scope_role"]
+        )
+        next_notify_role = (
+            None if clear_notify_role else empty_to_none(notify_role) if notify_role is not None else row["notify_role"]
+        )
+        next_interval = int(interval_seconds if interval_seconds is not None else row["interval_seconds"])
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET interval_seconds = ?,
+                scope_role = ?,
+                description = COALESCE(?, description),
+                goal = COALESCE(?, goal),
+                notify_role = ?,
+                delivery_method = COALESCE(?, delivery_method),
+                updated_at = ?
+            WHERE name = ? AND state NOT IN ('stopped', 'failed')
+            RETURNING *
+            """,
+            (
+                next_interval,
+                next_scope_role,
+                empty_to_none(description),
+                empty_to_none(goal),
+                next_notify_role,
+                empty_to_none(delivery_method),
+                now,
+                normalized_name,
+            ),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot update watchdog runner {normalized_name} in state {row['state']}")
+        self.record_event(
+            conn,
+            "watchdog.runner_updated",
+            actor,
+            normalized_name,
+            {
+                "interval_seconds": next_interval,
+                "scope_role": next_scope_role,
+                "description": empty_to_none(description),
+                "goal": empty_to_none(goal),
+                "notify_role": next_notify_role,
+                "delivery_method": empty_to_none(delivery_method),
+            },
+        )
+        conn.commit()
+        return updated
 
     def stop_watchdog_runner(
         self,
@@ -1121,7 +1390,11 @@ class Store:
             SET state = ?,
                 updated_at = ?,
                 next_run_at = NULL,
-                last_error = ?
+                last_error = ?,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL
             WHERE name = ?
             RETURNING *
             """,
@@ -1135,6 +1408,99 @@ class Store:
             actor,
             normalized_name,
             {"previous_state": row["state"], "state": state, "error": empty_to_none(error)},
+        )
+        conn.commit()
+        return updated
+
+    def pause_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        reason: str,
+        review_at: str | None = None,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = self.get_watchdog_runner(conn, normalized_name)
+        if row["state"] in ("stopped", "failed"):
+            raise ValueError(f"Cannot pause watchdog runner {normalized_name} in state {row['state']}")
+        now = utc_now()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET state = 'paused',
+                updated_at = ?,
+                next_run_at = ?,
+                paused_reason = ?,
+                paused_at = ?,
+                paused_by = ?,
+                review_at = ?,
+                last_error = NULL
+            WHERE name = ?
+            RETURNING *
+            """,
+            (now, review_at, reason, now, actor, review_at, normalized_name),
+        ).fetchone()
+        if updated is None:
+            raise KeyError(f"Unknown watchdog runner: {normalized_name}")
+        self.record_event(
+            conn,
+            "watchdog.runner_paused",
+            actor,
+            normalized_name,
+            {
+                "previous_state": row["state"],
+                "reason": reason,
+                "review_at": review_at,
+                "last_finding_summary": row["last_finding_summary"],
+            },
+        )
+        conn.commit()
+        return updated
+
+    def resume_watchdog_runner(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+        actor: str = "operator",
+    ) -> sqlite3.Row:
+        normalized_name = normalize_watchdog_runner_name(name)
+        row = self.get_watchdog_runner(conn, normalized_name)
+        if row["state"] != "paused":
+            raise ValueError(f"Cannot resume watchdog runner {normalized_name} in state {row['state']}")
+        now_dt = datetime.now(UTC).replace(microsecond=0)
+        next_run_at = (now_dt + timedelta(seconds=int(row["interval_seconds"]))).isoformat()
+        updated = conn.execute(
+            """
+            UPDATE watchdog_runners
+            SET state = 'running',
+                updated_at = ?,
+                next_run_at = ?,
+                paused_reason = NULL,
+                paused_at = NULL,
+                paused_by = NULL,
+                review_at = NULL,
+                last_error = NULL
+            WHERE name = ? AND state = 'paused'
+            RETURNING *
+            """,
+            (now_dt.isoformat(), next_run_at, normalized_name),
+        ).fetchone()
+        if updated is None:
+            raise ValueError(f"Cannot resume watchdog runner {normalized_name} in state {row['state']}")
+        self.record_event(
+            conn,
+            "watchdog.runner_resumed",
+            actor,
+            normalized_name,
+            {
+                "previous_state": row["state"],
+                "paused_reason": row["paused_reason"],
+                "paused_at": row["paused_at"],
+                "next_run_at": next_run_at,
+            },
         )
         conn.commit()
         return updated
@@ -1165,8 +1531,9 @@ class Store:
                 ORDER BY
                   CASE state
                     WHEN 'running' THEN 0
-                    WHEN 'failed' THEN 1
-                    ELSE 2
+                    WHEN 'paused' THEN 1
+                    WHEN 'failed' THEN 2
+                    ELSE 3
                   END,
                   updated_at DESC
                 LIMIT ?
@@ -1788,15 +2155,24 @@ class Store:
         summary: str,
         body: str = "",
         role: str | None = None,
+        subject_roles: tuple[str, ...] = (),
+        scope: str | None = None,
         kind: str = "milestone",
         ref_id: str | None = None,
         tags: tuple[str, ...] = (),
         metadata: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        normalized_subjects = tuple(dict.fromkeys(role.strip() for role in subject_roles if role.strip()))
+        if role and not normalized_subjects:
+            normalized_subjects = (role,)
+        normalized_scope = scope or ("team" if not normalized_subjects else "role")
         milestone = {
             "created_at": utc_now(),
             "actor": actor,
+            "recorded_by": actor,
             "role": role,
+            "scope": normalized_scope,
+            "subject_roles": list(normalized_subjects),
             "kind": kind,
             "summary": summary,
             "body": body,
@@ -1812,7 +2188,15 @@ class Store:
             "milestone.recorded",
             actor,
             ref_id,
-            {"summary": summary, "role": role, "kind": kind, "tags": list(tags)},
+            {
+                "summary": summary,
+                "role": role,
+                "recorded_by": actor,
+                "scope": normalized_scope,
+                "subject_roles": list(normalized_subjects),
+                "kind": kind,
+                "tags": list(tags),
+            },
         )
         conn.commit()
         return milestone
@@ -1823,6 +2207,8 @@ class Store:
         since: datetime | None = None,
         until: datetime | None = None,
         role: str | None = None,
+        subject_role: str | None = None,
+        scope: str | None = None,
         kind: str | None = None,
         tags: tuple[str, ...] = (),
         limit: int = 50,
@@ -1840,7 +2226,12 @@ class Store:
                 continue
             if until is not None and created_at > until:
                 continue
-            if role is not None and row.get("role") != role:
+            subject_roles = tuple(str(item) for item in row.get("subject_roles") or ())
+            if role is not None and row.get("role") != role and role not in subject_roles:
+                continue
+            if subject_role is not None and subject_role not in subject_roles and row.get("role") != subject_role:
+                continue
+            if scope is not None and row.get("scope") != scope:
                 continue
             if kind is not None and row.get("kind") != kind:
                 continue
@@ -1916,16 +2307,16 @@ class Store:
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def get_watch(self, conn: sqlite3.Connection, watch_id: str) -> sqlite3.Row:
-        row = conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone()
+    def get_obligation(self, conn: sqlite3.Connection, obligation_id: str) -> sqlite3.Row:
+        row = conn.execute("SELECT * FROM obligations WHERE id = ?", (obligation_id,)).fetchone()
         if row is None:
-            raise KeyError(f"Unknown watch: {watch_id}")
+            raise KeyError(f"Unknown obligation: {obligation_id}")
         return row
 
-    def _watch_for_role(self, conn: sqlite3.Connection, role: str, watch_id: str) -> sqlite3.Row:
-        row = self.get_watch(conn, watch_id)
+    def _obligation_for_role(self, conn: sqlite3.Connection, role: str, obligation_id: str) -> sqlite3.Row:
+        row = self.get_obligation(conn, obligation_id)
         if row["role"] != role:
-            raise PermissionError(f"Watch {watch_id} belongs to {row['role']}, not {role}")
+            raise PermissionError(f"Obligation {obligation_id} belongs to {row['role']}, not {role}")
         return row
 
     def _todo_for_role(self, conn: sqlite3.Connection, role: str, todo_id: str) -> sqlite3.Row:
@@ -1961,10 +2352,10 @@ def new_message_id() -> str:
     return f"msg_{stamp}_{suffix}"
 
 
-def new_watch_id() -> str:
+def new_obligation_id() -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
-    return f"watch_{stamp}_{suffix}"
+    return f"obligation_{stamp}_{suffix}"
 
 
 def new_todo_id() -> str:

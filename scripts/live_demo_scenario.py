@@ -24,8 +24,13 @@ CORRELATION_KEYS = {
     "baseline": "urgent-first-baseline",
     "fix": "urgent-first-fix",
     "verification": "urgent-first-collector-verification",
+    "post_resume": "post-resume-implementer-test",
 }
 STABLE_SCOPE = "collector"
+WATCHDOG_PRESSURE_NAME = "live-pressure"
+WATCHDOG_PRESSURE_CORRELATION = f"watchdog:{WATCHDOG_PRESSURE_NAME}:team:to:orchestrator"
+WATCHDOG_RESUME_NAME = "live-resume"
+WATCHDOG_RESUME_CORRELATION = f"watchdog:{WATCHDOG_RESUME_NAME}:team:to:orchestrator"
 
 
 class ScenarioError(RuntimeError):
@@ -42,6 +47,12 @@ def main() -> int:
             bootstrap(root, args)
         elif args.command == "verify":
             verify(root)
+        elif args.command == "sleep":
+            sleep_team(root)
+        elif args.command == "resume":
+            resume_team(root, args)
+        elif args.command == "watchdog-now":
+            nudge_resumed_watchdog(root)
         elif args.command == "clean":
             clean(root, args)
         else:
@@ -72,6 +83,15 @@ def parse_args() -> argparse.Namespace:
     bootstrap_parser.add_argument("--force-config", action="store_true", help="Replace an existing team.toml")
 
     subparsers.add_parser("verify", help="Verify the live run reached real target success")
+    subparsers.add_parser("sleep", help="Operator phase: sleep the running live-demo team")
+
+    resume_parser = subparsers.add_parser("resume", help="Operator phase: resume the live-demo team")
+    resume_parser.add_argument("--role-yolo", action="store_true", help="Resume managed role panes in Codex YOLO mode")
+
+    subparsers.add_parser(
+        "watchdog-now",
+        help="Operator phase: shorten the restored post-resume watchdog interval so it fires soon",
+    )
 
     clean_parser = subparsers.add_parser("clean", help="Remove the scenario tmux session and marked root")
     clean_parser.add_argument("--session", default=DEFAULT_SESSION)
@@ -178,6 +198,12 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
         f"implementer={metadata['implementer_worktree']}",
         "--role-worktree",
         f"collector={metadata['collector_worktree']}",
+        "--role-reasoning-effort",
+        "orchestrator=high",
+        "--role-reasoning-effort",
+        "implementer=high",
+        "--role-reasoning-effort",
+        "collector=high",
         "--goal-file",
         str(root / "goal.md"),
     ]
@@ -203,6 +229,9 @@ def verify(root: Path) -> None:
         raise ScenarioError(f"missing tmux-team config: {config_path}")
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     roles = config.get("roles", {})
+    operator = config.get("operator", {})
+    if not operator.get("pane"):
+        raise ScenarioError("team.toml is missing operator pane recovery metadata")
     for role, key in (
         ("orchestrator", "project"),
         ("implementer", "implementer_worktree"),
@@ -212,6 +241,8 @@ def verify(root: Path) -> None:
         expected = Path(str(metadata[key])).resolve()
         if actual != expected:
             raise ScenarioError(f"{role} worktree mismatch: expected {expected}, got {actual}")
+        if roles[role].get("codex_reasoning_effort") != "high":
+            raise ScenarioError(f"{role} did not preserve configured Codex reasoning effort")
 
     result = run_target_test(collector, check=False)
     if result.returncode != 0:
@@ -265,6 +296,13 @@ def verify(root: Path) -> None:
         require_sql_count_exact(
             conn,
             "messages",
+            "sender = 'orchestrator' AND recipient = 'implementer' "
+            f"AND correlation_key = '{CORRELATION_KEYS['post_resume']}' AND message_kind = 'task'",
+            1,
+        )
+        require_sql_count_exact(
+            conn,
+            "messages",
             "sender = 'collector' AND recipient = 'orchestrator' AND message_kind = 'completion_notice'",
             2,
         )
@@ -272,13 +310,27 @@ def verify(root: Path) -> None:
             conn,
             "messages",
             "sender = 'implementer' AND recipient = 'orchestrator' AND message_kind = 'completion_notice'",
+            2,
+        )
+        require_sql_count(
+            conn,
+            "messages",
+            "sender = 'orchestrator' AND recipient IN ('collector', 'implementer') AND message_kind = 'notice'",
+            4,
+        )
+        require_sql_count_exact(
+            conn,
+            "messages",
+            "sender = 'watchdog:live-pressure' AND recipient = 'orchestrator' "
+            f"AND correlation_key = '{WATCHDOG_PRESSURE_CORRELATION}'",
             1,
         )
         require_sql_count_exact(
             conn,
             "messages",
-            "sender = 'orchestrator' AND recipient IN ('collector', 'implementer') AND message_kind = 'notice'",
-            4,
+            "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
+            f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
+            1,
         )
         require_sql_count_exact(conn, "messages", "state != 'completed'", 0)
         require_sql_count_exact(
@@ -287,11 +339,21 @@ def verify(root: Path) -> None:
             f"scope = '{STABLE_SCOPE}' AND commit_sha = '{collector_head}'",
             1,
         )
-        require_sql_count_exact(conn, "watches", "status IN ('active', 'blocked')", 0)
-        require_sql_count_exact(conn, "watches", "status IN ('done', 'failed', 'cancelled')", 1)
-        require_sql_count(conn, "events", "type = 'watch.updated'", 2)
-        require_sql_count(conn, "events", "type = 'watch.completed'", 1)
+        require_sql_count_exact(conn, "obligations", "status IN ('active', 'blocked')", 0)
+        require_sql_count_range(conn, "obligations", "status IN ('done', 'failed', 'cancelled')", minimum=2, maximum=4)
+        require_sql_count(conn, "events", "type = 'obligation.updated'", 2)
+        require_sql_count(conn, "events", "type = 'obligation.completed'", 2)
+        require_sql_count(conn, "events", "type = 'watchdog.runner_ran'", 2)
+        require_sql_count(conn, "events", "type = 'watchdog.runner_updated' AND ref_id = 'live-resume'", 1)
+        require_sql_count(
+            conn, "events", "type = 'watchdog.runner_upserted' AND actor = 'resume' AND ref_id = 'live-resume'", 1
+        )
+        require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
+        require_sql_count(conn, "events", "type = 'team.sleep.snapshot'", 1)
+        require_sql_count(conn, "events", "type = 'team.sleep.teardown'", 1)
+        require_sql_count(conn, "events", "type = 'team.resume'", 1)
         require_sql_count(conn, "events", "type = 'stable.approved'", 1)
+        require_sql_count_exact(conn, "watchdog_runners", "name = 'live-resume' AND state = 'stopped'", 1)
     finally:
         conn.close()
 
@@ -327,6 +389,53 @@ def clean(root: Path, args: argparse.Namespace) -> None:
     print(f"session: {args.session}")
     if args.keep_root:
         print(f"kept root: {root}")
+
+
+def sleep_team(root: Path) -> None:
+    metadata = load_metadata(root)
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    run(["tmux-team", "--config", str(config_path), "sleep"])
+    print("LIVE DEMO SLEEP OK")
+    print(f"config: {config_path}")
+    print("resume next: make live-demo-resume")
+
+
+def resume_team(root: Path, args: argparse.Namespace) -> None:
+    metadata = load_metadata(root)
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    command = ["tmux-team", "--config", str(config_path), "resume"]
+    if args.role_yolo:
+        command.append("--role-yolo")
+    run(command)
+    print("LIVE DEMO RESUME OK")
+    print(f"config: {config_path}")
+    print("nudge watchdog next: make live-demo-watchdog-now")
+
+
+def nudge_resumed_watchdog(root: Path) -> None:
+    metadata = load_metadata(root)
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    run(
+        [
+            "tmux-team",
+            "--config",
+            str(config_path),
+            "watchdog",
+            "update",
+            WATCHDOG_RESUME_NAME,
+            "--interval",
+            "5s",
+            "--delivery",
+            "app-server-turn",
+            "--notify-role",
+            "orchestrator",
+            "--goal",
+            "Resume the post-sleep verification operation; stop this watchdog once the implementer reports passing tests.",
+        ]
+    )
+    print("LIVE DEMO WATCHDOG NUDGE OK")
+    print(f"name: {WATCHDOG_RESUME_NAME}")
+    print("interval: 5s")
 
 
 def reset_root(root: Path, force: bool) -> None:
@@ -409,16 +518,23 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     A seeded regression causes tmux-team inbox claiming to violate urgent-first priority ordering. The team must diagnose and fix this from tests and code, then verify the fix from the collector worktree.
 
     Required team flow:
-    1. Orchestrator records a start milestone and starts a watch for demo verification.
-    2. Orchestrator runs status --verbose, pane list --all, watchdog, and memory show for its own role before dispatching.
-    3. Orchestrator sends a notice-only checkpoint with broadcast --from orchestrator --notice --only implementer,collector.
-    4. Orchestrator sends collector exactly one baseline evidence task with --correlation-key {CORRELATION_KEYS["baseline"]}. The collector identifies the minimal failing test command and reports evidence with --reply-to-sender.
-    5. Orchestrator updates the watch after accepting collector evidence.
-    6. Orchestrator sends implementer exactly one fix task with --correlation-key {CORRELATION_KEYS["fix"]}. The implementer fixes the production bug in the implementer worktree, runs the targeted test, commits the fix, and reports the commit SHA with --reply-to-sender.
-    7. Orchestrator inspects relation state with inbox list --role collector --verbose and inbox list --role implementer --verbose, then inspects at least one role pane with pane capture --lines N --offset N.
-    8. Orchestrator approves the implementer fix with stable approve <sha> --role {STABLE_SCOPE}.
-    9. Orchestrator sends collector exactly one fix verification task with --correlation-key {CORRELATION_KEYS["verification"]}. The collector uses tmux-team stable sync --role collector --apply or an equivalent checkout of the approved stable commit, then reruns the targeted test in the collector worktree.
-    10. Orchestrator updates and completes the watch, records a final milestone that the target test passed, checks watchdog is clean, and broadcasts a notice-only final summary with broadcast --from orchestrator --notice --exclude orchestrator.
+    1. Orchestrator records a start milestone and starts an obligation for demo verification with a short next-update window. If an active demo obligation already exists after startup/recovery, reuse it instead of creating another.
+    2. Orchestrator runs operator show, status --verbose, dashboard --once --no-pane-preview, pane list --all, watchdog, and memory show for its own role before dispatching. Confirm status/dashboard show configured Codex launch settings and fast=unknown.
+    3. Orchestrator intentionally exercises watchdog pressure: after the obligation is overdue, run `tmux-team watchdog run --once --name {WATCHDOG_PRESSURE_NAME} --delivery app-server-turn --notify-role orchestrator --description "Live demo pressure check" --goal "Escalate overdue demo obligations"`. Claim the resulting watchdog inbox message for orchestrator and complete it after reconciling the obligation. Do not leave the watchdog pressure message active.
+    4. Orchestrator sends a notice-only checkpoint with broadcast --from orchestrator --notice --only implementer,collector.
+    5. Orchestrator sends collector exactly one baseline evidence task with --correlation-key {CORRELATION_KEYS["baseline"]}. The collector identifies the minimal failing test command and reports evidence with --reply-to-sender.
+    6. Orchestrator updates the obligation after accepting collector evidence.
+    7. Orchestrator sends implementer exactly one fix task with --correlation-key {CORRELATION_KEYS["fix"]}. The implementer fixes the production bug in the implementer worktree, runs the targeted test, commits the fix, and reports the commit SHA with --reply-to-sender.
+    8. Orchestrator inspects relation state with inbox list --role collector --verbose and inbox list --role implementer --verbose, then inspects at least one role pane with pane capture --lines N --offset N.
+    9. Orchestrator approves the implementer fix with stable approve <sha> --role {STABLE_SCOPE}.
+    10. Orchestrator sends collector exactly one fix verification task with --correlation-key {CORRELATION_KEYS["verification"]}. The collector uses tmux-team stable sync --role collector --apply or an equivalent checkout of the approved stable commit, then reruns the targeted test in the collector worktree.
+    11. Orchestrator updates and completes the initial bugfix obligation and records a milestone that the collector target test passed.
+    12. Orchestrator arms the post-resume phase, then parks for operator sleep/resume:
+        - Start a second obligation owned by orchestrator for post-resume verification with a short next-update window.
+        - Start a persistent watchdog runner named {WATCHDOG_RESUME_NAME} with interval 1m, delivery report-only, notify-role orchestrator, and a goal saying it should resume the post-sleep verification operation and be stopped once implementer tests pass.
+        - Do not dispatch the post-resume implementer test task until the watchdog wakes orchestrator after the operator resumes the team and changes the watchdog interval/delivery with live-demo-watchdog-now.
+    13. After the operator sleep/resume/nudge, claim and complete the {WATCHDOG_RESUME_NAME} watchdog pressure message. The operator nudge changes the runner to interval 5s and delivery app-server-turn. Then send implementer exactly one post-resume test task with --correlation-key {CORRELATION_KEYS["post_resume"]}. The implementer runs the useful target test command without changing code and reports the passing result with --reply-to-sender.
+    14. Orchestrator completes the post-resume obligation, stops watchdog runner {WATCHDOG_RESUME_NAME}, records a final milestone that the post-resume test operation passed, checks watchdog is clean, and broadcasts a notice-only final summary with broadcast --from orchestrator --notice --exclude orchestrator.
 
     After reviewing completion notices, close them with inbox complete-replies or an explicit inbox complete command so the final inbox has no unfinished work.
 
@@ -436,9 +552,13 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     - The final passing test is run in the collector worktree, not only the implementer worktree.
     - Implementer produces a real git commit for the fix.
     - Collector verifies that commit in its own worktree.
+    - Operator sleep/resume happens after the first passing collector verification.
+    - The running {WATCHDOG_RESUME_NAME} watchdog is reinstantiated by resume, then operator-updated to 5s and app-server-turn delivery so it wakes orchestrator for the second operation.
+    - Implementer runs the target test again after resume and reports it passing without another code change.
+    - Orchestrator stops {WATCHDOG_RESUME_NAME} after the post-resume pass condition is met.
     - Orchestrator records the fix as the collector stable commit before collector verification.
     - Role communication uses tmux-team inbox messages and completion replies, not ad-hoc pane text.
-    - The run exercises status --verbose, inbox list --verbose, pane list --all, pane capture --lines/--offset, watchdog, watch start/update/complete, milestones, completion replies, stable approve/sync, broadcast --notice --only, and broadcast --notice --exclude.
+    - The run exercises operator show, status --verbose, dashboard --once, inbox list --verbose, pane list --all, pane capture --lines/--offset, watchdog report-only, watchdog run --once with app-server-turn pressure delivery, watchdog start/update/stop, sleep/resume, obligation start/update/complete, milestones, completion replies, stable approve/sync, broadcast --notice --only, and broadcast --notice --exclude.
     - Non-orchestrator roles do not write milestones.
 
     Boundaries:
@@ -476,6 +596,13 @@ def require_sql_count_exact(conn: sqlite3.Connection, table: str, where: str, ex
     count = int(row["count"])
     if count != expected:
         raise ScenarioError(f"expected exactly {expected} rows in {table} where {where}, got {count}")
+
+
+def require_sql_count_range(conn: sqlite3.Connection, table: str, where: str, *, minimum: int, maximum: int) -> None:
+    row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where}").fetchone()
+    count = int(row["count"])
+    if count < minimum or count > maximum:
+        raise ScenarioError(f"expected between {minimum} and {maximum} rows in {table} where {where}, got {count}")
 
 
 def git_output(repo: Path, *args: str) -> str:

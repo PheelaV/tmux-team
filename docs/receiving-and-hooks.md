@@ -129,6 +129,8 @@ If the wake says `N pending` with `N > 1`, the role follows its loaded tmux-team
 
 `--reply-to-sender` is the lazy conversational path: completion is recorded on the original message, and a reply message is queued back to the sender when the sender is a managed role. Use `--summary` for the concise result and `--body` or `--body-file` for evidence, test output, or handoff detail that should travel with the completion reply.
 
+Completion notices are local bookkeeping until the goal owner reconciles them. If a non-orchestrator role receives a completion notice that changes team-level state, stable commit readiness, blocker state, external run status, or an operator-visible result, it should forward a concise result to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`. Do not rely on a p2p completion notice alone to close team-level work.
+
 Broadcast is just repeated durable send:
 
 ```bash
@@ -178,12 +180,12 @@ Do not rely on `PostCompact` for role-contract injection. Current Codex hook beh
 Milestones are the broad operator timeline, separate from the inbox and scratchpads. Record only durable achievements or state changes:
 
 ```bash
-tmux-team milestone add --kind result --summary "Targeted tests passed" --tag test
+tmux-team milestone add --kind result --summary "Targeted tests passed" --subject-role implementer --tag test
 tmux-team milestone list --today
 tmux-team milestone list --since -4h
 ```
 
-By default, non-orchestrator roles do not write milestones. They complete their inbox message with evidence; the orchestrator records a milestone only if the result is important enough for the operator timeline.
+By default, non-orchestrator roles do not write milestones. They complete their inbox message with evidence; the orchestrator records a milestone only if the result is important enough for the operator timeline. Use `--subject-role` for role-scoped events and `--team` for team-wide events so dashboard filtering can distinguish writer from subject.
 
 The task body is not pasted into the pane or into tmux history. It remains in the durable message body file until the agent claims it.
 

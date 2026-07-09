@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
+import threading
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -14,14 +16,30 @@ from unittest.mock import patch
 from tmux_team.bootstrap import (
     BootstrapError,
     RoleBinding,
+    configure_session_truecolor,
     default_session_name,
     prepare_role_worktrees,
     role_startup_prompt,
     write_role_env_files,
 )
-from tmux_team.cli import infer_role_from_tmux_pane, main
+from tmux_team.cli import infer_role_from_tmux_pane, main, sleep_watchdog_interval
 from tmux_team.config import RoleConfig, TeamConfig, load_config
-from tmux_team.dashboard import DashboardSnapshot, textual_pane_preview_body
+from tmux_team.dashboard import (
+    DashboardSnapshot,
+    collect_dashboard_snapshot,
+    dashboard_codex_chips,
+    format_alert_line,
+    format_milestone_line,
+    format_plain_alert_line,
+    load_dashboard_preferences,
+    memory_lines,
+    obligation_lines,
+    role_shortcut_target,
+    save_dashboard_preferences,
+    textual_pane_preview_body,
+    watchdog_lines,
+)
+from tmux_team.lifecycle import start_resumed_watchdog_runner, tmux_window_exists
 from tmux_team.store import Store
 
 
@@ -109,6 +127,33 @@ runtime_dir = "{other_runtime}"
         self.assertIn("team: test-team", out)
         self.assertNotIn("other-team", out)
 
+    def test_operator_bind_updates_recovery_metadata(self) -> None:
+        code, out, err = self.run_cli(
+            "operator",
+            "bind",
+            "--pane",
+            "%0",
+            "--codex-thread-id",
+            "thread-operator",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
+        config = load_config(self.config)
+        self.assertEqual(config.operator.pane, "%0")
+        self.assertEqual(config.operator.codex_thread_id, "thread-operator")
+
+        code, out, err = self.run_cli("operator", "show")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
+
+    def test_operator_show_is_role_readable(self) -> None:
+        code, out, err = self.run_main("--config", str(self.config), "--actor", "orchestrator", "operator", "show")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator:", out)
+
     def test_role_env_defaults_inbox_role_and_sender(self) -> None:
         with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
             code, out, err = self.run_main(
@@ -174,20 +219,50 @@ runtime_dir = "{other_runtime}"
                 "romanize_syllable returned broken-a",
             )
             self.assertEqual(code, 0, err)
-            self.assertIn("evidence role=collector targeted test failed", out)
+            self.assertIn("evidence recorded_by=orchestrator subject=collector targeted test failed", out)
 
             code, out, err = self.run_main("milestone", "list", "--since", "-4h")
 
         self.assertEqual(code, 0, err)
         self.assertIn("targeted test failed", out)
+        self.assertIn("recorded_by=orchestrator subject=collector", out)
         self.assertIn("romanize_syllable returned broken-a", out)
         milestone_path = self.root / "runtime" / "milestones.jsonl"
         rows = [json.loads(line) for line in milestone_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(rows[0]["actor"], "orchestrator")
+        self.assertEqual(rows[0]["recorded_by"], "orchestrator")
         self.assertEqual(rows[0]["role"], "collector")
+        self.assertEqual(rows[0]["subject_roles"], ["collector"])
+        self.assertEqual(rows[0]["scope"], "role")
         self.assertEqual(rows[0]["kind"], "evidence")
         self.assertEqual(rows[0]["ref_id"], "msg_123")
         self.assertEqual(rows[0]["tags"], ["test"])
+
+    def test_milestone_subject_roles_and_team_scope(self) -> None:
+        code, out, err = self.run_cli(
+            "milestone",
+            "add",
+            "--summary",
+            "collector and trainer checkpointed",
+            "--subject-role",
+            "collector,trainer",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("recorded_by=operator subject=collector,trainer", out)
+
+        code, out, err = self.run_cli("milestone", "add", "--summary", "team checkpoint", "--team")
+        self.assertEqual(code, 0, err)
+        self.assertIn("recorded_by=operator subject=team", out)
+
+        code, out, err = self.run_cli("milestone", "list", "--subject-role", "trainer")
+        self.assertEqual(code, 0, err)
+        self.assertIn("collector and trainer checkpointed", out)
+        self.assertNotIn("team checkpoint", out)
+
+        code, out, err = self.run_cli("milestone", "list", "--team")
+        self.assertEqual(code, 0, err)
+        self.assertIn("team checkpoint", out)
+        self.assertNotIn("collector and trainer checkpointed", out)
 
     def test_milestone_list_today_can_print_json(self) -> None:
         code, out, err = self.run_cli("milestone", "add", "--summary", "goal completed", "--role", "orchestrator")
@@ -204,12 +279,14 @@ runtime_dir = "{other_runtime}"
             code, out, err = self.run_main("milestone", "add", "--summary", "orchestrator checkpoint")
 
         self.assertEqual(code, 0, err)
-        self.assertIn("role=orchestrator", out)
+        self.assertIn("subject=orchestrator", out)
 
         milestone_path = self.root / "runtime" / "milestones.jsonl"
         rows = [json.loads(line) for line in milestone_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(rows[0]["actor"], "orchestrator")
+        self.assertEqual(rows[0]["recorded_by"], "orchestrator")
         self.assertEqual(rows[0]["role"], "orchestrator")
+        self.assertEqual(rows[0]["subject_roles"], ["orchestrator"])
 
     def test_non_orchestrator_actor_cannot_record_milestone(self) -> None:
         with patch.dict(os.environ, {"TMUX_TEAM_CONFIG": str(self.config), "TMUX_TEAM_ROLE": "collector"}):
@@ -510,7 +587,7 @@ runtime_dir = "{other_runtime}"
         )
         self.assertEqual(code, 0, err)
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "start",
             "--role",
             "collector",
@@ -527,16 +604,235 @@ runtime_dir = "{other_runtime}"
 
         self.assertEqual(code, 0, err)
         self.assertIn("tmux-team dashboard", out)
-        self.assertIn("Roles", out)
+        self.assertIn("Roles [source=runtime-db]", out)
+        self.assertIn("Active Work [source=runtime-db todo]", out)
+        self.assertIn("Memory Excerpts [source=memory-excerpt prose]", out)
         self.assertIn("collector", out)
-        self.assertIn("todos", out)
+        self.assertIn("todo", out)
+        self.assertNotIn("fast=unknown", out)
         self.assertIn("collect dashboard evidence", out)
         self.assertIn("capture dashboard fixture", out)
         self.assertIn("monitor fixture", out)
         self.assertIn("Active task: dashboard", out)
         self.assertNotIn("Pane Preview", out)
 
+        code, out, err = self.run_cli("dashboard", "--once", "--role", "collector", "--no-pane-preview", "--provenance")
+        self.assertEqual(code, 0, err)
+        self.assertIn("source=runtime-db confidence=authoritative", out)
+
+    def test_dashboard_role_filter_scopes_watchdogs_and_notification_alerts(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.upsert_watchdog_runner(
+                conn,
+                name="collector-pressure",
+                state="running",
+                interval_seconds=60,
+                scope_role="collector",
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+            )
+            store.record_watchdog_runner_run(
+                conn,
+                name="trainer-pressure",
+                interval_seconds=60,
+                scope_role="trainer",
+                description=None,
+                goal=None,
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+                pane=None,
+                window=None,
+                process_id=None,
+                last_run_at="2026-01-01T00:00:00+00:00",
+                next_run_at="2026-01-01T00:01:00+00:00",
+                finding_count=1,
+                finding_summary="trainer finding",
+            )
+            store.record_notification(
+                conn,
+                None,
+                "collector",
+                "app-server-turn",
+                "notify_failed",
+                "collector notification failed",
+            )
+            store.record_notification(
+                conn,
+                None,
+                "trainer",
+                "app-server-turn",
+                "notify_failed",
+                "trainer notification failed",
+            )
+            conn.commit()
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
+
+        self.assertEqual(tuple(row["name"] for row in snapshot.watchdog_runners), ("collector-pressure",))
+        self.assertTrue(any("collector notification failed" in alert.text for alert in snapshot.alerts))
+        self.assertFalse(any("trainer notification failed" in alert.text for alert in snapshot.alerts))
+        self.assertFalse(any("trainer-pressure" in alert.text for alert in snapshot.alerts))
+
+    def test_dashboard_notification_alerts_move_stale_items_to_history(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.record_notification(
+                conn,
+                None,
+                "collector",
+                "app-server-turn",
+                "notify_failed",
+                "old collector notification failed",
+            )
+            conn.execute(
+                "UPDATE notifications SET created_at = ? WHERE details = ?",
+                ("2000-01-01T00:00:00+00:00", "old collector notification failed"),
+            )
+            store.record_notification(
+                conn,
+                None,
+                "collector",
+                "app-server-turn",
+                "notify_failed",
+                "recent collector notification failed",
+            )
+            conn.commit()
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
+
+        self.assertTrue(any("recent collector notification failed" in alert.text for alert in snapshot.alerts))
+        self.assertFalse(any("old collector notification failed" in alert.text for alert in snapshot.alerts))
+        old_alerts = [alert for alert in snapshot.alert_history if "old collector notification failed" in alert.text]
+        self.assertEqual(len(old_alerts), 1)
+        self.assertTrue(old_alerts[0].stale)
+        self.assertIn("age=", format_plain_alert_line(old_alerts[0]))
+        self.assertIn("at=2000-01-01T00:00:00+00:00", format_plain_alert_line(old_alerts[0]))
+        self.assertTrue(format_alert_line(old_alerts[0]).startswith("[dim]"))
+
+    def test_dashboard_role_filter_includes_implicit_orchestrator_watchdog_target(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.upsert_watchdog_runner(
+                conn,
+                name="team-pressure",
+                state="running",
+                interval_seconds=60,
+                scope_role=None,
+                notify_role=None,
+                delivery_method="app-server-turn",
+            )
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="orchestrator", include_pane_preview=False)
+
+        self.assertEqual(tuple(row["name"] for row in snapshot.watchdog_runners), ("team-pressure",))
+
+    def test_dashboard_role_shortcuts_use_displayed_role_order(self) -> None:
+        self.assertEqual(role_shortcut_target(("collector", "orchestrator", "trainer"), 1), "collector")
+        self.assertEqual(role_shortcut_target(("collector", "orchestrator", "trainer"), 2), "orchestrator")
+        self.assertIsNone(role_shortcut_target(("collector",), 2))
+
+    def test_dashboard_preferences_load_save_and_ignore_bad_files(self) -> None:
+        preferences = self.root / "runtime" / "dashboard_preferences.json"
+
+        save_dashboard_preferences(preferences, {"theme": "dracula", "verbosity": "verbose"})
+
+        self.assertEqual(load_dashboard_preferences(preferences), {"theme": "dracula", "verbosity": "verbose"})
+
+        preferences.write_text("{bad json", encoding="utf-8")
+        self.assertEqual(load_dashboard_preferences(preferences), {})
+
+        preferences.write_text('["dracula"]', encoding="utf-8")
+        self.assertEqual(load_dashboard_preferences(preferences), {})
+
+    def test_dashboard_codex_chips_show_known_structured_facts_only(self) -> None:
+        chips = dashboard_codex_chips(
+            {
+                "codex_yolo": True,
+                "codex_profile": "team-role",
+                "codex_model": "gpt-5.5",
+                "codex_reasoning_effort": "high",
+                "codex_config": ["sandbox=workspace-write", "approval=on-request"],
+                "codex_fast": "unknown",
+            }
+        )
+
+        self.assertEqual(chips, "yolo e:high m:gpt-5.5 p:team-role cfg:2")
+        self.assertNotIn("fast", chips)
+        self.assertEqual(dashboard_codex_chips({}), "-")
+
+    def test_dashboard_concise_rows_keep_key_state_without_full_detail(self) -> None:
+        obligation = {
+            "role": "collector",
+            "obligation_id": "obligation_1",
+            "state": "paused",
+            "summary": "collect evidence",
+            "updated": "2m",
+            "next_update": "2026-07-08T10:00:00+00:00",
+            "paused_reason": "waiting for review",
+            "review_at": "2026-07-08T11:00:00+00:00",
+            "overdue": False,
+            "review_due": False,
+        }
+        watchdog = {
+            "name": "collector-pressure",
+            "state": "running",
+            "interval": "1m",
+            "scope": "collector",
+            "notify_role": "orchestrator",
+            "delivery": "app-server-turn",
+            "last_run": "2026-07-08T09:00:00+00:00",
+            "next_run": "2026-07-08T09:01:00+00:00",
+            "findings": 0,
+            "summary": "healthy",
+            "safe_to_close": "no",
+            "pane": "%7",
+            "goal": "keep pressure on active work",
+        }
+
+        obligation_line = obligation_lines((obligation,), verbose=False)[0]
+        watchdog_line = watchdog_lines((watchdog,), verbose=False)[0]
+
+        self.assertIn(
+            "collector obligation_1 PAUSED review=2026-07-08T11:00:00+00:00 collect evidence", obligation_line
+        )
+        self.assertNotIn("updated=", obligation_line)
+        self.assertIn("collector-pressure running every=1m scope=collector", watchdog_line)
+        self.assertIn("notify=orchestrator", watchdog_line)
+        self.assertIn("next=2026-07-08T09:01:00+00:00", watchdog_line)
+        self.assertNotIn("delivery=", watchdog_line)
+        self.assertNotIn("goal=", watchdog_line)
+
+    def test_dashboard_memory_lines_include_scratchpad_mtime(self) -> None:
+        code, _out, err = self.run_cli("memory", "append", "--role", "collector", "--body", "Active task: timestamp")
+        self.assertEqual(code, 0, err)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
+
+        self.assertEqual(len(snapshot.memories), 1)
+        updated = str(snapshot.memories[0]["updated"])
+        self.assertRegex(updated, r"^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertIn(f"collector {updated}: Active task: timestamp", memory_lines(snapshot.memories)[0])
+
+    def test_dashboard_plain_milestone_lines_do_not_emit_rich_markup(self) -> None:
+        line = format_milestone_line(
+            {
+                "created_at": "2026-07-08T12:00:00+00:00",
+                "kind": "result",
+                "recorded_by": "orchestrator",
+                "scope": "team",
+                "summary": "tests passed",
+            }
+        )
+
+        self.assertEqual(
+            line,
+            "2026-07-08T12:00:00+00:00 [result] recorded_by=orchestrator subject=team tests passed",
+        )
+        self.assertNotIn("[green]", line)
+        self.assertNotIn("[bold", line)
+
     def test_textual_pane_preview_body_handles_enabled_previews(self) -> None:
+        long_line = "long-" + ("x" * 180)
         snapshot = DashboardSnapshot(
             team="test-team",
             config_path=str(self.config),
@@ -544,7 +840,7 @@ runtime_dir = "{other_runtime}"
             collected_at="2026-07-04T12:00:00+00:00",
             roles=(),
             active_messages=(),
-            watches=(),
+            obligations=(),
             watchdog_runners=(),
             milestones=(),
             memories=(),
@@ -552,15 +848,29 @@ runtime_dir = "{other_runtime}"
                 {
                     "role": "collector",
                     "pane": "%7",
-                    "text": "first\nsecond\nthird",
+                    "source": "pane-capture",
+                    "screen_source": "screen-text-heuristic",
+                    "confidence": "best-effort",
+                    "dead": False,
+                    "in_mode": True,
+                    "current_command": "codex",
+                    "text": f"first\n[red]second[/red]\n{long_line}",
                 },
             ),
             alerts=(),
+            alert_history=(),
         )
 
         lines = textual_pane_preview_body(snapshot, include_pane_preview=True)
 
-        self.assertEqual(lines, ["collector %7:", "  first", "  second", "  third"])
+        rendered = "\n".join(lines)
+        self.assertIn("collector %7", lines[0])
+        self.assertIn("cmd=codex dead=False copy=True", lines[0])
+        self.assertIn("collector", rendered)
+        self.assertIn("%7", rendered)
+        self.assertIn("cmd=codex dead=False copy=True", rendered)
+        self.assertIn("[red]second[/red]", rendered)
+        self.assertIn(long_line, rendered)
         self.assertEqual(textual_pane_preview_body(snapshot, include_pane_preview=False), ["disabled"])
 
     def test_expired_claim_is_visible_and_reclaimable(self) -> None:
@@ -759,6 +1069,83 @@ runtime_dir = "{other_runtime}"
         self.assertIn("findings=1", out)
         self.assertIn("safe_to_close=yes", out)
 
+    def test_watchdog_once_delivery_creates_pressure_message_and_suppresses_duplicate(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "collector",
+            "--from",
+            "orchestrator",
+            "--priority",
+            "urgent",
+            "--summary",
+            "collector pressure source",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        urgent_id = out.split()[0]
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "run",
+            "--name",
+            "pressure",
+            "--once",
+            "--role",
+            "collector",
+            "--notify-role",
+            "orchestrator",
+            "--delivery",
+            "app-server-turn",
+            "--description",
+            "Collector pressure loop",
+            "--goal",
+            "Escalate stale collector state",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=urgent_pending role=collector ref={urgent_id}", out)
+        self.assertIn("pressure: ", out)
+        self.assertIn("to=orchestrator priority=urgent", out)
+        self.assertIn("correlation_key=watchdog:pressure:collector:to:orchestrator", out)
+        self.assertIn("notify_failed=role has no app-server endpoint/thread binding", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--verbose")
+        self.assertEqual(code, 0, err)
+        self.assertIn("from=watchdog:pressure to=orchestrator priority=urgent", out)
+        self.assertIn("summary=Watchdog findings: urgent_pending collector", out)
+        self.assertIn("correlation_key=watchdog:pressure:collector:to:orchestrator", out)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "run",
+            "--name",
+            "pressure",
+            "--once",
+            "--role",
+            "collector",
+            "--notify-role",
+            "orchestrator",
+            "--delivery",
+            "app-server-turn",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("pressure_skipped: active message", out)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            count = conn.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE sender = 'watchdog:pressure'
+                  AND recipient = 'orchestrator'
+                  AND correlation_key = 'watchdog:pressure:collector:to:orchestrator'
+                """
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
     def test_watchdog_start_stop_and_status_use_visible_tmux_window(self) -> None:
         fake_dir = self.root / "watchdog-bin"
         fake_dir.mkdir()
@@ -771,7 +1158,7 @@ if [ "$1" = "new-window" ]; then
   printf '%%9\\n'
   exit 0
 fi
-if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "kill-pane" ]; then
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "select-layout" ] || [ "$1" = "kill-pane" ]; then
   exit 0
 fi
 exit 9
@@ -796,12 +1183,13 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("default state=running interval=1m scope=team", out)
         self.assertIn("pane=%9", out)
-        self.assertIn("tmux: tt-test:tt-watchdog-default pane=%9", out)
+        self.assertIn("tmux: tt-test:tt-watchdogs pane=%9", out)
         logged = log_path.read_text(encoding="utf-8")
-        self.assertIn("new-window -d -P -F #{pane_id} -t tt-test -n tt-watchdog-default", logged)
+        self.assertIn("new-window -d -P -F #{pane_id} -t tt-test -n tt-watchdogs", logged)
         self.assertIn("watchdog run --name default --interval 1m", logged)
         self.assertIn("set-option -p -t %9 @tmux-team-watchdog default", logged)
         self.assertIn("select-pane -t %9 -T tt-watchdog-default", logged)
+        self.assertIn("select-layout -t tt-test:tt-watchdogs tiled", logged)
 
         code, out, err = self.run_cli("status", "--verbose")
         self.assertEqual(code, 0, err)
@@ -814,6 +1202,141 @@ exit 9
         self.assertIn("safe_to_close=yes", out)
         logged = log_path.read_text(encoding="utf-8")
         self.assertIn("kill-pane -t %9", logged)
+
+    def test_watchdog_start_reuses_shared_watchdog_window(self) -> None:
+        fake_dir = self.root / "watchdog-shared-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "watchdog-shared-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "list-windows" ]; then
+  printf 'tt-control\\ntt-watchdogs\\n'
+  exit 0
+fi
+if [ "$1" = "split-window" ]; then
+  printf '%%10\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "select-layout" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "second",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("second state=running interval=1m scope=team", out)
+        self.assertIn("tmux: tt-test:tt-watchdogs pane=%10", out)
+        logged = log_path.read_text(encoding="utf-8")
+        self.assertIn("split-window -d -P -F #{pane_id} -t tt-test:tt-watchdogs", logged)
+        self.assertNotIn("new-window", logged)
+        self.assertIn("select-pane -t %10 -T tt-watchdog-second", logged)
+        self.assertIn("select-layout -t tt-test:tt-watchdogs tiled", logged)
+
+    def test_watchdog_update_changes_runner_config(self) -> None:
+        fake_dir = self.root / "watchdog-update-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "pressure",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+            "--description",
+            "old purpose",
+            "--goal",
+            "old goal",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "update",
+            "pressure",
+            "--interval",
+            "2m",
+            "--role",
+            "collector",
+            "--notify-role",
+            "collector",
+            "--delivery",
+            "app-server-turn",
+            "--description",
+            "collector pressure",
+            "--goal",
+            "escalate collector obligations",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("pressure state=running interval=2m scope=collector", out)
+        self.assertIn("notify_role=collector", out)
+        self.assertIn("delivery=app-server-turn", out)
+        self.assertIn("description=collector pressure", out)
+        self.assertIn("goal=escalate collector obligations", out)
+
+        code, out, err = self.run_cli("watchdog", "status", "pressure")
+        self.assertEqual(code, 0, err)
+        self.assertIn("pressure state=running interval=2m scope=collector", out)
+        self.assertIn("notify_role=collector", out)
+
+    def test_watchdog_interval_sleep_wakes_on_interval_update(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.upsert_watchdog_runner(conn, name="default", state="running", interval_seconds=60)
+
+            result: list[bool] = []
+
+            def wait_for_interval() -> None:
+                with store.connect() as thread_conn:
+                    result.append(sleep_watchdog_interval(store, thread_conn, name="default", interval_seconds=60))
+
+            thread = threading.Thread(
+                target=wait_for_interval,
+            )
+            thread.start()
+            store.update_watchdog_runner(conn, name="default", interval_seconds=5)
+            thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [True])
 
     def test_watchdog_start_refuses_duplicate_running_runner(self) -> None:
         fake_dir = self.root / "watchdog-duplicate-bin"
@@ -865,6 +1388,68 @@ exit 9
         self.assertEqual(out, "")
         self.assertIn("watchdog runner default is already running; stop it first", err)
 
+    def test_schema_migrates_legacy_watches_to_obligations(self) -> None:
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        db_path = runtime / "team.sqlite"
+        legacy = sqlite3.connect(db_path)
+        try:
+            legacy.execute(
+                """
+                CREATE TABLE watches (
+                  id TEXT PRIMARY KEY,
+                  role TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  summary TEXT NOT NULL,
+                  current_summary TEXT NOT NULL,
+                  created_by TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  last_update_at TEXT NOT NULL,
+                  next_update_at TEXT,
+                  completed_at TEXT
+                )
+                """
+            )
+            legacy.execute(
+                """
+                INSERT INTO watches(
+                  id, role, status, summary, current_summary, created_by,
+                  created_at, updated_at, last_update_at, next_update_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "watch_legacy",
+                    "collector",
+                    "blocked",
+                    "legacy watch",
+                    "waiting for verifier",
+                    "operator",
+                    "2026-07-01T00:00:00+00:00",
+                    "2026-07-01T00:05:00+00:00",
+                    "2026-07-01T00:05:00+00:00",
+                    "2026-07-01T00:10:00+00:00",
+                    None,
+                ),
+            )
+            legacy.execute("PRAGMA user_version = 4")
+            legacy.commit()
+        finally:
+            legacy.close()
+
+        code, out, err = self.run_cli("obligation", "list", "--role", "collector", "--state", "blocked")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("watch_legacy role=collector state=blocked", out)
+        self.assertIn("next_update_at=2026-07-01T00:10:00+00:00", out)
+        self.assertIn("summary=waiting for verifier", out)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            count = conn.execute("SELECT COUNT(*) AS n FROM obligations WHERE id = 'watch_legacy'").fetchone()["n"]
+        self.assertEqual(count, 1)
+
     def test_dashboard_renders_watchdog_runner_state(self) -> None:
         code, out, err = self.run_cli(
             "watchdog",
@@ -884,9 +1469,9 @@ exit 9
         self.assertIn("Watchdog Runners", out)
         self.assertIn("demo stopped interval=1s scope=team", out)
 
-    def test_watch_lifecycle_and_status_verbose(self) -> None:
+    def test_obligation_lifecycle_and_status_verbose(self) -> None:
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "start",
             "--role",
             "collector",
@@ -896,16 +1481,16 @@ exit 9
             "5m",
         )
         self.assertEqual(code, 0, err)
-        watch_id = out.split()[0]
-        self.assertTrue(watch_id.startswith("watch_"))
+        obligation_id = out.split()[0]
+        self.assertTrue(obligation_id.startswith("obligation_"))
         self.assertIn("role=collector", out)
         self.assertIn("state=active", out)
         self.assertIn("next_update_at=", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "update",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--summary",
@@ -918,14 +1503,14 @@ exit 9
 
         code, out, err = self.run_cli("status", "--verbose")
         self.assertEqual(code, 0, err)
-        self.assertIn("watches:", out)
-        self.assertIn(f"{watch_id} role=collector state=active", out)
+        self.assertIn("obligations:", out)
+        self.assertIn(f"{obligation_id} role=collector state=active", out)
         self.assertIn("summary=heartbeat ok", out)
 
         code, out, err = self.run_cli(
-            "watch",
+            "obligation",
             "complete",
-            watch_id,
+            obligation_id,
             "--role",
             "collector",
             "--status",
@@ -936,9 +1521,174 @@ exit 9
         self.assertEqual(code, 0, err)
         self.assertIn("state=done", out)
 
-        code, out, err = self.run_cli("watch", "list", "--role", "collector", "--state", "done")
+        code, out, err = self.run_cli("obligation", "list", "--role", "collector", "--state", "done")
         self.assertEqual(code, 0, err)
         self.assertIn("summary=run terminalized", out)
+
+    def test_obligation_pause_resume_and_review_due(self) -> None:
+        code, out, err = self.run_cli(
+            "obligation",
+            "start",
+            "--role",
+            "collector",
+            "--summary",
+            "monitor slow verification",
+            "--next-update-in",
+            "1m",
+        )
+        self.assertEqual(code, 0, err)
+        obligation_id = out.split()[0]
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            conn.execute(
+                "UPDATE obligations SET next_update_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", obligation_id),
+            )
+            conn.commit()
+
+        code, out, err = self.run_cli("watchdog", "--obligation-grace-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=obligation_overdue role=collector ref={obligation_id}", out)
+
+        code, out, err = self.run_cli(
+            "obligation",
+            "pause",
+            obligation_id,
+            "--role",
+            "collector",
+            "--reason",
+            "blocked by prerequisite",
+            "--review-at",
+            "2099-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=paused", out)
+        self.assertIn("reason=blocked by prerequisite", out)
+        self.assertIn("review_at=2099-01-01T00:00:00+00:00", out)
+
+        code, out, err = self.run_cli("watchdog", "--obligation-grace-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("kind=obligation_overdue", out)
+        self.assertNotIn("kind=obligation_review_due", out)
+
+        code, out, err = self.run_cli(
+            "obligation",
+            "pause",
+            obligation_id,
+            "--role",
+            "collector",
+            "--reason",
+            "review now",
+            "--review-at",
+            "2000-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("watchdog", "--obligation-grace-seconds", "0")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"kind=obligation_review_due role=collector ref={obligation_id}", out)
+        self.assertNotIn("kind=obligation_overdue", out)
+
+        code, out, err = self.run_cli(
+            "obligation",
+            "resume",
+            obligation_id,
+            "--role",
+            "collector",
+            "--summary",
+            "prerequisite resolved",
+            "--next-update-in",
+            "5m",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("state=active", out)
+        self.assertIn("summary=prerequisite resolved", out)
+        self.assertNotIn("reason=", out)
+
+    def test_watchdog_pause_resume_and_dashboard_render_paused_state(self) -> None:
+        fake_dir = self.root / "watchdog-pause-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "new-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "start",
+            "--name",
+            "default",
+            "--interval",
+            "1m",
+            "--session",
+            "tt-test",
+            "--tmux-bin",
+            str(tmux),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=running", out)
+
+        code, out, err = self.run_cli(
+            "watchdog",
+            "pause",
+            "default",
+            "--reason",
+            "operator review",
+            "--review-at",
+            "2000-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=paused", out)
+        self.assertIn("reason=operator review", out)
+        self.assertIn("safe_to_close=no", out)
+
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            row = store.record_watchdog_runner_run(
+                conn,
+                name="default",
+                interval_seconds=60,
+                scope_role=None,
+                description=None,
+                goal=None,
+                notify_role=None,
+                delivery_method="report-only",
+                pane="%9",
+                window="tt-test:tt-watchdogs",
+                process_id=123,
+                last_run_at="2026-01-01T00:00:00+00:00",
+                next_run_at="2026-01-01T00:01:00+00:00",
+                finding_count=1,
+                finding_summary="should not overwrite pause",
+            )
+        self.assertEqual(row["state"], "paused")
+        self.assertEqual(row["paused_reason"], "operator review")
+
+        code, out, err = self.run_cli("watchdog")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kind=watchdog_runner_review_due role=team ref=default", out)
+
+        code, out, err = self.run_cli("dashboard", "--once", "--no-pane-preview")
+        self.assertEqual(code, 0, err)
+        self.assertIn("default paused interval=1m scope=team", out)
+        self.assertIn("reason=operator review", out)
+
+        code, out, err = self.run_cli("watchdog", "resume", "default")
+        self.assertEqual(code, 0, err)
+        self.assertIn("default state=running", out)
+        self.assertNotIn("reason=operator review", out)
 
     def test_send_correlation_warns_about_active_duplicates(self) -> None:
         code, out, err = self.run_cli(
@@ -1407,7 +2157,7 @@ if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ]; then
 fi
 if [ "$1" = "display-message" ]; then
   case "$4" in
-    %9) printf 'tt-test:tt-watchdog-default\\n'; exit 0 ;;
+    %9) printf 'tt-test:tt-watchdogs\\n'; exit 0 ;;
   esac
 fi
 if [ "$1" = "list-panes" ]; then
@@ -1418,8 +2168,8 @@ if [ "$1" = "list-panes" ]; then
     test:orchestrator)
       printf '%%2\\ttest:orchestrator.0\\tcodex\\t/tmp/orchestrator\\n'
       ;;
-    tt-test:tt-watchdog-default)
-      printf '%%9\\ttt-test:tt-watchdog-default.0\\tzsh\\t/tmp/project\\n'
+    tt-test:tt-watchdogs)
+      printf '%%9\\ttt-test:tt-watchdogs.0\\tzsh\\t/tmp/project\\n'
       ;;
   esac
   exit 0
@@ -1447,7 +2197,7 @@ exit 9
 
         self.assertEqual(code, 0, err)
         self.assertIn(
-            "role=- managed=false pane=tt-test:tt-watchdog-default.0 pane_id=%9 "
+            "role=- managed=false pane=tt-test:tt-watchdogs.0 pane_id=%9 "
             "command=zsh path=/tmp/project watchdog=default infrastructure=watchdog",
             out,
         )
@@ -2355,6 +3105,9 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("tmux new-session -d -s tt-bootstrap -n tt-control", out)
+        self.assertIn("tmux set-option -t tt-bootstrap default-terminal tmux-256color", out)
+        self.assertIn("tmux set-option -as -t tt-bootstrap terminal-features", out)
+        self.assertIn("tmux set-environment -t tt-bootstrap COLORTERM truecolor", out)
         self.assertIn("tmux new-window -t tt-bootstrap -n tt-app-server", out)
         self.assertIn("tmux new-window -t tt-bootstrap -n tt-agents", out)
         self.assertIn("tmux split-window -t tt-bootstrap:tt-agents", out)
@@ -2377,6 +3130,56 @@ can_notify = ["orchestrator"]
         self.assertIn('notify_method = "app-server-turn"', out)
         self.assertIn("session: tt-bootstrap", out)
         self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_can_disable_truecolor(self) -> None:
+        generated_config = self.root / ".tmux-team" / "generated.toml"
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-bootstrap-no-color",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "orchestrator",
+            "--no-truecolor",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("tmux-256color", out)
+        self.assertNotIn("terminal-features", out)
+        self.assertNotIn("COLORTERM truecolor", out)
+        self.assertFalse(generated_config.exists())
+
+    def test_configure_session_truecolor_falls_back_for_old_tmux(self) -> None:
+        fake_dir = self.root / "truecolor-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "truecolor-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$5" = "terminal-features" ]; then
+  exit 1
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        configure_session_truecolor(str(tmux), "tt")
+
+        log = log_path.read_text(encoding="utf-8")
+        self.assertIn("set-option -t tt default-terminal tmux-256color", log)
+        self.assertIn("set-option -as -t tt terminal-features ,*:RGB", log)
+        self.assertIn("set-option -as -t tt terminal-overrides ,*:Tc", log)
+        self.assertIn("set-environment -t tt COLORTERM truecolor", log)
 
     def test_bootstrap_dry_run_uses_runtime_home_env(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"
@@ -2490,6 +3293,8 @@ can_notify = ["orchestrator"]
         self.assertIn('codex_profile = "collector-profile"', out)
         self.assertIn("codex_config = [", out)
         self.assertIn('"model_reasoning_effort=\\"high\\""', out)
+        self.assertIn("[operator]", out)
+        self.assertIn('pane = "tt-bootstrap-options:tt-control.0"', out)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_accepts_custom_role_memory(self) -> None:
@@ -2683,6 +3488,23 @@ can_notify = ["orchestrator"]
 
     def test_sleep_snapshots_and_tears_down_managed_windows(self) -> None:
         self.write_remote_tui_config()
+        config = load_config(self.config)
+        store = Store(config)
+        with store.connect() as conn:
+            store.sync_roles(conn, config.roles.values())
+            store.upsert_watchdog_runner(
+                conn,
+                name="live",
+                state="running",
+                interval_seconds=60,
+                scope_role="implementer",
+                description="Live recovery watchdog",
+                goal="Keep collector pressure alive",
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+                pane="tt:tt-watchdogs.0",
+                window="tt:tt-watchdogs",
+            )
         fake_dir, log_path = self.write_fake_lifecycle_tmux()
 
         with patch.dict(os.environ, {"PATH": f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"}):
@@ -2690,22 +3512,41 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("snapshot:", out)
+        self.assertIn("watchdogs: 1", out)
         self.assertIn("paused_roles: yes", out)
         log = log_path.read_text(encoding="utf-8")
         self.assertIn("kill-window -t @2", log)
         self.assertIn("kill-window -t @3", log)
+        self.assertIn("kill-window -t @4", log)
         self.assertNotIn("kill-window -t @1", log)
 
         latest = self.root / "runtime" / "sleeps" / "latest.toml"
         snapshot = tomllib.loads(latest.read_text(encoding="utf-8"))
         self.assertEqual(snapshot["tmux"]["session"], "tt")
+        self.assertEqual(snapshot["operator"]["pane"], "%0")
+        self.assertEqual(snapshot["operator"]["codex_thread_id"], "thread-operator")
         self.assertEqual(snapshot["roles"]["orchestrator"]["app_server"]["thread_id"], "thread-orch")
+        self.assertTrue(snapshot["roles"]["orchestrator"]["capabilities"]["codex_yolo"])
+        self.assertEqual(snapshot["roles"]["orchestrator"]["capabilities"]["codex_model"], "gpt-5.5")
         self.assertEqual(snapshot["roles"]["implementer"]["tmux"]["window_id"], "@3")
+        self.assertEqual(snapshot["watchdogs"]["live"]["interval_seconds"], 60)
+        self.assertEqual(snapshot["watchdogs"]["live"]["notify_role"], "orchestrator")
+        self.assertEqual(snapshot["watchdogs"]["live"]["tmux"]["window_id"], "@4")
 
         code, out, err = self.run_cli("status")
         self.assertEqual(code, 0, err)
         self.assertIn("orchestrator: state=paused", out)
         self.assertIn("implementer: state=paused", out)
+
+    def test_status_verbose_shows_operator_and_codex_recovery_settings(self) -> None:
+        self.write_remote_tui_config()
+
+        code, out, err = self.run_cli("status", "--verbose")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
+        self.assertIn("codex: yolo=yes model=gpt-5.5 effort=xhigh fast=unknown", out)
+        self.assertIn("codex: profile=implementer-profile config_overrides=1 fast=unknown", out)
 
     def test_resume_dry_run_plans_codex_resume_from_sleep_snapshot(self) -> None:
         self.write_remote_tui_config()
@@ -2720,12 +3561,123 @@ can_notify = ["orchestrator"]
         self.assertIn("roles: 2", out)
         self.assertIn("orchestrator: thread_id=thread-orch", out)
         self.assertIn("implementer: thread_id=thread-impl", out)
+        self.assertIn("codex_launch_settings: restored=implementer,orchestrator fast=unknown", out)
         self.assertIn("codex resume", out)
+        self.assertIn("tmux set-option -t tt default-terminal tmux-256color", out)
+        self.assertIn("tmux set-option -as -t tt terminal-features", out)
+        self.assertIn("tmux set-environment -t tt COLORTERM truecolor", out)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", out)
+        self.assertIn("--model gpt-5.5", out)
+        self.assertIn('model_reasoning_effort="xhigh"', out)
+        self.assertIn("--profile implementer-profile", out)
+        self.assertIn('model_reasoning_effort="high"', out)
         self.assertIn("--remote ws://127.0.0.1:4500 thread-orch", out)
         self.assertIn("--remote ws://127.0.0.1:4500 thread-impl", out)
         self.assertIn("tmux new-window -t tt -n tt-agents", out)
         self.assertIn("tmux split-window -t tt:tt-agents", out)
         self.assertIn("dry-run: no tmux panes created", out)
+
+    def test_resume_dry_run_can_disable_truecolor(self) -> None:
+        self.write_remote_tui_config()
+        self.write_sleep_snapshot()
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server", "--no-truecolor")
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("tmux-256color", out)
+        self.assertNotIn("terminal-features", out)
+        self.assertNotIn("COLORTERM truecolor", out)
+
+    def test_resume_dry_run_reinstantiates_watchdogs_from_sleep_snapshot(self) -> None:
+        self.write_remote_tui_config()
+        self.write_sleep_snapshot(include_watchdog=True)
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("watchdogs: 1", out)
+        self.assertIn("watchdog_panes:", out)
+        self.assertIn("live: pane=tt:tt-watchdogs.0", out)
+        self.assertIn("-n tt-watchdogs", out)
+        self.assertIn("watchdog run --name live --interval 1m", out)
+        self.assertIn("--delivery app-server-turn", out)
+        self.assertIn("--notify-role orchestrator", out)
+
+    def test_resumed_watchdog_reuses_existing_watchdog_window(self) -> None:
+        fake_dir = self.root / "resume-watchdog-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "resume-watchdog-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$1" = "list-windows" ]; then
+  printf 'tt-control\\ntt-watchdogs\\n'
+  exit 0
+fi
+if [ "$1" = "split-window" ]; then
+  printf '%%9\\n'
+  exit 0
+fi
+if [ "$1" = "new-window" ]; then
+  printf '%%8\\n'
+  exit 0
+fi
+if [ "$1" = "set-option" ] || [ "$1" = "select-pane" ] || [ "$1" = "select-layout" ]; then
+  exit 0
+fi
+exit 9
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        use_existing = tmux_window_exists(str(tmux), "tt", "tt-watchdogs")
+        pane = start_resumed_watchdog_runner(
+            str(tmux),
+            "tt",
+            self.config,
+            self.root,
+            "live",
+            {"interval_seconds": 60, "delivery_method": "report-only"},
+            use_existing_window=use_existing,
+        )
+
+        self.assertEqual(pane, "%9")
+        log = log_path.read_text(encoding="utf-8")
+        self.assertIn("list-windows -t tt -F #{window_name}", log)
+        self.assertIn("split-window -d -P -F #{pane_id} -t tt:tt-watchdogs", log)
+        self.assertNotIn("new-window", log)
+
+    def test_resume_dry_run_recovers_from_runtime_state_without_sleep_snapshot(self) -> None:
+        self.write_remote_tui_config()
+        config = load_config(self.config)
+        store = Store(config)
+        with store.connect() as conn:
+            store.sync_roles(conn, config.roles.values())
+            store.upsert_watchdog_runner(
+                conn,
+                name="pressure",
+                state="running",
+                interval_seconds=5,
+                goal="Recover pressure after abrupt shutdown",
+                notify_role="orchestrator",
+                delivery_method="app-server-turn",
+                pane="tt:tt-watchdogs.0",
+                window="tt:tt-watchdogs",
+            )
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("snapshot:", out)
+        self.assertIn("recovery_latest.toml", out)
+        self.assertIn("roles: 2", out)
+        self.assertIn("watchdogs: 1", out)
+        self.assertIn("orchestrator: thread_id=thread-orch", out)
+        self.assertIn("implementer: thread_id=thread-impl", out)
+        self.assertIn("watchdog run --name pressure --interval 5s", out)
+        self.assertIn("Recover pressure after abrupt shutdown", out)
 
     def test_app_server_wake_prompt_tells_role_to_drain_multiple_messages(self) -> None:
         store = Store(TeamConfig(name="test", runtime_dir=self.root / "runtime", roles={}))
@@ -2847,6 +3799,10 @@ exit 0
 name = "test-team"
 runtime_dir = "{runtime}"
 
+[operator]
+pane = "%0"
+codex_thread_id = "thread-operator"
+
 [roles.orchestrator]
 mode = "app_server_remote_tui"
 state = "active"
@@ -2855,6 +3811,9 @@ worktree = "{orchestrator}"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-orch"
+codex_yolo = true
+codex_model = "gpt-5.5"
+codex_reasoning_effort = "xhigh"
 
 [roles.implementer]
 mode = "app_server_remote_tui"
@@ -2864,15 +3823,42 @@ worktree = "{implementer}"
 notify_method = "app-server-turn"
 app_server_endpoint = "ws://127.0.0.1:4500"
 codex_thread_id = "thread-impl"
+codex_profile = "implementer-profile"
+codex_config = ['model_reasoning_effort="high"']
 """,
             encoding="utf-8",
         )
 
-    def write_sleep_snapshot(self) -> Path:
+    def write_sleep_snapshot(self, *, include_watchdog: bool = False) -> Path:
         sleep_dir = self.root / "runtime" / "sleeps"
         sleep_dir.mkdir(parents=True)
         orchestrator = self.root / "orchestrator"
         implementer = self.root / "implementer"
+        watchdog_block = ""
+        if include_watchdog:
+            watchdog_block = """
+[watchdogs.live]
+state = "running"
+interval_seconds = 60
+scope_role = "implementer"
+description = "Live recovery watchdog"
+goal = "Keep collector pressure alive"
+notify_role = "orchestrator"
+delivery_method = "app-server-turn"
+pane = "tt:tt-watchdogs.0"
+window = "tt:tt-watchdogs"
+
+[watchdogs.live.tmux]
+target = "tt:tt-watchdogs.0"
+session = "tt"
+window_id = "@4"
+window_name = "tt-watchdogs"
+pane_id = "%12"
+pane_title = "tt-watchdog-live"
+pane_dead = false
+current_command = "python"
+live = true
+"""
         snapshot = sleep_dir / "latest.toml"
         snapshot.write_text(
             f"""schema_version = 1
@@ -2887,6 +3873,10 @@ project_root = "{self.root}"
 config_path = "{self.config}"
 runtime_dir = "{self.root / "runtime"}"
 
+[operator]
+pane = "%0"
+codex_thread_id = "thread-operator"
+
 [tmux]
 session = "tt"
 kill_session = false
@@ -2899,6 +3889,9 @@ worktree = "{orchestrator}"
 
 [roles.orchestrator.capabilities]
 notify_method = "app-server-turn"
+codex_yolo = true
+codex_model = "gpt-5.5"
+codex_reasoning_effort = "xhigh"
 
 [roles.orchestrator.app_server]
 endpoint = "ws://127.0.0.1:4500"
@@ -2924,6 +3917,8 @@ worktree = "{implementer}"
 
 [roles.implementer.capabilities]
 notify_method = "app-server-turn"
+codex_profile = "implementer-profile"
+codex_config = ['model_reasoning_effort="high"']
 
 [roles.implementer.app_server]
 endpoint = "ws://127.0.0.1:4500"
@@ -2940,6 +3935,7 @@ pane_title = "tt-implementer"
 pane_dead = false
 current_command = "codex"
 live = true
+{watchdog_block}
 """,
             encoding="utf-8",
         )
@@ -2957,12 +3953,13 @@ if [ "$1" = "display-message" ] && [ "$2" = "-p" ]; then
   case "$4" in
     tt:tt-agents.0) printf 'tt\\t@3\\ttt-agents\\t%%10\\ttt-orchestrator\\t0\\tbash\\n'; exit 0 ;;
     tt:tt-agents.1) printf 'tt\\t@3\\ttt-agents\\t%%11\\ttt-implementer\\t0\\tbash\\n'; exit 0 ;;
+    tt:tt-watchdogs.0) printf 'tt\\t@4\\ttt-watchdogs\\t%%12\\ttt-watchdog-live\\t0\\tbash\\n'; exit 0 ;;
   esac
   printf 'unknown target %s\\n' "$4" >&2
   exit 1
 fi
 if [ "$1" = "list-windows" ]; then
-  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n'
+  printf '@1\\ttt-control\\n@2\\ttt-app-server\\n@3\\ttt-agents\\n@4\\ttt-watchdogs\\n'
   exit 0
 fi
 if [ "$1" = "kill-window" ]; then

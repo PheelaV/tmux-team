@@ -29,27 +29,43 @@ The dashboard should combine existing supervision surfaces rather than inventing
 
 - roles and message counts from SQLite;
 - active messages and open todos from SQLite;
-- watches from SQLite;
+- obligations from SQLite;
 - milestones from `milestones.jsonl`;
 - latest scratchpad excerpts from role memory files;
 - bounded pane tails from tmux when preview is enabled;
 - recent notification failures/deferred notices as alerts.
 
-It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete watch, or inspect full message body can be added later behind explicit commands.
+Dashboard sections must label provenance. SQLite-backed rows are authoritative runtime state. Scratchpad excerpts are prose snapshots, not current-state truth. Pane previews are best-effort tmux captures and any screen-derived status is only a UI hint. Textual rendering must escape arbitrary pane and memory text as plain text.
 
-## Watches
+The live dashboard should stay keyboard-first: refresh/help, role-filter shortcuts, team overview, and section jump keys must be available without mouse input.
+
+It is deliberately not a control surface yet. Follow-up actions such as notify, focus pane, complete an obligation, or inspect full message body can be added later behind explicit commands.
+
+## Recovery Fidelity
+
+Operator mapping metadata belongs in `[operator]`:
+
+- `pane` records the control pane target or pane id;
+- `codex_thread_id` records the operator Codex thread id when known;
+- the operator table is recovery metadata, not a managed role.
+
+Use `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>` when the operator thread id is known. `tmux-team sleep` snapshots operator metadata, configured role Codex launch settings, and running watchdog runners. `tmux-team resume` replays known role model, reasoning effort, profile, raw Codex config, and YOLO settings, then reinstantiates running watchdog panes. If a host or tmux session ended abruptly before sleep, resume can build a recovery snapshot from durable `team.toml` and SQLite runtime state. Live TUI-only state such as `/fast` remains unknown unless Codex exposes it as explicit config.
+
+## Obligations
 
 Long-running monitoring must not be hidden as an indefinitely acknowledged inbox task.
 
-`tmux-team watch` is the durable role-owned state for ongoing supervision:
+`tmux-team obligation` is the durable role-owned state for ongoing commitments:
 
-- `watch start` creates an active watch with a summary and optional next expected update.
-- `watch update` records heartbeat or blocker state as `active` or `blocked`.
-- `watch complete` terminalizes the watch as `done`, `failed`, or `cancelled`.
-- `watch list` defaults to active and blocked watches.
-- `status --verbose` shows active watches alongside active inbox messages.
+- `obligation start` creates an active obligation with a summary, optional goal, and optional next expected update.
+- `obligation update` records update or blocker state as `active` or `blocked`.
+- `obligation pause` records intentional deferral with a reason and optional review time without counting as overdue.
+- `obligation resume` restores a paused obligation with a fresh summary and next expected update.
+- `obligation complete` terminalizes the obligation as `done`, `failed`, or `cancelled`.
+- `obligation list` defaults to active, blocked, and paused obligations.
+- `status --verbose` shows visible obligations alongside active inbox messages.
 
-Watches are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
+Obligations are not message transport. Assignment, handoff, evidence, and completion replies still use inbox messages.
 
 ## Unblock-First Routing
 
@@ -99,14 +115,19 @@ Bare `tmux-team watchdog` remains a single-shot report. It reports:
 - stale claimed messages;
 - claimed-but-not-acknowledged messages;
 - old acknowledged tasks;
-- overdue watches.
+- overdue obligations;
+- review-due paused obligations and watchdog runners.
 
-It must not mutate message or watch state, wake roles, or write milestones by default.
+Bare checks are report-only. Delivery-enabled runners may create one durable inbox escalation and wake the target role. They must not mutate existing message or obligation state, and they do not write milestones by default.
 
 Use native runners for repeated checks:
 
 ```bash
-tmux-team watchdog start --name default --interval 15m
+tmux-team watchdog run --once --delivery app-server-turn --notify-role orchestrator
+tmux-team watchdog start --name default --interval 15m --description "Keep team state fresh" --goal "Escalate stale work" --notify-role orchestrator --delivery app-server-turn
+tmux-team watchdog update default --interval 10m --goal "Escalate stale collector obligations"
+tmux-team watchdog pause default --reason "operator review" --review-in 30m
+tmux-team watchdog resume default
 tmux-team watchdog list
 tmux-team watchdog stop default
 ```
@@ -114,7 +135,9 @@ tmux-team watchdog stop default
 Runner invariants:
 
 - runners are visible tmux infrastructure, not hidden background processes;
-- runner panes print their purpose, interval, scope, delivery label, last run, next run, last finding, and safe-close guidance;
+- runner panes print their purpose, interval, scope, delivery label, notify target, last run, next run, last finding, and safe-close guidance;
+- delivery-enabled runners create durable inbox pressure and suppress duplicate active escalation messages by correlation key;
+- paused runners do not emit repeated findings and keep the previous finding summary plus pause reason and review time;
 - runner state is durable in SQLite and appears in `status --verbose` and `dashboard`;
 - `pane list --all` marks runner panes with `infrastructure=watchdog`;
-- watches are role-owned deadlines, while watchdog runners are periodic checkers.
+- obligations are role-owned commitments, while watchdog runners are periodic checkers.
