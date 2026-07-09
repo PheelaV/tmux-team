@@ -17,11 +17,13 @@ from .bootstrap import (
     RoleLaunchOptions,
     app_server_tmux_commands,
     configure_agent_window,
+    configure_session_truecolor,
     label_role_pane,
     normalize_agent_layout,
     prepare_grouped_agent_window,
     role_resume_spawn_command,
     select_tiled_layout_commands,
+    session_truecolor_tmux_commands,
     wait_for_app_server,
     write_role_env_files,
     write_team_config,
@@ -194,6 +196,7 @@ def resume_team(
     start_app_server: bool = True,
     reactivate_roles: bool = True,
     dry_run: bool = False,
+    enable_truecolor: bool = True,
 ) -> ResumeResult:
     if config.config_path is None:
         raise LifecycleError("resume requires a config file")
@@ -241,6 +244,8 @@ def resume_team(
         commands.extend(
             app_server_tmux_commands(tmux_bin, codex_bin, session, endpoint, config.project_root or Path.cwd())
         )
+    if enable_truecolor:
+        commands.extend(session_truecolor_tmux_commands(tmux_bin, session))
     commands.extend(
         resume_role_tmux_commands(
             tmux_bin,
@@ -287,6 +292,8 @@ def resume_team(
             tmux_bin, codex_bin, session, endpoint, config.project_root or Path.cwd()
         ):
             subprocess_run_lifecycle(command)
+    if enable_truecolor:
+        configure_session_truecolor(tmux_bin, session)
     wait_for_app_server(endpoint, timeout=20.0)
 
     if agent_layout == "grouped":

@@ -267,6 +267,7 @@ If a role pane target changes, config must change with it.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
 - Resume reads the latest or specified sleep snapshot, recreates the app-server, role, and running watchdog panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
 - Resume restores configured model, reasoning effort, profile, raw Codex config overrides, and YOLO mode when present. TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown and must be verified manually if important.
+- Bootstrap and resume set tmux truecolor options on the managed session by default. They should use `tmux-256color`, prefer RGB terminal features when supported, set `COLORTERM=truecolor`, and keep `--no-truecolor` as the opt-out for unusual terminal stacks.
 - Resume must update config/runtime pane and app-server bindings after recreating panes.
 - Resume reactivates roles by default; use `--no-reactivate-roles` when the operator wants to inspect before accepting work.
 - If no graceful sleep snapshot exists after an abrupt host or tmux shutdown, resume must build a recovery snapshot from durable `team.toml` and SQLite runtime state when role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.

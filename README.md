@@ -174,6 +174,8 @@ tmux-team bootstrap --project-root . --role-codex-config collector='model_reason
 
 Configured role Codex launch settings are recorded in `team.toml`, included in sleep snapshots, and replayed by `tmux-team resume`. Running watchdog runners are also reinstantiated on resume. If a host or tmux session ends before a graceful sleep, resume can build a recovery snapshot from `team.toml` and SQLite runtime state. Live TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown; verify it manually after recovery if it matters.
 
+Bootstrap and resume set tmux truecolor options on the managed session by default: `default-terminal` to `tmux-256color`, RGB terminal features when supported, and `COLORTERM=truecolor`. Use `--no-truecolor` only for unusual terminal stacks that mis-render color.
+
 The default agent layout is grouped:
 
 ```bash

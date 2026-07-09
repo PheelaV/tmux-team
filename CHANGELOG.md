@@ -8,12 +8,15 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made live dashboard pane previews opt-in with the pane preview toggle, while keeping `dashboard --once` and explicit pane-preview CLI behavior intact.
 - Added dashboard-local preferences in `.tmux-team/runtime/dashboard_preferences.json` for theme and concise/verbose item mode.
 - Added concise/verbose row rendering for obligations and watchdog runners, cleaner live headings, theme-aware semantic styling, role-table Codex chips for known structured launch settings, and scratchpad mtime timestamps for memory excerpts.
+- Made dashboard alert panels distinguish recent live alerts from stale notification failures; older notification failures move into alert history with age and timestamp context instead of staying in the current-pressure panel.
+- Made `bootstrap` and `resume` set tmux truecolor session options by default, including `COLORTERM=truecolor`; use `--no-truecolor` for unusual terminal stacks.
 - Kept `/fast` out of dashboard role-table metadata because it is not durable structured tmux-team state today.
 - Updated repo-local marketplace metadata to install the upcoming `v0.4.1` plugin tag.
 
 Migration notes:
 
 - Existing dashboard users should upgrade the optional `tmux-team[dashboard]` install. The first live launch uses concise mode with pane previews off; operators can toggle verbosity and pane previews from the dashboard, and preferences are saved under the runtime directory.
+- New bootstrap/resume runs set tmux truecolor options on the managed session. Pass `--no-truecolor` if your terminal/tmux stack mis-renders color.
 
 ## 0.4.0 - 2026-07-08
 

@@ -4,7 +4,7 @@ import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -24,7 +24,15 @@ class DashboardDependencyError(RuntimeError):
     pass
 
 
-ROLE_TABLE_HEADERS = ("role", "state", "pane", "pending", "claimed", "ack", "stale", "todos", "codex", "active")
+ROLE_TABLE_HEADERS = ("role", "state", "pane", "pend", "clmd", "ack", "stale", "todo", "codex", "active")
+
+
+@dataclass(frozen=True)
+class DashboardAlert:
+    text: str
+    created_at: str | None = None
+    age: str | None = None
+    stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,7 +48,8 @@ class DashboardSnapshot:
     milestones: tuple[dict[str, object], ...]
     memories: tuple[dict[str, object], ...]
     pane_previews: tuple[dict[str, object], ...]
-    alerts: tuple[str, ...]
+    alerts: tuple[DashboardAlert, ...]
+    alert_history: tuple[DashboardAlert, ...]
 
 
 @dataclass(frozen=True)
@@ -59,6 +68,7 @@ class SemanticPalette:
 DEFAULT_SEMANTIC_PALETTE = SemanticPalette()
 ALERTS_RECENT_LIMIT = 5
 ALERTS_HISTORY_LIMIT = 50
+ALERTS_RECENT_WINDOW_SECONDS = 30 * 60
 DASHBOARD_PREFERENCES_FILE = "dashboard_preferences.json"
 
 
@@ -88,7 +98,7 @@ def collect_dashboard_snapshot(
     watchdog_rows: list[dict[str, object]] = []
     memory_rows: list[dict[str, object]] = []
     pane_rows: list[dict[str, object]] = []
-    alerts: list[str] = []
+    alerts: list[DashboardAlert] = []
 
     for role in roles:
         role_name = str(role["name"])
@@ -123,9 +133,9 @@ def collect_dashboard_snapshot(
         )
 
         if pending and role["state"] != "active":
-            alerts.append(f"{role_name}: {pending} pending while role is {role['state']}")
+            alerts.append(DashboardAlert(f"{role_name}: {pending} pending while role is {role['state']}"))
         if stale_claimed:
-            alerts.append(f"{role_name}: {stale_claimed} stale claimed message(s)")
+            alerts.append(DashboardAlert(f"{role_name}: {stale_claimed} stale claimed message(s)"))
 
         for row in active:
             todos = tuple(
@@ -155,11 +165,17 @@ def collect_dashboard_snapshot(
             overdue = not paused and is_overdue(obligation["next_update_at"])
             review_due = paused and is_overdue(obligation["review_at"])
             if overdue:
-                alerts.append(f"{role_name}: obligation overdue {obligation['id']} {obligation['current_summary']}")
+                alerts.append(
+                    DashboardAlert(
+                        f"{role_name}: obligation overdue {obligation['id']} {obligation['current_summary']}"
+                    )
+                )
             if review_due:
                 alerts.append(
-                    f"{role_name}: obligation review due "
-                    f"{obligation['id']} {obligation['paused_reason'] or obligation['current_summary']}"
+                    DashboardAlert(
+                        f"{role_name}: obligation review due "
+                        f"{obligation['id']} {obligation['paused_reason'] or obligation['current_summary']}"
+                    )
                 )
             obligation_rows.append(
                 {
@@ -208,9 +224,15 @@ def collect_dashboard_snapshot(
         display_state = watchdog_runner_display_state(runner, stale_grace_seconds=60)
         review_due = runner["state"] == "paused" and is_overdue(runner["review_at"])
         if display_state in ("stale", "failed"):
-            alerts.append(f"watchdog {runner['name']}: {display_state} {runner['last_finding_summary'] or ''}".rstrip())
+            alerts.append(
+                DashboardAlert(
+                    f"watchdog {runner['name']}: {display_state} {runner['last_finding_summary'] or ''}".rstrip()
+                )
+            )
         if review_due:
-            alerts.append(f"watchdog {runner['name']}: review due {runner['paused_reason'] or ''}".rstrip())
+            alerts.append(
+                DashboardAlert(f"watchdog {runner['name']}: review due {runner['paused_reason'] or ''}".rstrip())
+            )
         if len(watchdog_rows) >= active_limit:
             continue
         watchdog_rows.append(
@@ -246,7 +268,7 @@ def collect_dashboard_snapshot(
         notification_params = (role_filter, alert_limit)
     recent_failures = conn.execute(
         f"""
-        SELECT role, method, state, details
+        SELECT role, method, state, details, created_at
         FROM notifications
         WHERE {notification_where}
         ORDER BY id DESC
@@ -254,8 +276,13 @@ def collect_dashboard_snapshot(
         """,
         notification_params,
     ).fetchall()
+    notification_history: list[DashboardAlert] = []
     for row in recent_failures:
-        alerts.append(f"{row['role']}: {row['state']} via {row['method']}: {row['details']}")
+        alert = notification_alert(row)
+        notification_history.append(alert)
+        if not alert.stale:
+            alerts.append(alert)
+    alert_history = [*alerts, *(alert for alert in notification_history if alert.stale)]
 
     return DashboardSnapshot(
         team=store.config.name,
@@ -270,6 +297,7 @@ def collect_dashboard_snapshot(
         memories=tuple(memory_rows),
         pane_previews=tuple(pane_rows),
         alerts=tuple(alerts),
+        alert_history=tuple(alert_history),
     )
 
 
@@ -287,6 +315,14 @@ def watchdog_effective_notify_role(runner, all_role_names: tuple[str, ...]) -> s
     return all_role_names[0] if all_role_names else None
 
 
+def notification_alert(row) -> DashboardAlert:
+    created_at = str(row["created_at"])
+    age = format_age(created_at)
+    stale = datetime.now(UTC) - parse_utc_datetime(created_at) > timedelta(seconds=ALERTS_RECENT_WINDOW_SECONDS)
+    text = f"{row['role']}: {row['state']} via {row['method']}: {row['details']}"
+    return DashboardAlert(text=text, created_at=created_at, age=age, stale=stale)
+
+
 def role_shortcut_target(visible_roles: Iterable[str], number: int | str) -> str | None:
     index = int(number) - 1
     roles = tuple(visible_roles)
@@ -300,9 +336,9 @@ def dashboard_codex_chips(capabilities: dict[str, object]) -> str:
     if capabilities.get("codex_yolo") is True:
         chips.append("yolo")
     for key, label in (
-        ("codex_profile", "profile"),
-        ("codex_model", "model"),
-        ("codex_reasoning_effort", "effort"),
+        ("codex_reasoning_effort", "e"),
+        ("codex_model", "m"),
+        ("codex_profile", "p"),
     ):
         value = capabilities.get(key)
         if value:
@@ -323,7 +359,10 @@ def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool =
         "",
         "Alerts [source=runtime-db/watchdog]",
     ]
-    lines.extend(f"  ! {alert}" for alert in snapshot.alerts) if snapshot.alerts else lines.append("  none")
+    if snapshot.alerts:
+        lines.extend(f"  {format_plain_alert_line(alert)}" for alert in snapshot.alerts)
+    else:
+        lines.append("  none")
     lines.extend(["", "Roles [source=runtime-db]"])
     lines.extend(format_table(ROLE_TABLE_HEADERS, role_table_rows(snapshot, codex_limit=32, active_limit=54)))
     lines.extend(["", "Active Work [source=runtime-db todo]"])
@@ -515,7 +554,7 @@ def run_textual_dashboard(
             self.saved_verbosity = "concise"
             self.load_dashboard_preferences()
             self.role_filter = role_filter
-            self.role_order = tuple(config.roles)
+            self.role_order = tuple(sorted(config.roles))
             self.visible_roles = self.role_order
             self.current_page = "supervision"
             self.pane_preview_enabled = False
@@ -616,7 +655,8 @@ def run_textual_dashboard(
                 self.refresh_dashboard()
 
         def action_filter_role(self, number: int | str) -> None:
-            target = role_shortcut_target(self.visible_roles, number)
+            shortcut_roles = self.visible_roles if self.role_filter is None else self.role_order
+            target = role_shortcut_target(shortcut_roles, number)
             if target is not None:
                 self.role_filter = target
                 self.refresh_dashboard()
@@ -705,7 +745,7 @@ def run_textual_dashboard(
             self.query_one("#alerts-history", Static).update(
                 section_panel(
                     "Alert History",
-                    alert_lines(snapshot.alerts, palette=palette),
+                    alert_lines(snapshot.alert_history, palette=palette),
                     palette=palette,
                 )
             )
@@ -713,6 +753,8 @@ def run_textual_dashboard(
             cursor_row = getattr(table, "cursor_row", 0)
             table.clear(columns=False)
             self.visible_roles = tuple(row_text(row, "name") for row in snapshot.roles)
+            if self.role_filter is None:
+                self.role_order = self.visible_roles
             for row in textual_role_table_rows(
                 snapshot, text_cls=Text, codex_limit=40, active_limit=64, palette=palette
             ):
@@ -815,7 +857,9 @@ def summary_panel(
     )
 
 
-def alerts_recent_panel(alerts: Iterable[str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:
+def alerts_recent_panel(
+    alerts: Iterable[DashboardAlert | str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE
+) -> str:
     rows = list(alerts)
     if not rows:
         return f"{section_title('alerts', palette)}\nnone"
@@ -828,7 +872,9 @@ def alerts_recent_panel(alerts: Iterable[str], *, palette: SemanticPalette = DEF
     return "\n".join(lines)
 
 
-def alert_lines(alerts: Iterable[str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> list[str]:
+def alert_lines(
+    alerts: Iterable[DashboardAlert | str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE
+) -> list[str]:
     rows = list(alerts)
     if not rows:
         return ["none"]
@@ -844,6 +890,9 @@ def help_text() -> str:
             "The context page shows milestones, memory excerpts, and alert history.",
             "Use v to toggle concise/verbose item text. Pane preview is off by default; use the key menu to toggle it.",
             "Use f on a focused role row to filter to that role; escape returns to the team overview.",
+            "Role table abbreviations: pend=pending claimable, clmd=claimed, ack=acknowledged, stale=expired claimed, todo=open todos.",
+            "Codex chips: e=reasoning effort, m=model, p=profile, yolo=allow-all role launch.",
+            "Recent alerts only show live or recent items; older notification failures move to dimmed alert history with age/timestamp.",
             "Press Ctrl-P for the full key menu, including page jumps, section jumps, pane preview, and role shortcuts.",
             "Sources: runtime-db is authoritative; memory-excerpt is prose; pane-capture is best-effort screen text.",
         ]
@@ -909,13 +958,39 @@ def state_text(value: str, rich: bool, palette: SemanticPalette = DEFAULT_SEMANT
 
 
 def format_alert_line(
-    row: str, *, truncate_at: int | None = None, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE
+    row: DashboardAlert | str, *, truncate_at: int | None = None, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE
 ) -> str:
-    text = truncate(row, truncate_at) if truncate_at else row
+    alert = row if isinstance(row, DashboardAlert) else DashboardAlert(str(row))
+    prefix = ""
+    if alert.age or alert.created_at:
+        bits = []
+        if alert.age:
+            bits.append(f"age={alert.age}")
+        if alert.created_at:
+            bits.append(f"at={alert.created_at}")
+        prefix = " ".join(bits) + " "
+    text = prefix + alert.text
+    text = truncate(text, truncate_at) if truncate_at else text
     role, separator, rest = text.partition(":")
+    line: str
     if separator and role:
-        return f"[{palette.error}]![/] {role_text(role, True, palette)}:{rich_escape(rest)}"
-    return f"[{palette.error}]![/] {rich_escape(text)}"
+        line = f"[{palette.error}]![/] {role_text(role, True, palette)}:{rich_escape(rest)}"
+    else:
+        line = f"[{palette.error}]![/] {rich_escape(text)}"
+    return f"[dim]{line}[/dim]" if alert.stale else line
+
+
+def format_plain_alert_line(row: DashboardAlert | str) -> str:
+    alert = row if isinstance(row, DashboardAlert) else DashboardAlert(str(row))
+    prefix = ""
+    if alert.age or alert.created_at:
+        bits = []
+        if alert.age:
+            bits.append(f"age={alert.age}")
+        if alert.created_at:
+            bits.append(f"at={alert.created_at}")
+        prefix = " ".join(bits) + " "
+    return f"! {prefix}{alert.text}"
 
 
 def section_panel(title: str, rows: Iterable[str], *, palette: SemanticPalette = DEFAULT_SEMANTIC_PALETTE) -> str:

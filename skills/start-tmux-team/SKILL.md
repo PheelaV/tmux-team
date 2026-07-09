@@ -187,6 +187,8 @@ Use `tmux-team watchdog` for report-only durable-state checks. Use delivery-enab
 
 Use `tmux-team sleep` to snapshot role/app-server bindings, operator metadata, running watchdogs, and configured Codex launch settings before tearing down managed role, app-server, and watchdog windows. Use `tmux-team resume` to restore from the latest snapshot or durable runtime state after abrupt shutdown. Treat TUI-only Codex state such as `/fast` as unknown unless explicit config records it.
 
+Bootstrap and resume set tmux truecolor options on the managed session by default. Use `--no-truecolor` only if the operator's terminal stack mis-renders color.
+
 ## Safety Rules
 
 - Keep agents in visible tmux panes.

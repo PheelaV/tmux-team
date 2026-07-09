@@ -16,6 +16,7 @@ from unittest.mock import patch
 from tmux_team.bootstrap import (
     BootstrapError,
     RoleBinding,
+    configure_session_truecolor,
     default_session_name,
     prepare_role_worktrees,
     role_startup_prompt,
@@ -27,7 +28,9 @@ from tmux_team.dashboard import (
     DashboardSnapshot,
     collect_dashboard_snapshot,
     dashboard_codex_chips,
+    format_alert_line,
     format_milestone_line,
+    format_plain_alert_line,
     load_dashboard_preferences,
     memory_lines,
     obligation_lines,
@@ -605,7 +608,7 @@ runtime_dir = "{other_runtime}"
         self.assertIn("Active Work [source=runtime-db todo]", out)
         self.assertIn("Memory Excerpts [source=memory-excerpt prose]", out)
         self.assertIn("collector", out)
-        self.assertIn("todos", out)
+        self.assertIn("todo", out)
         self.assertNotIn("fast=unknown", out)
         self.assertIn("collect dashboard evidence", out)
         self.assertIn("capture dashboard fixture", out)
@@ -666,9 +669,44 @@ runtime_dir = "{other_runtime}"
             snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
 
         self.assertEqual(tuple(row["name"] for row in snapshot.watchdog_runners), ("collector-pressure",))
-        self.assertTrue(any("collector notification failed" in alert for alert in snapshot.alerts))
-        self.assertFalse(any("trainer notification failed" in alert for alert in snapshot.alerts))
-        self.assertFalse(any("trainer-pressure" in alert for alert in snapshot.alerts))
+        self.assertTrue(any("collector notification failed" in alert.text for alert in snapshot.alerts))
+        self.assertFalse(any("trainer notification failed" in alert.text for alert in snapshot.alerts))
+        self.assertFalse(any("trainer-pressure" in alert.text for alert in snapshot.alerts))
+
+    def test_dashboard_notification_alerts_move_stale_items_to_history(self) -> None:
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            store.record_notification(
+                conn,
+                None,
+                "collector",
+                "app-server-turn",
+                "notify_failed",
+                "old collector notification failed",
+            )
+            conn.execute(
+                "UPDATE notifications SET created_at = ? WHERE details = ?",
+                ("2000-01-01T00:00:00+00:00", "old collector notification failed"),
+            )
+            store.record_notification(
+                conn,
+                None,
+                "collector",
+                "app-server-turn",
+                "notify_failed",
+                "recent collector notification failed",
+            )
+            conn.commit()
+            snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
+
+        self.assertTrue(any("recent collector notification failed" in alert.text for alert in snapshot.alerts))
+        self.assertFalse(any("old collector notification failed" in alert.text for alert in snapshot.alerts))
+        old_alerts = [alert for alert in snapshot.alert_history if "old collector notification failed" in alert.text]
+        self.assertEqual(len(old_alerts), 1)
+        self.assertTrue(old_alerts[0].stale)
+        self.assertIn("age=", format_plain_alert_line(old_alerts[0]))
+        self.assertIn("at=2000-01-01T00:00:00+00:00", format_plain_alert_line(old_alerts[0]))
+        self.assertTrue(format_alert_line(old_alerts[0]).startswith("[dim]"))
 
     def test_dashboard_role_filter_includes_implicit_orchestrator_watchdog_target(self) -> None:
         store = Store(load_config(self.config))
@@ -716,7 +754,7 @@ runtime_dir = "{other_runtime}"
             }
         )
 
-        self.assertEqual(chips, "yolo profile:team-role model:gpt-5.5 effort:high cfg:2")
+        self.assertEqual(chips, "yolo e:high m:gpt-5.5 p:team-role cfg:2")
         self.assertNotIn("fast", chips)
         self.assertEqual(dashboard_codex_chips({}), "-")
 
@@ -820,6 +858,7 @@ runtime_dir = "{other_runtime}"
                 },
             ),
             alerts=(),
+            alert_history=(),
         )
 
         lines = textual_pane_preview_body(snapshot, include_pane_preview=True)
@@ -3066,6 +3105,9 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("tmux new-session -d -s tt-bootstrap -n tt-control", out)
+        self.assertIn("tmux set-option -t tt-bootstrap default-terminal tmux-256color", out)
+        self.assertIn("tmux set-option -as -t tt-bootstrap terminal-features", out)
+        self.assertIn("tmux set-environment -t tt-bootstrap COLORTERM truecolor", out)
         self.assertIn("tmux new-window -t tt-bootstrap -n tt-app-server", out)
         self.assertIn("tmux new-window -t tt-bootstrap -n tt-agents", out)
         self.assertIn("tmux split-window -t tt-bootstrap:tt-agents", out)
@@ -3088,6 +3130,56 @@ can_notify = ["orchestrator"]
         self.assertIn('notify_method = "app-server-turn"', out)
         self.assertIn("session: tt-bootstrap", out)
         self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_can_disable_truecolor(self) -> None:
+        generated_config = self.root / ".tmux-team" / "generated.toml"
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-bootstrap-no-color",
+            "--endpoint",
+            "ws://127.0.0.1:4500",
+            "--roles",
+            "orchestrator",
+            "--no-truecolor",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("tmux-256color", out)
+        self.assertNotIn("terminal-features", out)
+        self.assertNotIn("COLORTERM truecolor", out)
+        self.assertFalse(generated_config.exists())
+
+    def test_configure_session_truecolor_falls_back_for_old_tmux(self) -> None:
+        fake_dir = self.root / "truecolor-bin"
+        fake_dir.mkdir()
+        log_path = self.root / "truecolor-tmux.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log_path}
+if [ "$5" = "terminal-features" ]; then
+  exit 1
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        configure_session_truecolor(str(tmux), "tt")
+
+        log = log_path.read_text(encoding="utf-8")
+        self.assertIn("set-option -t tt default-terminal tmux-256color", log)
+        self.assertIn("set-option -as -t tt terminal-features ,*:RGB", log)
+        self.assertIn("set-option -as -t tt terminal-overrides ,*:Tc", log)
+        self.assertIn("set-environment -t tt COLORTERM truecolor", log)
 
     def test_bootstrap_dry_run_uses_runtime_home_env(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"
@@ -3471,6 +3563,9 @@ can_notify = ["orchestrator"]
         self.assertIn("implementer: thread_id=thread-impl", out)
         self.assertIn("codex_launch_settings: restored=implementer,orchestrator fast=unknown", out)
         self.assertIn("codex resume", out)
+        self.assertIn("tmux set-option -t tt default-terminal tmux-256color", out)
+        self.assertIn("tmux set-option -as -t tt terminal-features", out)
+        self.assertIn("tmux set-environment -t tt COLORTERM truecolor", out)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", out)
         self.assertIn("--model gpt-5.5", out)
         self.assertIn('model_reasoning_effort="xhigh"', out)
@@ -3481,6 +3576,17 @@ can_notify = ["orchestrator"]
         self.assertIn("tmux new-window -t tt -n tt-agents", out)
         self.assertIn("tmux split-window -t tt:tt-agents", out)
         self.assertIn("dry-run: no tmux panes created", out)
+
+    def test_resume_dry_run_can_disable_truecolor(self) -> None:
+        self.write_remote_tui_config()
+        self.write_sleep_snapshot()
+
+        code, out, err = self.run_cli("resume", "--dry-run", "--no-start-app-server", "--no-truecolor")
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("tmux-256color", out)
+        self.assertNotIn("terminal-features", out)
+        self.assertNotIn("COLORTERM truecolor", out)
 
     def test_resume_dry_run_reinstantiates_watchdogs_from_sleep_snapshot(self) -> None:
         self.write_remote_tui_config()

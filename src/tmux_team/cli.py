@@ -392,6 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint"
     )
     bootstrap.add_argument(
+        "--no-truecolor",
+        action="store_true",
+        help="Do not set tmux truecolor options on the managed session",
+    )
+    bootstrap.add_argument(
         "--dry-run", action="store_true", help="Print planned tmux commands and generated config without executing"
     )
 
@@ -766,6 +771,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--role-codex-config", action="append", default=[], metavar="ROLE=KEY=VALUE")
     resume.add_argument("--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint")
     resume.add_argument("--no-reactivate-roles", action="store_true", help="Do not set resumed roles active")
+    resume.add_argument(
+        "--no-truecolor",
+        action="store_true",
+        help="Do not set tmux truecolor options on the restored session",
+    )
     resume.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
 
     codex = subparsers.add_parser("codex", help="Manage Codex app-server role bindings")
@@ -861,6 +871,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             worktree_base_ref=args.worktree_base_ref,
             allow_shared_worktree_groups=shared_worktrees,
             allow_dirty_roles=allow_dirty_roles,
+            enable_truecolor=not args.no_truecolor,
             dry_run=args.dry_run,
         )
     except BootstrapError as exc:
@@ -2594,6 +2605,7 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
         role_launch_options=role_launch_options,
         start_app_server=not args.no_start_app_server,
         reactivate_roles=not args.no_reactivate_roles,
+        enable_truecolor=not args.no_truecolor,
         dry_run=args.dry_run,
     )
     print(f"snapshot: {result.snapshot_path}")

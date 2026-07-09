@@ -11,6 +11,7 @@ tmux-team bootstrap --project-root . --goal "Fix the failing test and report the
 tmux-team bootstrap --project-root . --roles orchestrator,implementer,collector,trainer
 tmux-team bootstrap --project-root . --agent-layout grouped
 tmux-team bootstrap --project-root . --agent-layout separate-windows
+tmux-team bootstrap --project-root . --no-truecolor
 ```
 
 Use `init` only when you want a config/runtime scaffold without launching Codex role panes.
@@ -42,6 +43,8 @@ tmux-team bootstrap \
   --create-missing-worktrees \
   --worktree-base-ref HEAD
 ```
+
+Bootstrap sets tmux truecolor options on the managed session by default: `default-terminal` to `tmux-256color`, RGB terminal features when supported, and `COLORTERM=truecolor`. Use `--no-truecolor` only for terminal stacks that mis-render color.
 
 ## Status And Inspection
 
@@ -267,9 +270,12 @@ tmux-team resume
 tmux-team resume --dry-run
 tmux-team resume --snapshot .tmux-team/runtime/sleeps/<snapshot>.toml
 tmux-team resume --no-reactivate-roles
+tmux-team resume --no-truecolor
 ```
 
 Resume replays configured role Codex launch settings from the sleep or recovery snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. It also reinstantiates running watchdog runner panes from durable runner state. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `resume` warns when they matter and the live dashboard omits them rather than showing a noisy unknown chip.
+
+Resume also reapplies the default tmux truecolor session options unless `--no-truecolor` is passed.
 
 Record or inspect operator recovery metadata:
 

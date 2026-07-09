@@ -87,6 +87,7 @@ def bootstrap_team(
     worktree_base_ref: str = "HEAD",
     allow_shared_worktree_groups: tuple[frozenset[str], ...] = (),
     allow_dirty_roles: frozenset[str] = frozenset(),
+    enable_truecolor: bool = True,
 ) -> BootstrapResult:
     project_root = project_root.expanduser().resolve()
     config_path = config_path.expanduser()
@@ -137,6 +138,7 @@ def bootstrap_team(
             role_profile=role_profile,
             role_launch_options=role_launch_options,
             control_mode=control_mode,
+            enable_truecolor=enable_truecolor,
         ):
             print(shell_join(command))
         print(
@@ -181,6 +183,8 @@ def bootstrap_team(
     operator_pane = ensure_control_plane_window(
         tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
     )
+    if enable_truecolor:
+        configure_session_truecolor(tmux_bin, session)
     if start_app_server:
         for command in app_server_tmux_commands(tmux_bin, codex_bin, session, endpoint, project_root):
             run(command, check=True)
@@ -246,12 +250,15 @@ def dry_run_tmux_commands(
     role_profile: str | None,
     role_launch_options: dict[str, RoleLaunchOptions],
     control_mode: str,
+    enable_truecolor: bool,
 ) -> list[list[str]]:
     commands: list[list[str]] = [
         control_plane_session_command(
             tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
         )
     ]
+    if enable_truecolor:
+        commands.extend(session_truecolor_tmux_commands(tmux_bin, session))
     if start_app_server:
         commands.append(
             new_window_command(
@@ -288,6 +295,27 @@ def dry_run_tmux_commands(
         if agent_layout == "grouped" and index > 0:
             commands.extend(select_tiled_layout_commands(tmux_bin, session, agents_window))
     return commands
+
+
+def session_truecolor_tmux_commands(tmux_bin: str, session: str) -> list[list[str]]:
+    return [
+        [tmux_bin, "set-option", "-t", session, "default-terminal", "tmux-256color"],
+        [tmux_bin, "set-option", "-as", "-t", session, "terminal-features", ",*:RGB"],
+        [tmux_bin, "set-environment", "-t", session, "COLORTERM", "truecolor"],
+    ]
+
+
+def session_truecolor_fallback_command(tmux_bin: str, session: str) -> list[str]:
+    return [tmux_bin, "set-option", "-as", "-t", session, "terminal-overrides", ",*:Tc"]
+
+
+def configure_session_truecolor(tmux_bin: str, session: str) -> None:
+    commands = session_truecolor_tmux_commands(tmux_bin, session)
+    run(commands[0], check=False)
+    feature_result = run(commands[1], check=False)
+    if feature_result.returncode != 0:
+        run(session_truecolor_fallback_command(tmux_bin, session), check=False)
+    run(commands[2], check=False)
 
 
 def app_server_tmux_commands(
