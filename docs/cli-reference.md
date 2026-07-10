@@ -128,8 +128,17 @@ Use the verbose and reclaimable surfaces to inspect active or expired work.
 
 ```bash
 tmux-team inbox list --role collector --verbose
+tmux-team inbox list --role collector --state pending
 tmux-team inbox reclaimable --role collector
 ```
+
+`--state pending` is a derived selector with exactly the same meaning as the
+`pending=N` status field: queued, notified, retrying, and expired claimed work.
+Concrete selectors such as `--state notified` remain available for diagnosis.
+Unknown state names are rejected instead of returning a misleading empty list.
+
+Only `inbox next` proves there is nothing left to claim. Do not infer that an
+inbox is drained from a narrower concrete-state query.
 
 Use `--reply-to-sender` for delegated role work so the original sender receives a completion notice and wake. A completion notice is local bookkeeping until the goal owner reconciles it. If a non-orchestrator role receives a material delegated result, it should send a concise upward report to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`.
 

@@ -11,12 +11,12 @@ from typing import ClassVar
 from .config import TeamConfig, role_scratchpad_path
 from .display import format_seconds_duration, role_capabilities, watchdog_runner_display_state
 from .store import (
-    CLAIMABLE_STATES,
     OBLIGATION_VISIBLE_STATES,
     STALE_CLAIMED_STATE,
     Store,
     inspect_tmux_pane,
     parse_utc_datetime,
+    pending_count_from_state_counts,
 )
 
 
@@ -107,7 +107,7 @@ def collect_dashboard_snapshot(
         todo_counts = store.open_todo_counts(conn, role=role_name, message_ids=(row["id"] for row in active))
         role_counts = counts.get(role_name, {})
         stale_claimed = role_counts.get(STALE_CLAIMED_STATE, 0)
-        pending = sum(role_counts.get(state, 0) for state in CLAIMABLE_STATES) + stale_claimed
+        pending = pending_count_from_state_counts(role_counts)
         active_summary = in_progress[0]["summary"] if in_progress else "-"
 
         open_todos = sum(todo_counts.values())

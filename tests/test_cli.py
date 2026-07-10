@@ -907,6 +907,91 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         self.assertIn(f"id: {message_id}", out)
 
+    def test_pending_state_filter_matches_status_and_includes_notified_and_stale_claimed(self) -> None:
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--summary",
+            "notified task",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        notified_id = out.split()[0]
+        store = Store(load_config(self.config))
+        with store.connect() as conn:
+            conn.execute("UPDATE messages SET state = 'notified' WHERE id = ?", (notified_id,))
+            conn.commit()
+
+        code, out, err = self.run_cli(
+            "send",
+            "--to",
+            "orchestrator",
+            "--from",
+            "collector",
+            "--priority",
+            "urgent",
+            "--summary",
+            "expired claim",
+            "--body",
+            "body",
+            "--no-notify",
+        )
+        self.assertEqual(code, 0, err)
+        stale_id = out.split()[0]
+        code, _out, err = self.run_cli("inbox", "next", "--role", "orchestrator", "--claim-seconds", "0")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn("pending=2 stale_claimed=1", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--state", "pending")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{notified_id} state=notified", out)
+        self.assertIn(f"{stale_id} state=stale_claimed", out)
+
+        code, out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--state", "notified")
+        self.assertEqual(code, 0, err)
+        self.assertIn(notified_id, out)
+        self.assertNotIn(stale_id, out)
+
+    def test_inbox_next_claims_highest_priority(self) -> None:
+        message_ids: dict[str, str] = {}
+        for priority in ("low", "urgent", "normal", "high"):
+            code, out, err = self.run_cli(
+                "send",
+                "--to",
+                "orchestrator",
+                "--from",
+                "collector",
+                "--priority",
+                priority,
+                "--summary",
+                f"{priority} task",
+                "--body",
+                "body",
+                "--no-notify",
+            )
+            self.assertEqual(code, 0, err)
+            message_ids[priority] = out.split()[0]
+
+        code, out, err = self.run_cli("inbox", "next", "--role", "orchestrator")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"id: {message_ids['urgent']}", out)
+        self.assertIn("priority: urgent", out)
+
+    def test_inbox_list_rejects_unknown_state_filter(self) -> None:
+        code, _out, err = self.run_cli("inbox", "list", "--role", "orchestrator", "--state", "invented")
+
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice: 'invented'", err)
+
     def test_status_verbose_shows_active_message_summaries(self) -> None:
         code, out, err = self.run_cli(
             "send",

@@ -111,7 +111,7 @@ Use durable state first:
 tmux-team status --verbose
 tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
 tmux-team broadcast --from orchestrator --summary "checkpoint" --body "Report status and blockers." --exclude orchestrator
-tmux-team inbox list --role orchestrator --verbose
+tmux-team inbox list --role orchestrator --state pending --verbose
 tmux-team pane capture collector --lines 120 --offset 40
 tmux-team milestone list --today
 tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
@@ -146,6 +146,11 @@ Role loop on startup or wake:
 9. Before long work, completion, or parking, update memory only for material durable state changes.
 10. Complete or supersede open todos, then complete the inbox message with a concise result.
 11. Repeat `tmux-team inbox next` until no pending work remains.
+
+Only `inbox next` is the role's drain check. Do not declare an inbox clear from
+a concrete-state list. For read-only supervision, `inbox list --state pending`
+matches `status pending=N` and includes queued, notified, retrying, and expired
+claimed work.
 
 ## Memory, Todos, And Milestones
 

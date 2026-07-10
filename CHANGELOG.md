@@ -2,6 +2,17 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## 0.4.2 - 2026-07-10
+
+- Fixed notified inbox work becoming invisible to a plausible drain check: `inbox list --state pending` now matches the `status pending=N` definition and includes queued, notified, retrying, and expired claimed work.
+- Reject unknown inbox state filters instead of silently returning an empty list.
+- Clarified that roles drain with `inbox next`; concrete-state lists are diagnostic observation surfaces only.
+- Updated package, CLI, plugin, and marketplace metadata for 0.4.2.
+
+Migration notes:
+
+- Replace scripts that use `inbox list --state pending` as though `pending` were a stored state. The command now intentionally selects all claimable work. Role loops should use `inbox next` until it reports no pending work.
+
 ## 0.4.1 - 2026-07-08
 
 - Reworked the optional live Textual dashboard into two operator pages: work/supervision for active work, obligations, and watchdog runners; context/history for milestones, memory excerpts, and alert history.

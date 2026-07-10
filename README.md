@@ -130,11 +130,16 @@ Watch progress from the control pane:
 ```bash
 tmux-team status
 tmux-team status --verbose
-tmux-team inbox list --role orchestrator
+tmux-team inbox list --role orchestrator --state pending
 tmux-team inbox list --role implementer
 tmux-team pane capture implementer --lines 80 --offset 0
 tmux-team milestone list --today
 ```
+
+`--state pending` is the canonical read-only view of claimable work. It matches
+the `pending=N` status count and includes queued, notified, retrying, and expired
+claimed messages. Roles should still drain work with `inbox next`; a filtered
+list is an observation surface, not the claim loop.
 
 Stop the managed team without killing your control pane:
 

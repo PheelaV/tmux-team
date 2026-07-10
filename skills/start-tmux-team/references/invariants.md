@@ -55,6 +55,7 @@ Never use tmux stdin as the production wake path for Codex roles.
 - If an urgent message is pending, the app-server wake must tell the role to stop at the current safe point and claim the urgent message before continuing other work.
 - Durable task content must be claimed from the tmux-team inbox.
 - A role handles work as: `inbox next -> ack -> do work -> complete --reply-to-sender -> inbox next` until there is no pending work. Startup prompts should include explicit `--role <role>` commands; short commands are allowed only when role discovery works.
+- Only `inbox next` proves the role has no claimable work. `inbox list --state pending` is the matching read-only supervision view and includes queued, notified, retrying, and expired claimed work; narrower state filters are diagnostic only.
 - Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command.
 - Completion notices are not team-level reconciliation by themselves. If a non-orchestrator role receives a completion notice with material impact on the team goal, stable commit, blocker state, external run state, or operator-visible result, it must send or complete a concise upward report to `orchestrator`.
 - Completion can carry detail with `--body` or `--body-file`; keep `--summary` concise.

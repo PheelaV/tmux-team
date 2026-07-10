@@ -255,12 +255,26 @@ def run_flow(session: str, paths: Paths, timeout: float, scenario: str) -> None:
 
     print("running collector step")
     run_step(session, "collector", paths, timeout, collector_script(paths))
+    assert_pending_view(paths, role="orchestrator", expected_summary="calculator add regression")
 
     print("running orchestrator step")
     run_step(session, "orchestrator", paths, timeout, orchestrator_script(paths))
 
     print("running implementer step")
     run_step(session, "implementer", paths, timeout, implementer_script(paths))
+
+
+def assert_pending_view(paths: Paths, *, role: str, expected_summary: str) -> None:
+    result = run(
+        tt(paths) + ["inbox", "list", "--role", role, "--state", "pending"],
+        cwd=paths.project,
+        check=True,
+    )
+    if "state=notified" not in result.stdout or f"summary={expected_summary}" not in result.stdout:
+        raise DemoError(
+            "pending inbox view did not include successfully notified work\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
 
 def run_congestion_flow(session: str, paths: Paths, timeout: float) -> None:
