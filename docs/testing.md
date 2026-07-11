@@ -30,6 +30,11 @@ SQLite wake routing without starting Toad or a provider. They verify that task b
 Runtime-switch tests mock Toad readiness and tmux respawn while verifying
 capsule redaction, idle/cancel gates, TOML preservation, failure-to-draining
 behavior, recovery prompts, and append-only session lineage.
+The same test module covers live option formatting, grouped select and boolean
+validation, exact `configOptions`/`setConfig` requests, authoritative
+model-dependent full-state replacement, session identity checks, confirmed
+TOML/SQLite persistence, partial-success lineage, CLI behavior, and
+authorization.
 ACP lifecycle tests verify exact-session command generation and identity checks, explicit handoff override, pending
 work re-wake, capability refusal, quiescence rollback, and snapshot metadata.
 

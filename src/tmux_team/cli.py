@@ -65,8 +65,11 @@ from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .runtime_switch import (
     RuntimeSwitchError,
+    configure_runtime_options,
+    format_runtime_options,
     prepare_runtime_handoff,
     read_handoff_body,
+    runtime_options,
     runtime_show,
     switch_runtime,
 )
@@ -661,10 +664,22 @@ def build_parser() -> argparse.ArgumentParser:
         role_state = role_sub.add_parser(state_command, help=f"Set role state to {state}")
         role_state.add_argument("role")
 
-    runtime = subparsers.add_parser("runtime", help="Inspect or switch a role runtime")
+    runtime = subparsers.add_parser("runtime", help="Inspect or configure a role runtime")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
     runtime_show_parser = runtime_sub.add_parser("show", help="Show role runtime metadata")
     runtime_show_parser.add_argument("role")
+    runtime_options_parser = runtime_sub.add_parser("options", help="Show live ACP session config options")
+    runtime_options_parser.add_argument("role")
+    runtime_configure = runtime_sub.add_parser("configure", help="Change live ACP session config options")
+    runtime_configure.add_argument("role")
+    runtime_configure.add_argument(
+        "--set",
+        dest="assignments",
+        action="append",
+        required=True,
+        metavar="CONFIG_ID=VALUE",
+        help="Set an advertised option; repeat for multiple changes",
+    )
     runtime_prepare = runtime_sub.add_parser("prepare", help="Write a provider-neutral handoff capsule")
     runtime_prepare.add_argument("role")
     runtime_prepare.add_argument("--summary", required=True, help="Operator handoff summary")
@@ -1225,7 +1240,11 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
 
-    if args.command == "runtime" and args.runtime_command in ("prepare", "switch"):
+    if args.command == "runtime" and args.runtime_command in (
+        "configure",
+        "prepare",
+        "switch",
+    ):
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
 
@@ -1901,6 +1920,19 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
 def cmd_runtime(args: argparse.Namespace, store: Store, conn) -> int:
     if args.runtime_command == "show":
         print(runtime_show(store, conn, args.role), end="")
+        return 0
+    if args.runtime_command == "options":
+        print(format_runtime_options(runtime_options(store, conn, args.role)), end="")
+        return 0
+    if args.runtime_command == "configure":
+        result = configure_runtime_options(
+            store,
+            conn,
+            args.role,
+            args.assignments,
+            actor=args.actor or "operator",
+        )
+        print(f"{args.role} session_id={result.session_id} configured={len(result.changes)}")
         return 0
     if args.runtime_command == "prepare":
         body = None

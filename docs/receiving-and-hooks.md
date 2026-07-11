@@ -140,6 +140,15 @@ for versioned `ping` and `status` responses before sending the startup prompt. W
 `coalesceKey="inbox"`; urgent work is marked urgent but does not cancel an active turn. ACP exact resume uses the
 provider's negotiated `session/load` capability; explicit handoff resume creates a fresh session from durable state.
 
+The same socket exposes live ACP session configuration when Toad advertises
+`configOptions`/`setConfig`. `runtime options` is observational.
+`runtime configure` is role-state-change authorized, requires idle and stable
+session identity, and validates only the IDs, select values, and boolean types
+advertised by Toad. Every confirmed full response replaces stored
+`acp_config`, updates category summaries, and appends same-session lineage. It
+does not send inbox data, quiesce for replacement, create a capsule, or start a
+new provider session.
+
 Replacing an ACP provider/model command is a controlled session boundary.
 `runtime prepare` drains the role before confirming an idle, empty TUI queue and captures bounded durable role state
 without task bodies. `runtime switch` accepts only that role's latest unchanged capsule for the same source session,

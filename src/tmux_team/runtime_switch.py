@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import sqlite3
 import subprocess
 import time
+from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +40,19 @@ class RuntimeSwitchResult:
     dry_run: bool = False
 
 
+@dataclass(frozen=True)
+class RuntimeOptionsResult:
+    session_id: str
+    options: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class RuntimeConfigureResult:
+    session_id: str
+    changes: tuple[tuple[str, str | bool], ...]
+    options: tuple[dict[str, Any], ...]
+
+
 def runtime_show(store: Store, conn: sqlite3.Connection, role: str) -> str:
     role_row = _role(store, conn, role)
     capabilities = role_capabilities(role_row)
@@ -55,6 +71,271 @@ def runtime_show(store: Store, conn: sqlite3.Connection, role: str) -> str:
     ]
     lines.extend(f"{key}: {value or '-'}" for key, value in values)
     return "\n".join(lines) + "\n"
+
+
+def runtime_options(store: Store, conn: sqlite3.Connection, role: str) -> RuntimeOptionsResult:
+    role_row = _acp_role(store, conn, role, operation="runtime options")
+    socket_path = _control_socket(store, role_row)
+    expected_session_id = _optional_string(role_capabilities(role_row).get("runtime_session_id"))
+    return _request_runtime_options(socket_path, expected_session_id=expected_session_id)
+
+
+def format_runtime_options(result: RuntimeOptionsResult) -> str:
+    if not result.options:
+        return "No session config options advertised.\n"
+    lines = []
+    for option in result.options:
+        category = option.get("category")
+        fields = [
+            f"id={option['id']}",
+            f"category={category if category is not None else '-'}",
+            f"type={option['type']}",
+            f"current={json.dumps(option['currentValue'], ensure_ascii=False)}",
+        ]
+        if option["type"] == "select":
+            fields.append("values=" + json.dumps(option["options"], ensure_ascii=False, separators=(",", ":")))
+        lines.append(" ".join(fields))
+    return "\n".join(lines) + "\n"
+
+
+def configure_runtime_options(
+    store: Store,
+    conn: sqlite3.Connection,
+    role: str,
+    assignments: Sequence[str],
+    *,
+    actor: str = "operator",
+) -> RuntimeConfigureResult:
+    with _runtime_role_lock(store.runtime_dir, role):
+        return _configure_runtime_options(
+            store,
+            conn,
+            role,
+            assignments,
+            actor=actor,
+        )
+
+
+def _configure_runtime_options(
+    store: Store,
+    conn: sqlite3.Connection,
+    role: str,
+    assignments: Sequence[str],
+    *,
+    actor: str,
+) -> RuntimeConfigureResult:
+    role_row = _acp_role(store, conn, role, operation="runtime configure")
+    socket_path = _control_socket(store, role_row)
+    if store.config.config_path is None:
+        raise RuntimeSwitchError("runtime configure requires a config file")
+
+    capabilities = role_capabilities(role_row)
+    expected_session_id = _optional_string(capabilities.get("runtime_session_id"))
+    if expected_session_id is None:
+        raise RuntimeSwitchError(f"cannot configure role {role!r}: configured runtime session ID is unknown")
+    initial = _request_runtime_options(socket_path, expected_session_id=expected_session_id)
+    status = send_control_request(socket_path, {"action": "status", "sessionId": initial.session_id})
+    _require_session_id(status, initial.session_id, operation="checking runtime configuration status")
+    _require_idle(role, status, "configure runtime")
+    if status.get("acceptingPrompts") is False:
+        raise RuntimeSwitchError(f"cannot configure runtime for role {role!r}: ACP TUI is quiesced")
+
+    requested = tuple(_parse_assignment(value) for value in assignments)
+    if not requested:
+        raise RuntimeSwitchError("runtime configure requires at least one --set")
+
+    current_options = initial.options
+    confirmed_changes: list[tuple[str, str | bool]] = []
+    provider = _optional_string(capabilities.get("acp_provider"))
+    for config_id, raw_value in requested:
+        current_by_id = _options_by_id(current_options)
+        value = _parse_config_value(current_by_id, config_id, raw_value)
+        old_values = _current_values(current_options)
+        response = send_control_request(
+            socket_path,
+            {
+                "action": "setConfig",
+                "sessionId": initial.session_id,
+                "configId": config_id,
+                "value": value,
+            },
+        )
+        _require_session_id(
+            response,
+            initial.session_id,
+            operation=f"setting runtime config option {config_id!r}",
+        )
+        next_options = tuple(_response_config_options(response))
+        confirmed = _options_by_id(next_options).get(config_id)
+        if confirmed is None or not _same_config_value(confirmed["currentValue"], value):
+            actual = None if confirmed is None else confirmed["currentValue"]
+            raise RuntimeSwitchError(f"ACP TUI did not confirm {config_id!r}={value!r}; confirmed value is {actual!r}")
+        new_values = _current_values(next_options)
+        _persist_runtime_options(store, conn, role, next_options)
+        event = {
+            "event": "config_changed",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "actor": actor,
+            "role": role,
+            "provider": provider,
+            "session_id": initial.session_id,
+            "configId": config_id,
+            "requested_value": value,
+            "old": old_values,
+            "new": new_values,
+        }
+        _append_lineage(store.runtime_dir / "handoffs" / role / "lineage.jsonl", event)
+        store.record_event(conn, "role.runtime_config_changed", actor, role, event)
+        conn.commit()
+        confirmed_changes.append((config_id, value))
+        current_options = next_options
+
+    return RuntimeConfigureResult(initial.session_id, tuple(confirmed_changes), current_options)
+
+
+def _request_runtime_options(socket_path: Path, *, expected_session_id: str | None) -> RuntimeOptionsResult:
+    request: dict[str, Any] = {"action": "configOptions"}
+    if expected_session_id is not None:
+        request["sessionId"] = expected_session_id
+    response = send_control_request(socket_path, request)
+    session_id = _require_session_id(
+        response,
+        expected_session_id,
+        operation="reading runtime config options",
+    )
+    return RuntimeOptionsResult(session_id, tuple(_response_config_options(response)))
+
+
+def _response_config_options(response: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_options = response.get("configOptions")
+    if not isinstance(raw_options, list):
+        raise RuntimeSwitchError("ACP TUI configOptions response is not a list")
+    options: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw_option in raw_options:
+        if not isinstance(raw_option, dict):
+            raise RuntimeSwitchError("ACP TUI returned an invalid config option")
+        config_id = raw_option.get("id")
+        option_type = raw_option.get("type")
+        if not isinstance(config_id, str) or not config_id:
+            raise RuntimeSwitchError("ACP TUI returned a config option without an ID")
+        if config_id in seen_ids:
+            raise RuntimeSwitchError(f"ACP TUI returned duplicate config option ID: {config_id}")
+        seen_ids.add(config_id)
+        if option_type == "select":
+            if type(raw_option.get("currentValue")) is not str:
+                raise RuntimeSwitchError(f"ACP TUI returned invalid current value for select option {config_id!r}")
+            _select_values(raw_option)
+        elif option_type == "boolean":
+            if type(raw_option.get("currentValue")) is not bool:
+                raise RuntimeSwitchError(f"ACP TUI returned invalid current value for boolean option {config_id!r}")
+        else:
+            raise RuntimeSwitchError(
+                f"ACP TUI returned unsupported config option type for {config_id!r}: {option_type!r}"
+            )
+        options.append(dict(raw_option))
+    return options
+
+
+def _select_values(option: dict[str, Any]) -> set[str]:
+    entries = option.get("options")
+    if not isinstance(entries, list):
+        raise RuntimeSwitchError(f"ACP TUI returned invalid choices for select option {option['id']!r}")
+    values: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeSwitchError(f"ACP TUI returned invalid choices for select option {option['id']!r}")
+        choices = [entry] if "value" in entry else entry.get("options")
+        if not isinstance(choices, list):
+            raise RuntimeSwitchError(f"ACP TUI returned invalid choice group for select option {option['id']!r}")
+        for choice in choices:
+            if not isinstance(choice, dict) or type(choice.get("value")) is not str:
+                raise RuntimeSwitchError(f"ACP TUI returned invalid choice for select option {option['id']!r}")
+            values.add(choice["value"])
+    return values
+
+
+def _parse_assignment(value: str) -> tuple[str, str]:
+    config_id, separator, raw_value = value.partition("=")
+    if not separator or not config_id:
+        raise RuntimeSwitchError(f"invalid --set {value!r}; expected CONFIG_ID=VALUE")
+    return config_id, raw_value
+
+
+def _parse_config_value(options_by_id: dict[str, dict[str, Any]], config_id: str, raw_value: str) -> str | bool:
+    option = options_by_id.get(config_id)
+    if option is None:
+        raise RuntimeSwitchError(f"unknown config option: {config_id}")
+    if option["type"] == "boolean":
+        if raw_value == "true":
+            return True
+        if raw_value == "false":
+            return False
+        raise RuntimeSwitchError(f"invalid boolean value for {config_id!r}: {raw_value!r}; expected true or false")
+    if raw_value not in _select_values(option):
+        raise RuntimeSwitchError(f"invalid value for config option {config_id!r}: {raw_value!r}")
+    return raw_value
+
+
+def _options_by_id(
+    options: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {option["id"]: option for option in options}
+
+
+def _current_values(
+    options: Sequence[dict[str, Any]],
+) -> dict[str, str | bool]:
+    return {option["id"]: option["currentValue"] for option in options}
+
+
+def _same_config_value(left: Any, right: str | bool) -> bool:
+    return type(left) is type(right) and left == right
+
+
+def _first_category_value(options: Sequence[dict[str, Any]], category: str) -> str | bool | None:
+    option = next((option for option in options if option.get("category") == category), None)
+    return None if option is None else option["currentValue"]
+
+
+def _persist_runtime_options(
+    store: Store,
+    conn: sqlite3.Connection,
+    role: str,
+    options: Sequence[dict[str, Any]],
+) -> None:
+    config_path = store.config.config_path
+    if config_path is None:
+        raise RuntimeSwitchError("runtime configure requires a config file")
+    update_role_capabilities(
+        config_path,
+        role,
+        {
+            "acp_config": _current_values(options),
+            "acp_model": _first_category_value(options, "model"),
+            "acp_effort": _first_category_value(options, "thought_level"),
+            "acp_mode": _first_category_value(options, "mode"),
+        },
+    )
+    updated_config = load_config(config_path, store.runtime_dir)
+    store.config = updated_config
+    store.sync_roles(conn, updated_config.roles.values())
+
+
+def _require_session_id(
+    response: dict[str, Any],
+    expected_session_id: str | None,
+    *,
+    operation: str,
+) -> str:
+    session_id = _optional_string(response.get("sessionId"))
+    if session_id is None:
+        raise RuntimeSwitchError(f"ACP TUI session ID is unknown while {operation}")
+    if expected_session_id is not None and session_id != expected_session_id:
+        raise RuntimeSwitchError(
+            f"runtime session changed while {operation}: expected {expected_session_id!r}, got {session_id!r}"
+        )
+    return session_id
 
 
 def read_handoff_body(path: Path) -> str:
@@ -436,10 +717,16 @@ def _role(store: Store, conn: sqlite3.Connection, role: str) -> sqlite3.Row:
     return role_row
 
 
-def _acp_role(store: Store, conn: sqlite3.Connection, role: str) -> sqlite3.Row:
+def _acp_role(
+    store: Store,
+    conn: sqlite3.Connection,
+    role: str,
+    *,
+    operation: str = "runtime prepare/switch",
+) -> sqlite3.Row:
     role_row = _role(store, conn, role)
     if role_row["mode"] != "acp_tui":
-        raise RuntimeSwitchError(f"runtime prepare/switch requires an acp_tui role: {role}")
+        raise RuntimeSwitchError(f"{operation} requires an acp_tui role: {role}")
     return role_row
 
 
@@ -582,3 +869,16 @@ def _append_lineage(path: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+@contextmanager
+def _runtime_role_lock(runtime_dir: Path, role: str):
+    lock_path = runtime_dir / "handoffs" / role / "runtime.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)

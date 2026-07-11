@@ -223,6 +223,24 @@ The prototype `--agent-runtime cursor-acp`, `--cursor-bin`, and `tmux-team curso
 compatibility aliases. ACP sleep/resume uses explicit `exact` or `handoff` policy and never silently opens a blank
 provider session.
 
+Inspect or change options advertised by an idle live ACP session without
+starting a new provider conversation:
+
+```bash
+tmux-team runtime options implementer
+tmux-team runtime configure implementer \
+  --set '<config-id>=<advertised-value>' \
+  --set '<boolean-id>=true'
+```
+
+IDs and values come from the live Toad `configOptions` response; tmux-team has
+no provider model catalog or hard-coded config IDs. Each confirmed response
+replaces the complete stored `acp_config` map, updates model/effort/mode
+summaries by ACP category, and records same-session lineage. A failed later
+`--set` does not roll back earlier confirmed changes. These commands require a
+Toad build with `configOptions`/`setConfig`; the package extra will be updated
+after that Toad feature is published.
+
 Switch an idle ACP role to a new provider/model session without changing panes
 or losing durable work context:
 

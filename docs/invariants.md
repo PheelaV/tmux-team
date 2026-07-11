@@ -104,6 +104,19 @@ ACP provider sessions are replaceable execution segments. The tmux-team role,
 SQLite work state, scratchpad, todos, worktree, and handoff capsule provide
 continuity.
 
+- Same-session configuration is limited to live `acp_tui` roles with a control
+  socket. Read options from Toad; never maintain provider catalogs or hard-code
+  config IDs.
+- Configure only an idle, non-quiesced session and keep its session ID stable
+  across the initial options, status, and every sequential `setConfig`
+  response.
+- Treat each returned complete option list as authoritative. Persist all
+  confirmed current values in `acp_config`, derive model/effort/mode summaries
+  by category, and sync TOML with SQLite.
+- Record one `config_changed` lineage entry and
+  `role.runtime_config_changed` event per confirmed change. A later failure
+  preserves earlier confirmed state and events; same-session configuration
+  never creates a capsule, replacement session, or rollback claim.
 - Runtime switching is initially limited to visible `acp_tui` roles.
 - Refuse switching while the current TUI is busy or asking unless explicit
   cooperative cancellation reaches an idle state.

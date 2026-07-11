@@ -26,9 +26,9 @@ tmux-team acp cancel orchestrator
 ```
 
 The ACP prototype uses visible Toad panes. Toad owns the arbitrary ACP command and its session; tmux-team uses a
-unique role control socket only for readiness, status, compact prompts, and cancellation. The `cursor-acp` runtime,
-`--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP sleep/resume supports explicit `exact` and
-`handoff` policies.
+unique role control socket for readiness, status, compact prompts, cancellation, and advertised session
+configuration. The `cursor-acp` runtime, `--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP
+sleep/resume supports explicit `exact` and `handoff` policies.
 Install the temporary `tmux-team[acp]` extra with Python 3.14; the base package remains Python 3.11+.
 Use a provider's explicit autonomous flag only when intended. For constrained Cursor roles, configure project-local
 `.cursor/cli.json` permissions including `Shell(command)` and `Shell(tmux-team)`; see
@@ -277,6 +277,39 @@ ACP TUI delivery uses `control-socket`: `tmux-team send` writes the durable task
 the role's private Unix socket, and Toad queues an ACP `session/prompt`. The task body is never sent through the
 socket. Urgent wakes are marked urgent and repeated inbox wakes use `coalesceKey="inbox"`.
 
+## ACP Same-Session Configuration
+
+List every option advertised by a live ACP role:
+
+```bash
+tmux-team runtime options implementer
+```
+
+The output includes each option ID, category, type, current value, and select
+choices. Unknown categories and grouped choices remain visible.
+
+Change one or more advertised options without starting a new session:
+
+```bash
+tmux-team runtime configure implementer \
+  --set '<config-id>=<advertised-value>' \
+  --set '<boolean-id>=true'
+```
+
+`runtime configure` requires an idle, non-quiesced Toad session and uses the
+role-state-change authorization policy. It accepts only exact advertised
+select values and lowercase `true` or `false` for booleans. Changes are sent
+sequentially. Each returned complete option list is authoritative, must retain
+the same session ID, and must confirm the requested value. Confirmed state is
+persisted in `acp_config`; the first `model`, `thought_level`, and `mode`
+categories also update `acp_model`, `acp_effort`, and `acp_mode`. A later
+failure preserves earlier confirmed changes and their audit events; no rollback
+or new session is claimed.
+
+These commands require Toad's `configOptions`/`setConfig` control actions. The
+package extra remains on the available published Toad revision until that
+feature is published.
+
 ## ACP Runtime Handoffs
 
 Inspect the current provider session and lineage:
@@ -316,9 +349,8 @@ still match; arbitrary, edited, stale, or cross-role files are rejected. Optiona
 characters. Before pane replacement, Toad's control socket atomically quiesces new external prompts; an idle status
 check alone is not treated as a safe boundary.
 
-The switch creates a new provider conversation. Same-session ACP model changes
-remain unsupported until the TUI advertises and applies
-`session/set_config_option`.
+The switch creates a new provider conversation. Use `runtime configure`, not a
+handoff, for options advertised by the current session.
 
 ## Runtime State
 

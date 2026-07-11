@@ -124,6 +124,8 @@ tmux-team obligation start --role collector --summary "Monitor verification" --n
 tmux-team watchdog start --name default --interval 15m --notify-role orchestrator --delivery app-server-turn
 tmux-team role pause trainer
 tmux-team runtime show implementer
+tmux-team runtime options implementer
+tmux-team runtime configure implementer --set '<config-id>=<advertised-value>'
 tmux-team sleep
 tmux-team resume
 ```
@@ -144,6 +146,12 @@ App-server wakes are blunt interrupts. They say durable inbox work exists; the t
 
 ACP provider replacement is a lifecycle boundary, not an ordinary wake. Follow the prepare/switch/recovery contract in
 `references/acp-runtime.md`.
+
+For a same-session ACP option change, inspect `runtime options` first and use
+only advertised IDs and values. `runtime configure` requires an idle,
+non-quiesced session, applies repeated `--set` values sequentially, and keeps
+earlier confirmed changes if a later one fails. It does not create a runtime
+handoff or a new provider session.
 
 Role loop on startup or wake:
 

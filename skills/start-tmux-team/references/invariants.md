@@ -117,8 +117,20 @@ through durable tmux-team state and a bounded handoff capsule.
 - Record previous/new provider session provenance in append-only lineage state.
 - A failed switch leaves the role draining; never silently loop through fresh
   sessions.
-- Same-session model changes are valid only when ACP capability/config responses
-  prove the option was applied.
+
+## ACP Same-Session Configuration
+
+- Operate only on live `acp_tui` roles with a control socket. Discover option
+  IDs, categories, types, current values, and select choices from Toad.
+- Configuration changes require idle, non-quiesced state and one stable session
+  ID. Send repeated changes sequentially and verify every full response.
+- Store every confirmed current value in `acp_config`; derive model, effort, and
+  mode from the first matching ACP category. Keep other categories only in the
+  complete map.
+- Record each confirmed change in JSONL lineage and SQLite. Preserve prior
+  successes if a later change fails; never claim rollback.
+- Same-session changes create neither handoff capsules nor replacement
+  sessions.
 
 ## Role Memory
 
