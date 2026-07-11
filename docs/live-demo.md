@@ -22,6 +22,8 @@ Bootstrap opens the live Textual dashboard as a split next to `tt-control`, so t
 Alternatively, start a provider-agnostic ACP/Toad team. Cursor is the default provider command for this demo:
 
 ```bash
+TMUX_TEAM_RUN_LIVE_ACP=1 \
+LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
 make live-demo-acp-bootstrap
 tmux attach -t tt-live-demo
 ```
@@ -33,7 +35,20 @@ the durable scenario after the observer is ready:
 make live-demo-acp-start
 ```
 
-Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a human will approve role tools. ACP mode uses the same seeded repository and role worktrees and verifies control-socket delivery plus exact provider-session sleep/resume.
+The real-provider path is deliberately gated. Set `TMUX_TEAM_RUN_LIVE_ACP=1` to accept provider usage and set
+`LIVE_DEMO_ACP_MODEL` explicitly so the selected task model is intentional:
+
+```bash
+TMUX_TEAM_RUN_LIVE_ACP=1 \
+LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
+make live-demo-acp-bootstrap
+```
+
+Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another
+compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a
+human will approve role tools. ACP mode uses the same seeded repository and role worktrees and verifies control-socket
+delivery plus exact provider-session sleep/resume. Toad must first establish each provider session; tmux-team then
+confirms the requested model before dispatching the durable scenario goal.
 
 The live scenario has an operator recovery phase. After the collector reports the first passing stable verification and the orchestrator arms the post-resume watchdog, trigger sleep/resume from the control side:
 
@@ -75,7 +90,7 @@ The scenario asks the orchestrator to exercise the main operating surfaces:
 - obligation start/update/complete state;
 - milestone recording by the orchestrator only;
 - stable commit approval and collector sync;
-- `broadcast --notice --only` and `broadcast --notice --exclude`.
+- `broadcast --notice --only implementer,collector` and `broadcast --notice --exclude orchestrator`.
 
 The verifier checks that the final target test passes in the collector worktree, the implementer produced a fix commit, the collector verified the approved stable commit in its own worktree, operator metadata and role Codex launch settings are present, tmux truecolor session settings are active, the team slept and resumed, the persistent watchdog was restarted by resume, and the runtime database contains the expected messages, watchdog pressure escalations, completion notices, notice broadcasts, completed obligation state, stable approval, obligation/watchdog events, and milestones. It fails duplicate collector verification dispatches by requiring the exact expected correlation keys and message counts.
 

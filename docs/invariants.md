@@ -6,7 +6,7 @@ These are product constraints, not implementation suggestions.
 
 The Codex session that starts `tmux-team bootstrap` is the operator control session.
 
-- Bootstrap names its tmux window `tt-control`.
+- Bootstrap names its runtime-matched operator-agent window `tt-control`: Codex for Codex teams, Toad for ACP teams.
 - It is not a managed role agent.
 - It is not a delivery target for `tmux-team send`.
 - It remains available for the human operator to inspect, intervene, resize the team, and run control commands.

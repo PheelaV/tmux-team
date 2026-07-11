@@ -36,7 +36,6 @@ DEFAULT_APP_SERVER_WINDOW = "tt-app-server"
 DEFAULT_AGENTS_WINDOW = "tt-agents"
 AGENT_LAYOUTS = ("grouped", "separate-windows")
 AGENT_RUNTIMES = ("codex", "acp")
-CONTROL_MODES = ("auto", "shell", "codex")
 ROLE_PANE_OPTION = "@tmux-team-role"
 TT_PREFIX = "tt-"
 
@@ -50,7 +49,6 @@ class BootstrapResult:
     role_threads: dict[str, str]
     role_sessions: dict[str, str]
     role_panes: dict[str, str]
-    operator_thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,7 +119,6 @@ def bootstrap_team(
     start_app_server: bool,
     agent_layout: str,
     control_window: str,
-    control_mode: str,
     agents_window: str,
     role_yolo: bool,
     role_profile: str | None,
@@ -149,9 +146,6 @@ def bootstrap_team(
     agent_layout = normalize_agent_layout(agent_layout)
     runtime = agent_runtime_adapter(agent_runtime)
     agent_runtime = runtime.name
-    control_mode = normalize_control_mode(control_mode)
-    if runtime.uses_control_socket and control_mode == "auto":
-        control_mode = "shell"
     role_launch_options = role_launch_options or {}
     validate_role_launch_options(roles, role_launch_options)
     if runtime.uses_control_socket:
@@ -172,8 +166,6 @@ def bootstrap_team(
         acp_tui_bin = resolved_acp_tui_bin
     if runtime.uses_control_socket and not acp_agent_command.strip():
         raise BootstrapError("ACP agent command is required")
-    if control_mode == "codex" and shutil.which(codex_bin) is None and not dry_run:
-        raise BootstrapError(f"codex binary not found for control pane: {codex_bin}")
     if not dry_run and runtime.uses_app_server:
         ensure_start_skill_available()
     role_worktree_paths, worktree_commands = prepare_role_worktrees(
@@ -189,6 +181,7 @@ def bootstrap_team(
     role_scratchpad_values = resolve_role_scratchpads(project_root, roles, role_scratchpads or {})
     resolved_runtime_dir = resolve_runtime_dir(project_root, runtime_dir)
     role_control_sockets = {role: control_socket_path(resolved_runtime_dir, role) for role in roles}
+    operator_control_socket = resolved_runtime_dir / "acp" / "tt-control.sock"
 
     if dry_run:
         role_bindings = dry_run_role_bindings(
@@ -217,9 +210,9 @@ def bootstrap_team(
             role_yolo=role_yolo,
             role_profile=role_profile,
             role_launch_options=role_launch_options,
-            control_mode=control_mode,
             enable_truecolor=enable_truecolor,
             agent_runtime=agent_runtime,
+            operator_control_socket=operator_control_socket,
         ):
             print(shlex.join(command))
         print(
@@ -232,7 +225,7 @@ def bootstrap_team(
                 role_profile,
                 role_launch_options,
                 role_scratchpad_values,
-                operator=OperatorConfig(pane=f"{session}:{control_window}.0"),
+                operator=operator_config(f"{session}:{control_window}.0", agent_runtime, operator_control_socket),
                 agent_runtime=agent_runtime,
                 acp_tui_bin=acp_tui_bin,
                 acp_agent_command=acp_agent_command,
@@ -276,9 +269,25 @@ def bootstrap_team(
     write_role_env_files(config_path, provisional_bindings)
     write_role_scratchpads(config_path, initial_goal=goal)
 
-    operator_pane = ensure_control_plane_window(
-        tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
+    operator_command = control_agent_shell_command(
+        agent_runtime,
+        codex_bin,
+        acp_tui_bin,
+        acp_agent_command,
+        project_root,
+        config_path,
+        operator_control_socket,
     )
+    operator_pane, operator_started = ensure_control_plane_window(
+        tmux_bin, session, project_root, control_window, operator_command
+    )
+    operator = operator_config(
+        operator_pane,
+        agent_runtime if operator_started else None,
+        operator_control_socket,
+    )
+    if runtime.uses_control_socket and operator_started:
+        operator = initialize_acp_control_agent(operator, operator_control_socket, config_path)
     if enable_truecolor:
         configure_session_truecolor(tmux_bin, session)
     if start_app_server and runtime.uses_app_server:
@@ -325,7 +334,7 @@ def bootstrap_team(
         role_launch_options,
         role_scratchpad_values,
         force=True,
-        operator=OperatorConfig(pane=operator_pane),
+        operator=operator,
         agent_runtime=agent_runtime,
         acp_tui_bin=acp_tui_bin,
         acp_agent_command=acp_agent_command,
@@ -366,14 +375,21 @@ def dry_run_tmux_commands(
     role_yolo: bool,
     role_profile: str | None,
     role_launch_options: dict[str, RoleLaunchOptions],
-    control_mode: str,
     enable_truecolor: bool,
     agent_runtime: str,
+    operator_control_socket: Path,
 ) -> list[list[str]]:
+    control_command = control_agent_shell_command(
+        agent_runtime,
+        codex_bin,
+        acp_tui_bin,
+        acp_agent_command,
+        project_root,
+        config_path,
+        operator_control_socket,
+    )
     commands: list[list[str]] = [
-        control_plane_session_command(
-            tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
-        )
+        control_plane_session_command(tmux_bin, session, project_root, control_window, control_command)
     ]
     if enable_truecolor:
         commands.extend(session_truecolor_tmux_commands(tmux_bin, session))
@@ -467,33 +483,30 @@ def app_server_tmux_commands(
 
 def ensure_control_plane_window(
     tmux_bin: str,
-    codex_bin: str,
     session: str,
     project_root: Path,
-    config_path: Path,
     control_window: str,
-    control_mode: str,
-) -> str | None:
+    command: str,
+) -> tuple[str | None, bool]:
     if not tmux_session_exists(tmux_bin, session):
-        run(
-            control_plane_session_command(
-                tmux_bin, codex_bin, session, project_root, config_path, control_window, control_mode
-            ),
-            check=True,
-        )
-        return first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+        run(control_plane_session_command(tmux_bin, session, project_root, control_window, command), check=True)
+        pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+        return pane, True
 
     current_session = detect_current_tmux_session(tmux_bin)
     if current_session == session:
         current_window_id = detect_current_tmux_window_id(tmux_bin)
         if current_window_id:
             run([tmux_bin, "rename-window", "-t", current_window_id, control_window], check=True)
-            return detect_current_tmux_pane_id(tmux_bin) or first_pane_id(tmux_bin, current_window_id)
+            pane = detect_current_tmux_pane_id(tmux_bin) or first_pane_id(tmux_bin, current_window_id)
+            return pane, False
 
     if not tmux_window_exists(tmux_bin, session, control_window):
-        command = control_plane_shell_command(codex_bin, project_root, config_path, control_mode)
         run(new_window_command(tmux_bin, session, control_window, project_root, command), check=True)
-    return first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+        pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+        return pane, True
+    pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+    return pane, False
 
 
 def start_role_panes_and_discover_threads(
@@ -605,6 +618,38 @@ def start_acp_role_panes(
             resume_supported=status.get("resumeSupported") if isinstance(status.get("resumeSupported"), bool) else None,
         )
     return role_bindings
+
+
+def operator_config(pane: str | None, agent_runtime: str | None, control_socket: Path) -> OperatorConfig:
+    capabilities: dict[str, object] = {}
+    if agent_runtime:
+        capabilities["agent_runtime"] = agent_runtime
+    if agent_runtime == "acp":
+        capabilities["control_socket"] = str(control_socket)
+    return OperatorConfig(pane=pane, capabilities=capabilities)
+
+
+def initialize_acp_control_agent(operator: OperatorConfig, control_socket: Path, config_path: Path) -> OperatorConfig:
+    try:
+        wait_for_acp_tui(control_socket, timeout=30.0)
+        send_control_request(
+            control_socket,
+            {
+                "action": "prompt",
+                "text": control_startup_prompt(config_path),
+                "priority": "normal",
+                "coalesceKey": "tmux-team-control-startup",
+            },
+        )
+        time.sleep(3.0)
+        status = wait_for_acp_tui(control_socket, timeout=3.0)
+    except ACPControlError as exc:
+        raise BootstrapError(f"ACP TUI control agent did not start: {exc}") from exc
+    capabilities = dict(operator.capabilities)
+    capabilities["runtime_session_id"] = str(status.get("sessionId") or "")
+    if isinstance(status.get("resumeSupported"), bool):
+        capabilities["acp_resume_supported"] = status["resumeSupported"]
+    return OperatorConfig(pane=operator.pane, capabilities=capabilities)
 
 
 def prepare_grouped_agent_window(tmux_bin: str, session: str, agents_window: str) -> None:
@@ -1063,23 +1108,35 @@ def app_server_new_session_command(
 
 def control_plane_session_command(
     tmux_bin: str,
-    codex_bin: str,
     session: str,
     cwd: Path,
-    config_path: Path,
     window: str,
-    control_mode: str,
+    command: str,
 ) -> list[str]:
-    command_args = [tmux_bin, "new-session", "-d", "-s", session, "-n", window, "-c", str(cwd)]
-    command = control_plane_shell_command(codex_bin, cwd, config_path, control_mode)
-    if command:
-        command_args.append(command)
-    return command_args
+    return [tmux_bin, "new-session", "-d", "-s", session, "-n", window, "-c", str(cwd), command]
 
 
-def control_plane_shell_command(codex_bin: str, project_root: Path, config_path: Path, control_mode: str) -> str:
-    if control_mode == "shell":
-        return f'exec env {CONFIG_PATH_ENV}={shlex.quote(str(config_path))} "${{SHELL:-/bin/sh}}" -il'
+def control_agent_shell_command(
+    agent_runtime: str,
+    codex_bin: str,
+    acp_tui_bin: str,
+    acp_agent_command: str,
+    project_root: Path,
+    config_path: Path,
+    control_socket: Path,
+) -> str:
+    if agent_runtime == "acp":
+        return acp_control_shell_command(
+            acp_tui_bin,
+            acp_agent_command,
+            project_root,
+            config_path,
+            control_socket,
+        )
+    return codex_control_shell_command(codex_bin, project_root, config_path)
+
+
+def codex_control_shell_command(codex_bin: str, project_root: Path, config_path: Path) -> str:
     codex_args = [
         "env",
         f"{CONFIG_PATH_ENV}={config_path}",
@@ -1092,9 +1149,33 @@ def control_plane_shell_command(codex_bin: str, project_root: Path, config_path:
     return keep_open_command(command, DEFAULT_CONTROL_WINDOW)
 
 
+def acp_control_shell_command(
+    acp_tui_bin: str,
+    acp_agent_command: str,
+    project_root: Path,
+    config_path: Path,
+    control_socket: Path,
+) -> str:
+    tui_args = [
+        acp_tui_bin,
+        "acp",
+        "--project-dir",
+        str(project_root),
+        "--title",
+        "tmux-team control",
+        "--control-socket",
+        str(control_socket),
+        "--compact-ui",
+        acp_agent_command,
+    ]
+    env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", *tui_args]
+    command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
+    return keep_open_command(command, DEFAULT_CONTROL_WINDOW)
+
+
 def control_startup_prompt(config_path: Path) -> str:
     return (
-        "You are the tmux-team operator control Codex session in `tt-control`.\n"
+        "You are the tmux-team operator control agent in `tt-control`.\n"
         "Use the start-tmux-team skill now and read its invariants before operating the team.\n"
         f"The active config is `{config_path}` and is also available through TMUX_TEAM_CONFIG.\n"
         "You are not a managed role. Use `tmux-team status`, `tmux-team send`, and `tmux-team sleep` "
@@ -1391,13 +1472,6 @@ def parse_roles(raw: str | None) -> tuple[str, ...]:
         if not role.replace("-", "").replace("_", "").isalnum():
             raise BootstrapError(f"invalid role name: {role}")
     return roles
-
-
-def normalize_control_mode(value: str) -> str:
-    normalized = value.strip().lower().replace("_", "-")
-    if normalized in CONTROL_MODES:
-        return normalized
-    raise BootstrapError(f"invalid control mode: {value} (expected auto, shell, or codex)")
 
 
 def validate_role_launch_options(roles: tuple[str, ...], options: dict[str, RoleLaunchOptions]) -> None:

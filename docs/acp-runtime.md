@@ -27,9 +27,11 @@ tmux-team bootstrap --project-root . \
   --goal "Inspect the failing test and report verified evidence."
 ```
 
-The layout contains `tt-control` and visible role panes in `tt-agents`; ACP teams do not need `tt-app-server`.
-Bootstrap verifies each Toad socket and provider session before reporting success.
-Managed panes use Toad compact mode, which keeps the single-session tab bar hidden.
+The layout contains a Toad/ACP operator agent in `tt-control` and visible role panes in `tt-agents`; ACP teams do not
+need `tt-app-server`. The control agent is not a managed role and receives no role inbox work. Bootstrap verifies each
+Toad socket and provider session before reporting success.
+Managed panes use Toad compact mode, which keeps the single-session tab bar hidden, uses the full pane width, and
+sets runtime-neutral terminal titles such as `tmux-team: collector`.
 
 ## Permissions
 

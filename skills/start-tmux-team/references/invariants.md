@@ -6,7 +6,7 @@ Follow these constraints when changing or debugging tmux-team behavior. Ordinary
 
 The Codex session that invokes the skill is the operator control session.
 
-- Name the launcher/operator tmux window `tt-control`.
+- Name the runtime-matched operator-agent window `tt-control`: Codex for Codex teams, Toad for ACP teams.
 - Do not treat `tt-control` as a managed role.
 - Do not route `tmux-team send` work to `tt-control` unless the operator explicitly adds it as a role.
 - Record operator recovery metadata in `[operator]` when available. `operator.pane` and `operator.codex_thread_id` help recovery, but they do not make the control pane a managed role.

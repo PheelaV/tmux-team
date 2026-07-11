@@ -19,7 +19,6 @@ from .acp_tui import ACPControlError, control_socket_path, send_control_request
 from .bootstrap import (
     AGENT_LAYOUTS,
     AGENT_RUNTIMES,
-    CONTROL_MODES,
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
     DEFAULT_CONTROL_WINDOW,
@@ -333,12 +332,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap.add_argument(
         "--control-window", default=DEFAULT_CONTROL_WINDOW, help="Name for the launcher/operator window"
-    )
-    bootstrap.add_argument(
-        "--control-mode",
-        default="auto",
-        choices=CONTROL_MODES,
-        help="tt-control startup mode: auto reuses an existing tmux launcher or starts Codex; shell starts a plain shell",
     )
     bootstrap.add_argument("--agents-window", default=DEFAULT_AGENTS_WINDOW, help="Window name for grouped agent panes")
     bootstrap.add_argument(
@@ -958,7 +951,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             start_app_server=not args.no_start_app_server,
             agent_layout=args.agent_layout,
             control_window=args.control_window,
-            control_mode=args.control_mode,
             agents_window=args.agents_window,
             role_yolo=args.role_yolo,
             role_profile=args.role_profile,

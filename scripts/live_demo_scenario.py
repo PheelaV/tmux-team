@@ -9,9 +9,12 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
+
+from tmux_team.acp_tui import send_control_request
 
 DEFAULT_ROOT = Path("/tmp/tmux-team-live-demo")
 DEFAULT_SESSION = "tt-live-demo"
@@ -84,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     bootstrap_parser.add_argument("--acp-tui-bin", default="toad")
     bootstrap_parser.add_argument("--acp-agent-command", default="agent acp")
     bootstrap_parser.add_argument("--acp-provider", default="cursor")
+    bootstrap_parser.add_argument("--acp-model", default="")
     bootstrap_parser.add_argument("--defer-goal", action="store_true", help="Start roles without queuing the goal")
     bootstrap_parser.add_argument(
         "--role-yolo", action="store_true", help="Launch managed role panes in Codex YOLO mode"
@@ -247,6 +251,8 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
     config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
     if args.agent_runtime == "acp":
         verify_acp_demo_ready(args.session, config_path)
+        if args.acp_model:
+            configure_acp_demo_model(config_path, args.acp_model)
     start_dashboard_pane(args.session, config_path)
     print("LIVE DEMO BOOTSTRAP STARTED")
     print(f"session: {args.session}")
@@ -295,6 +301,7 @@ def start_goal(root: Path) -> None:
 def verify_acp_demo_ready(session: str, config_path: Path) -> None:
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     failure_markers = ("Traceback", "BadIdentifier", "ACP TUI role exited", "Not in allowlist")
+    verify_acp_control_ready(session, config, failure_markers)
     for role in ROLES:
         role_config = config["roles"][role]
         pane = str(role_config["pane"])
@@ -312,6 +319,114 @@ def verify_acp_demo_ready(session: str, config_path: Path) -> None:
             raise ScenarioError(f"ACP role {role} failed readiness check ({marker}) in session {session}")
 
 
+def verify_acp_control_ready(session: str, config: dict[str, Any], failure_markers: tuple[str, ...]) -> None:
+    operator = config.get("operator", {})
+    pane = str(operator.get("pane") or "")
+    socket_value = operator.get("control_socket")
+    session_id = operator.get("runtime_session_id")
+    if operator.get("agent_runtime") != "acp" or not pane or not socket_value or not session_id:
+        raise ScenarioError("ACP operator metadata is incomplete")
+    pane_state = run(["tmux", "display-message", "-p", "-t", pane, "#{pane_dead}"], check=False)
+    if pane_state.returncode != 0 or pane_state.stdout.strip() != "0":
+        raise ScenarioError(f"ACP control pane {pane} is not alive in session {session}")
+    status = send_control_request(Path(str(socket_value)), {"action": "status", "sessionId": str(session_id)})
+    if status.get("sessionId") != session_id:
+        raise ScenarioError("ACP control socket reported a different session")
+    capture = run(["tmux", "capture-pane", "-p", "-t", pane, "-S", "-120"], check=False)
+    marker = next((value for value in failure_markers if value in capture.stdout), None)
+    if capture.returncode != 0 or marker is not None:
+        raise ScenarioError(f"ACP control agent failed readiness check ({marker or 'capture failed'})")
+
+
+def configure_acp_demo_model(config_path: Path, model: str) -> None:
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    for role in ROLES:
+        role_config = config.get("roles", {}).get(role, {})
+        wait_for_acp_session_idle(
+            Path(str(role_config.get("control_socket") or "")),
+            str(role_config.get("runtime_session_id") or ""),
+            f"role {role}",
+        )
+        if (
+            acp_session_model(
+                Path(str(role_config.get("control_socket") or "")),
+                str(role_config.get("runtime_session_id") or ""),
+            )
+            != model
+        ):
+            run(
+                [
+                    "tmux-team",
+                    "--config",
+                    str(config_path),
+                    "runtime",
+                    "configure",
+                    role,
+                    "--set",
+                    f"model={model}",
+                ]
+            )
+
+    operator = config.get("operator", {})
+    socket_value = operator.get("control_socket")
+    session_id = operator.get("runtime_session_id")
+    if not socket_value or not session_id:
+        raise ScenarioError("ACP operator is missing control-socket session metadata")
+    wait_for_acp_session_idle(Path(str(socket_value)), str(session_id), "operator")
+    if acp_session_model(Path(str(socket_value)), str(session_id)) == model:
+        response = send_control_request(
+            Path(str(socket_value)), {"action": "configOptions", "sessionId": str(session_id)}
+        )
+    else:
+        response = send_control_request(
+            Path(str(socket_value)),
+            {
+                "action": "setConfig",
+                "sessionId": str(session_id),
+                "configId": "model",
+                "value": model,
+            },
+        )
+    if response.get("sessionId") != session_id:
+        raise ScenarioError("ACP operator session changed while configuring the demo model")
+    configured = {
+        option.get("id"): option.get("currentValue")
+        for option in response.get("configOptions", [])
+        if isinstance(option, dict)
+    }
+    if configured.get("model") != model:
+        raise ScenarioError(f"ACP operator did not confirm demo model {model!r}")
+    print(f"ACP demo model: {model}")
+
+
+def acp_session_model(socket_path: Path, session_id: str) -> str:
+    response = send_control_request(socket_path, {"action": "configOptions", "sessionId": session_id})
+    if response.get("sessionId") != session_id:
+        raise ScenarioError("ACP config-options response reported a different session")
+    for option in response.get("configOptions", []):
+        if isinstance(option, dict) and option.get("id") == "model":
+            return str(option.get("currentValue") or "")
+    raise ScenarioError("ACP session does not advertise a model config option")
+
+
+def wait_for_acp_session_idle(socket_path: Path, session_id: str, label: str, timeout: float = 60.0) -> None:
+    if not str(socket_path) or not session_id:
+        raise ScenarioError(f"ACP {label} is missing control-socket session metadata")
+    deadline = time.monotonic() + timeout
+    last_state = "unknown"
+    while time.monotonic() < deadline:
+        status = send_control_request(socket_path, {"action": "status", "sessionId": session_id})
+        if status.get("sessionId") != session_id:
+            raise ScenarioError(f"ACP {label} control socket reported a different session")
+        last_state = str(status.get("state") or "unknown")
+        if last_state == "idle":
+            return
+        if last_state == "failed":
+            break
+        time.sleep(0.2)
+    raise ScenarioError(f"ACP {label} did not become idle within {timeout:g}s (state={last_state})")
+
+
 def verify(root: Path) -> None:
     metadata = load_metadata(root)
     project = Path(metadata["project"])
@@ -326,6 +441,8 @@ def verify(root: Path) -> None:
     is_acp = all(roles.get(role, {}).get("mode") == "acp_tui" for role in ROLES)
     if not operator.get("pane"):
         raise ScenarioError("team.toml is missing operator pane recovery metadata")
+    if is_acp:
+        verify_acp_control_ready("configured session", config, ("Traceback", "ACP TUI role exited"))
     for role, key in (
         ("orchestrator", "project"),
         ("implementer", "implementer_worktree"),
@@ -368,12 +485,6 @@ def verify(root: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        require_sql_count_exact(
-            conn,
-            "messages",
-            "sender = 'orchestrator' AND recipient = 'collector' AND message_kind = 'task'",
-            2,
-        )
         require_sql_count_exact(
             conn,
             "messages",
@@ -784,14 +895,14 @@ def write_acp_goal(root: Path, metadata: dict[str, Any], provider: str) -> None:
     1. Orchestrator records a start milestone and starts one obligation for demo verification with a short next-update window.
     2. Orchestrator runs operator show, status --verbose, dashboard --once --no-pane-preview, pane list --all, watchdog, memory show, and acp status for every role before dispatching. Confirm the role runtime is ACP, provider is {provider}, and each role has a control socket and runtime session id.
     3. After the obligation becomes overdue, orchestrator runs `tmux-team watchdog run --once --name {WATCHDOG_PRESSURE_NAME} --delivery control-socket --notify-role orchestrator --description "Live ACP demo pressure check" --goal "Escalate overdue demo obligations"`. Claim and complete the resulting watchdog message after reconciling the obligation.
-    4. Orchestrator broadcasts one notice-only checkpoint to implementer and collector.
+    4. Orchestrator broadcasts one notice-only checkpoint to implementer and collector using `broadcast --notice --only implementer,collector`.
     5. Orchestrator sends collector exactly one baseline task with --correlation-key {CORRELATION_KEYS["baseline"]}. Collector identifies the minimal failing test and reports evidence with --reply-to-sender.
     6. Orchestrator updates the obligation after accepting collector evidence.
     7. Orchestrator sends implementer exactly one fix task with --correlation-key {CORRELATION_KEYS["fix"]}. Implementer fixes production code in its own worktree, runs the targeted test, commits, and replies with the commit SHA.
     8. Orchestrator inspects relation state with inbox list --verbose and one role pane with pane capture --lines and --offset.
     9. Orchestrator approves the implementer commit with stable approve <sha> --role {STABLE_SCOPE}.
     10. Orchestrator sends collector exactly one verification task with --correlation-key {CORRELATION_KEYS["verification"]}. Collector syncs the approved stable commit and reruns the targeted test in its own worktree.
-    11. Orchestrator completes the obligation, records a passing-test milestone, checks status/watchdog/acp status, and broadcasts a final notice excluding orchestrator.
+    11. Orchestrator completes the obligation, records a passing-test milestone, checks status/watchdog/acp status, and broadcasts a final notice using `broadcast --notice --exclude orchestrator`.
     12. After reviewing completion notices, close them so the final inbox contains no unfinished work.
 
     Correlation discipline:

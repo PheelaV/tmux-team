@@ -44,7 +44,6 @@ def main() -> int:
             start_app_server=True,
             agent_layout="grouped",
             control_window=bootstrap_mod.DEFAULT_CONTROL_WINDOW,
-            control_mode="shell",
             agents_window=bootstrap_mod.DEFAULT_AGENTS_WINDOW,
             role_yolo=False,
             role_profile=None,

@@ -14,10 +14,12 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made completion replies, initial goals, and MCP sends use each recipient role's configured delivery method.
 - Added `make install-cursor-skill` for the shared `start-tmux-team` skill.
 - Added separate Codex and provider-agnostic ACP live-demo bootstrap paths over the same reproducible public fixture.
-- Made shell-mode `tt-control` launch a persistent interactive operator shell directly instead of reporting a transient banner command as exited.
+- Made the real ACP live demo require explicit provider-usage opt-in and task-model selection before goal dispatch.
+- Made `tt-control` a runtime-matched operator agent: Codex for Codex teams and Toad/ACP for ACP teams, outside managed role routing.
 - Made ACP bootstrap discover Toad inside the tmux-team uv tool environment when dependency executables are not exposed on the user PATH.
 - Made managed Toad panes start with compact, reversible chrome and added a post-startup socket stabilization check so provider-triggered TUI crashes fail bootstrap instead of appearing healthy.
 - Made Toad compact mode keep the single-session tab bar hidden after session startup.
+- Made compact managed Toad panes use full-width content and runtime-neutral terminal titles.
 - Made role-scoped stable approvals resolve abbreviated Git revisions to canonical commit object IDs before persistence.
 - Added `tmux-team runtime show/prepare/switch` for safe ACP provider/model
   session replacement through draining, bounded handoff capsules, recovery

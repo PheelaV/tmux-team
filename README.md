@@ -28,6 +28,8 @@ Run the same public-snapshot task through an external ACP TUI runtime with:
 
 ```bash
 make live-demo-setup
+TMUX_TEAM_RUN_LIVE_ACP=1 \
+LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
 make live-demo-acp-bootstrap
 tmux attach -t tt-live-demo
 make live-demo-acp-start
@@ -56,7 +58,8 @@ verifier: LIVE DEMO VERIFY OK
 
 ## What You Get
 
-- Visible tmux panes for every role, with `tt-control` and `tt-app-server` kept separate.
+- Visible tmux panes for every role, with a separate runtime-matched `tt-control` operator agent and, for Codex teams,
+  a separate `tt-app-server` transport window.
 - Durable SQLite inboxes with claim, ack, complete, completion replies, and reclaimable stale work.
 - App-server wake turns instead of production `tmux send-keys`.
 - Per-role scratchpad memory for long-lived state and active-message todos for reset-safe substeps.
@@ -206,9 +209,10 @@ tmux-team bootstrap \
   --goal "Inspect the smallest failing test and report the result."
 ```
 
-The tmux layout remains `tt-control` plus visible role panes in `tt-agents`, but there is no `tt-app-server`
-window. Each role gets a unique mode-`0600` Unix socket under the runtime directory. Bootstrap waits for Toad's
-`ping`/`status` handshake before sending the role startup prompt.
+The tmux layout uses a Toad/ACP operator agent in `tt-control` plus visible role panes in `tt-agents`; there is no
+`tt-app-server` window. The control agent is visible and interactive but is not a managed role and receives no role
+inbox work. Each role gets a unique mode-`0600` Unix socket under the runtime directory. Bootstrap waits for Toad's
+`ping`/`status` handshake before sending startup prompts.
 
 Production wake delivery does not type into the pane:
 
@@ -421,7 +425,11 @@ make live-demo-verify
 make live-demo-clean
 ```
 
-The live demo clones a public snapshot, seeds a real failing test, opens the dashboard beside `tt-control`, and asks a visible Codex team to diagnose, fix, approve, and verify the change across separate role worktrees. It remains a readable demo, but still includes the dashboard snapshot, sleep/resume, watchdog pressure, obligations, milestones, stable approval, completion replies, notice broadcasts, correlation-key discipline, truecolor session setup, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
+The live demo clones a public snapshot, seeds a real failing test, opens the dashboard beside `tt-control`, and asks a
+visible runtime-selected team to diagnose, fix, approve, and verify the change across separate role worktrees. It
+remains a readable demo, but still includes the dashboard snapshot, sleep/resume, watchdog pressure, obligations,
+milestones, stable approval, completion replies, notice broadcasts, correlation-key discipline, truecolor session
+setup, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
 
 Opt-in real Codex integration:
 

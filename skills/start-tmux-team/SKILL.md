@@ -93,15 +93,16 @@ Prefer `--role-profile`. Use `--role-yolo` only when the operator accepts Codex 
 
 Codex bootstrap creates or updates:
 
-- `tt-control` for the operator launcher, not a managed role;
+- `tt-control` for the runtime-matched operator agent, not a managed role: Codex for Codex teams, Toad for ACP teams;
 - `tt-app-server` for isolated `codex app-server` transport;
 - visible role panes in grouped `tt-agents` by default;
 - per-role Codex remote TUI sessions launched with `codex --cd <role-worktree> --remote ...`;
 - `.tmux-team/team.toml`, `team.sqlite`, pane metadata, env discovery files, and scratchpad memory;
 - the initial orchestrator inbox message and app-server wake when a goal is provided.
 
-ACP TUI bootstrap keeps `tt-control` and visible `tt-agents` panes and uses private role control sockets; the detailed
-runtime contract is in `references/acp-runtime.md`.
+ACP TUI bootstrap runs a Toad operator agent in `tt-control`, visible `tt-agents` panes, and private role control
+sockets; the control agent is not a role and receives no inbox work. The detailed runtime contract is in
+`references/acp-runtime.md`.
 
 After startup, report the tmux session, config path, app-server endpoint, role thread IDs, and attach command:
 

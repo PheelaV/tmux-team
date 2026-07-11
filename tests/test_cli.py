@@ -16,8 +16,9 @@ from unittest.mock import patch
 from tmux_team.bootstrap import (
     BootstrapError,
     RoleBinding,
+    acp_control_shell_command,
+    codex_control_shell_command,
     configure_session_truecolor,
-    control_plane_shell_command,
     default_session_name,
     prepare_role_worktrees,
     render_team_config,
@@ -108,12 +109,23 @@ requires_stable_commit = true
         data = tomllib.loads(rendered)
         self.assertTrue(data["roles"]["orchestrator"]["acp_resume_supported"])
 
-    def test_shell_control_plane_starts_persistent_bound_shell_directly(self) -> None:
-        command = control_plane_shell_command("codex", self.root, self.config, "shell")
+    def test_control_plane_uses_runtime_agent_without_role_binding(self) -> None:
+        command = codex_control_shell_command("codex", self.root, self.config)
 
         self.assertIn(f"TMUX_TEAM_CONFIG={self.config}", command)
-        self.assertIn('"${SHELL:-/bin/sh}" -il', command)
-        self.assertNotIn("exited with status", command)
+        self.assertIn("tmux-team operator control agent", command)
+        self.assertIn("exited with status", command)
+
+        acp_command = acp_control_shell_command(
+            "toad",
+            "agent acp",
+            self.root,
+            self.config,
+            self.root / "runtime" / "acp" / "tt-control.sock",
+        )
+        self.assertIn("tmux-team control", acp_command)
+        self.assertIn("tt-control.sock", acp_command)
+        self.assertNotIn("TMUX_TEAM_ROLE", acp_command)
 
     def test_runtime_dir_uses_cli_then_env_then_config(self) -> None:
         env_runtime = self.root / "env-runtime"
@@ -3326,6 +3338,8 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("tmux new-session -d -s tt-acp -n tt-control", out)
+        self.assertIn("tmux-team control", out)
+        self.assertIn("tt-control.sock", out)
         self.assertIn("tmux new-window -t tt-acp -n tt-agents", out)
         self.assertIn("toad acp --project-dir", out)
         self.assertIn("--control-socket", out)
@@ -3337,6 +3351,8 @@ can_notify = ["orchestrator"]
         self.assertNotIn("codex app-server", out)
         self.assertIn('mode = "acp_tui"', out)
         self.assertIn('notify_method = "control-socket"', out)
+        self.assertIn("[operator]", out)
+        self.assertIn('agent_runtime = "acp"', out)
         self.assertIn('runtime_session_id = "dry-session-orchestrator"', out)
         self.assertIn('acp_provider = "cursor"', out)
         self.assertIn("runtime: acp", out)
