@@ -6,6 +6,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +131,7 @@ class ACPTUIControlTests(unittest.TestCase):
             },
         )
         store = Store(config)
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             message = store.create_message(
                 conn,
                 sender="orchestrator",
@@ -173,7 +174,7 @@ class ACPTUIControlTests(unittest.TestCase):
             },
         )
         store = Store(config)
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.sync_roles(conn, config.roles.values())
             first = store.notify_role(
                 conn,
@@ -205,7 +206,7 @@ class ACPTUIControlTests(unittest.TestCase):
         self.assertEqual(
             pyproject["project"]["optional-dependencies"]["acp"],
             [
-                "batrachian-toad @ git+https://github.com/PheelaV/toad.git@feature/acp-control-socket ; "
+                "batrachian-toad @ git+https://github.com/PheelaV/toad.git@feature/acp-config-options ; "
                 "python_version >= '3.14'"
             ],
         )

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -730,7 +731,7 @@ def label_role_pane_commands(tmux_bin: str, pane: str, role: str) -> list[list[s
 def send_initial_goal(config_path: Path, goal: str) -> None:
     config = load_config(config_path)
     store = Store(config)
-    with store.connect() as conn:
+    with closing(store.connect()) as conn:
         message = store.create_message(
             conn,
             sender="operator",

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -131,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     store = Store(config)
     try:
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             if args.command == "config":
                 return cmd_config(args, config)
             if args.command == "status":

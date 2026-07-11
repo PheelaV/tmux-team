@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -386,7 +387,7 @@ def serve_stdio(
 ) -> int:
     config = load_config(config_path, runtime_dir)
     store = Store(config)
-    with store.connect() as conn:
+    with closing(store.connect()) as conn:
         return serve_json_rpc(store, conn, input_stream or sys.stdin, output_stream or sys.stdout)
 
 

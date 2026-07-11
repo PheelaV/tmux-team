@@ -238,8 +238,8 @@ no provider model catalog or hard-coded config IDs. Each confirmed response
 replaces the complete stored `acp_config` map, updates model/effort/mode
 summaries by ACP category, and records same-session lineage. A failed later
 `--set` does not roll back earlier confirmed changes. These commands require a
-Toad build with `configOptions`/`setConfig`; the package extra will be updated
-after that Toad feature is published.
+Toad build with `configOptions`/`setConfig`; the temporary `tmux-team[acp]`
+extra pins the compatible feature branch.
 
 Switch an idle ACP role to a new provider/model session without changing panes
 or losing durable work context:

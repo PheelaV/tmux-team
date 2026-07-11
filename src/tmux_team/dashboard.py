@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -730,7 +731,7 @@ def run_textual_dashboard(
         def refresh_dashboard(self) -> None:
             self.persist_dashboard_preferences()
             store = Store(config)
-            with store.connect() as conn:
+            with closing(store.connect()) as conn:
                 snapshot = collect_dashboard_snapshot(
                     store,
                     conn,

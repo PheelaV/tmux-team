@@ -7,7 +7,7 @@ import threading
 import time
 import tomllib
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -147,7 +147,7 @@ custom_observer_value = "keep-observer"
             ],
         }
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 return_value={
@@ -170,7 +170,10 @@ custom_observer_value = "keep-observer"
         self.assertIn('"id":"cloud"', output)
         self.assertIn('"value":"fast"', output)
 
-        with self.store.connect() as conn, self.assertRaisesRegex(RuntimeSwitchError, "requires an acp_tui role"):
+        with (
+            closing(self.store.connect()) as conn,
+            self.assertRaisesRegex(RuntimeSwitchError, "requires an acp_tui role"),
+        ):
             runtime_options(self.store, conn, "observer")
 
     def test_configure_parses_values_replaces_full_state_and_persists_events(
@@ -198,7 +201,7 @@ custom_observer_value = "keep-observer"
             {"sessionId": "old-session", "configOptions": after_boolean},
         ]
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 side_effect=responses,
@@ -305,7 +308,7 @@ custom_observer_value = "keep-observer"
                     }
 
                 with (
-                    self.store.connect() as conn,
+                    closing(self.store.connect()) as conn,
                     patch(
                         "tmux_team.runtime_switch.send_control_request",
                         side_effect=control,
@@ -341,7 +344,7 @@ custom_observer_value = "keep-observer"
                     },
                 ]
                 with (
-                    self.store.connect() as conn,
+                    closing(self.store.connect()) as conn,
                     patch(
                         "tmux_team.runtime_switch.send_control_request",
                         side_effect=responses,
@@ -352,7 +355,7 @@ custom_observer_value = "keep-observer"
                 self.assertEqual(control.call_count, 2)
 
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 return_value={
@@ -397,7 +400,7 @@ custom_observer_value = "keep-observer"
                     set_response,
                 ]
                 with (
-                    self.store.connect() as conn,
+                    closing(self.store.connect()) as conn,
                     patch(
                         "tmux_team.runtime_switch.send_control_request",
                         side_effect=responses,
@@ -428,7 +431,7 @@ custom_observer_value = "keep-observer"
             ACPControlError("provider rejected later option"),
         ]
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 side_effect=responses,
@@ -442,7 +445,7 @@ custom_observer_value = "keep-observer"
                 ("model-choice=large", "brave=true"),
             )
 
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             role = self.store.get_role(conn, "worker")
             event_count = conn.execute(
                 """
@@ -507,7 +510,7 @@ custom_observer_value = "keep-observer"
         self.assertIn("id=brave", stdout)
 
     def test_prepare_capsule_excludes_inbox_body_and_drains_after_write(self) -> None:
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             message = self.store.create_message(
                 conn,
                 sender="orchestrator",
@@ -548,7 +551,7 @@ custom_observer_value = "keep-observer"
         self.assertIn("latest durable role state", capsule)
         self.assertIn("- Role state: draining", capsule)
         self.assertEqual(role["state"], "draining")
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             event = conn.execute(
                 "SELECT payload_json FROM events WHERE type = 'role.runtime_handoff_prepared' ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -557,7 +560,7 @@ custom_observer_value = "keep-observer"
     def test_switch_refuses_active_turn_without_cancel(self) -> None:
         handoff = self.write_handoff()
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 return_value={"state": "busy", "sessionId": "old-session"},
@@ -572,7 +575,7 @@ custom_observer_value = "keep-observer"
                 acp_agent_command="new-agent acp",
                 handoff_file=handoff,
             )
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             role = self.store.get_role(conn, "worker")
 
         run.assert_not_called()
@@ -592,7 +595,7 @@ custom_observer_value = "keep-observer"
             return {"state": "accepted", "sessionId": "new-session"}
 
         completed = subprocess.CompletedProcess([], 0, "", "")
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             with (
                 patch("tmux_team.runtime_switch.send_control_request", side_effect=control_request),
                 patch(
@@ -656,7 +659,7 @@ custom_observer_value = "keep-observer"
     def test_dry_run_print_plan_without_mutation(self) -> None:
         handoff = self.write_handoff()
         original_config = self.config_path.read_bytes()
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             with (
                 patch("tmux_team.runtime_switch.send_control_request") as control,
@@ -686,7 +689,7 @@ custom_observer_value = "keep-observer"
         handoff = self.write_handoff()
         completed = subprocess.CompletedProcess([], 0, "", "")
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 return_value={"state": "idle", "sessionId": "old-session"},
@@ -706,7 +709,7 @@ custom_observer_value = "keep-observer"
                 acp_agent_command="new-agent acp",
                 handoff_file=handoff,
             )
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             role = self.store.get_role(conn, "worker")
 
         self.assertEqual(role["state"], "draining")
@@ -772,7 +775,10 @@ custom_observer_value = "keep-observer"
         handoff = self.write_handoff()
         handoff.write_text("# modified after prepare\n", encoding="utf-8")
 
-        with self.store.connect() as conn, self.assertRaisesRegex(RuntimeSwitchError, "changed after preparation"):
+        with (
+            closing(self.store.connect()) as conn,
+            self.assertRaisesRegex(RuntimeSwitchError, "changed after preparation"),
+        ):
             switch_runtime(
                 self.store,
                 conn,
@@ -785,7 +791,10 @@ custom_observer_value = "keep-observer"
         unrelated = self.runtime / "handoffs" / "other" / "handoff.md"
         unrelated.parent.mkdir(parents=True)
         unrelated.write_text("# other role\n", encoding="utf-8")
-        with self.store.connect() as conn, self.assertRaisesRegex(RuntimeSwitchError, "not a prepared capsule"):
+        with (
+            closing(self.store.connect()) as conn,
+            self.assertRaisesRegex(RuntimeSwitchError, "not a prepared capsule"),
+        ):
             switch_runtime(
                 self.store,
                 conn,
@@ -800,7 +809,7 @@ custom_observer_value = "keep-observer"
         latest = self.write_handoff(summary="second")
         self.assertNotEqual(stale, latest)
 
-        with self.store.connect() as conn, self.assertRaisesRegex(RuntimeSwitchError, "handoff is stale"):
+        with closing(self.store.connect()) as conn, self.assertRaisesRegex(RuntimeSwitchError, "handoff is stale"):
             switch_runtime(
                 self.store,
                 conn,
@@ -811,7 +820,7 @@ custom_observer_value = "keep-observer"
             )
 
     def test_prepare_rejects_oversized_body_before_state_change(self) -> None:
-        with self.store.connect() as conn, self.assertRaisesRegex(RuntimeSwitchError, "handoff body exceeds"):
+        with closing(self.store.connect()) as conn, self.assertRaisesRegex(RuntimeSwitchError, "handoff body exceeds"):
             prepare_runtime_handoff(
                 self.store,
                 conn,
@@ -819,7 +828,7 @@ custom_observer_value = "keep-observer"
                 summary="oversized",
                 body="x" * (HANDOFF_BODY_CHARS + 1),
             )
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             self.assertEqual(self.store.get_role(conn, "worker")["state"], "active")
 
     def test_cli_rejects_oversized_body_file(self) -> None:
@@ -857,7 +866,7 @@ custom_observer_value = "keep-observer"
     def test_switch_does_not_respawn_if_turn_starts_during_quiescence_check(self) -> None:
         handoff = self.write_handoff()
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 side_effect=[
@@ -884,7 +893,7 @@ custom_observer_value = "keep-observer"
         run.assert_not_called()
 
     def test_runtime_show_supports_non_acp_role(self) -> None:
-        with self.store.connect() as conn:
+        with closing(self.store.connect()) as conn:
             output = runtime_show(self.store, conn, "observer")
 
         self.assertIn("observer state=active mode=human_visible", output)
@@ -913,7 +922,7 @@ custom_observer_value = "keep-observer"
 
     def write_handoff(self, *, summary: str = "Prepared handoff") -> Path:
         with (
-            self.store.connect() as conn,
+            closing(self.store.connect()) as conn,
             patch(
                 "tmux_team.runtime_switch.send_control_request",
                 return_value={"state": "idle", "sessionId": "old-session", "queueDepth": 0},

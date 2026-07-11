@@ -199,7 +199,7 @@ wheels = [
 [[package]]
 name = "batrachian-toad"
 version = "0.6.20"
-source = { git = "https://github.com/PheelaV/toad.git?rev=feature%2Facp-control-socket#1bad086a6a195f5071ec37de66717846ff1567ee" }
+source = { git = "https://github.com/PheelaV/toad.git?rev=feature%2Facp-config-options#7a0cf6c20db706eddef356338a72dcf4d50a6324" }
 dependencies = [
     { name = "aiosqlite", marker = "python_full_version >= '3.14'" },
     { name = "bashlex", marker = "python_full_version >= '3.14'" },
@@ -1206,7 +1206,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "batrachian-toad", marker = "python_full_version >= '3.14' and extra == 'acp'", git = "https://github.com/PheelaV/toad.git?rev=feature%2Facp-control-socket" },
+    { name = "batrachian-toad", marker = "python_full_version >= '3.14' and extra == 'acp'", git = "https://github.com/PheelaV/toad.git?rev=feature%2Facp-config-options" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "textual", marker = "extra == 'dashboard'", specifier = ">=0.89" },
     { name = "tomli-w", specifier = ">=1.0" },

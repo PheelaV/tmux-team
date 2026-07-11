@@ -307,8 +307,7 @@ failure preserves earlier confirmed changes and their audit events; no rollback
 or new session is claimed.
 
 These commands require Toad's `configOptions`/`setConfig` control actions. The
-package extra remains on the available published Toad revision until that
-feature is published.
+temporary `tmux-team[acp]` extra pins the compatible feature branch.
 
 ## ACP Runtime Handoffs
 

@@ -26,6 +26,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
   same-session ACP configuration. Confirmed full option state is persisted in
   TOML and SQLite, and each successful change records lineage without creating
   a handoff or new provider session.
+- Closed SQLite connections deterministically in CLI, bootstrap, MCP, and
+  dashboard refresh paths instead of relying on process or garbage-collector cleanup.
 - Added ACP sleep/resume with exact `session/load` restoration, verified provider session identity, durable pending-work
   re-wake, and explicit handoff fallback. Sleep quiescence rolls back safely before teardown on failure.
 - Moved ACP-only preflight, permission, and runtime-switch instructions into an on-demand skill reference so Codex-only
@@ -39,10 +41,9 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 Prototype limits:
 
-- ACP roles require a Toad build that implements the generic control-socket
-  protocol. Same-session configuration additionally requires the unpublished
-  `configOptions`/`setConfig` control actions; the package extra and lock file
-  remain unchanged until that Toad feature is published.
+- ACP roles require the temporary Toad config-options branch pinned by the
+  `tmux-team[acp]` extra. It provides the generic control socket, exact session
+  loading, and `configOptions`/`setConfig` actions.
 
 Migration notes:
 

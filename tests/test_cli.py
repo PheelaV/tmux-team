@@ -8,7 +8,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -654,7 +654,7 @@ runtime_dir = "{other_runtime}"
 
     def test_dashboard_role_filter_scopes_watchdogs_and_notification_alerts(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.upsert_watchdog_runner(
                 conn,
                 name="collector-pressure",
@@ -707,7 +707,7 @@ runtime_dir = "{other_runtime}"
 
     def test_dashboard_notification_alerts_move_stale_items_to_history(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.record_notification(
                 conn,
                 None,
@@ -742,7 +742,7 @@ runtime_dir = "{other_runtime}"
 
     def test_dashboard_role_filter_includes_implicit_orchestrator_watchdog_target(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.upsert_watchdog_runner(
                 conn,
                 name="team-pressure",
@@ -847,7 +847,7 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
 
         self.assertEqual(len(snapshot.memories), 1)
@@ -965,7 +965,7 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         notified_id = out.split()[0]
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             conn.execute("UPDATE messages SET state = 'notified' WHERE id = ?", (notified_id,))
             conn.commit()
 
@@ -1262,7 +1262,7 @@ runtime_dir = "{other_runtime}"
         self.assertIn("pressure_skipped: active message", out)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             count = conn.execute(
                 """
                 SELECT COUNT(*) FROM messages
@@ -1446,13 +1446,13 @@ exit 9
 
     def test_watchdog_interval_sleep_wakes_on_interval_update(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.upsert_watchdog_runner(conn, name="default", state="running", interval_seconds=60)
 
             result: list[bool] = []
 
             def wait_for_interval() -> None:
-                with store.connect() as thread_conn:
+                with closing(store.connect()) as thread_conn:
                     result.append(sleep_watchdog_interval(store, thread_conn, name="default", interval_seconds=60))
 
             thread = threading.Thread(
@@ -1573,7 +1573,7 @@ exit 9
         self.assertIn("summary=waiting for verifier", out)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             count = conn.execute("SELECT COUNT(*) AS n FROM obligations WHERE id = 'watch_legacy'").fetchone()["n"]
         self.assertEqual(count, 1)
 
@@ -1667,7 +1667,7 @@ exit 9
         obligation_id = out.split()[0]
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             conn.execute(
                 "UPDATE obligations SET next_update_at = ? WHERE id = ?",
                 ("2000-01-01T00:00:00+00:00", obligation_id),
@@ -1782,7 +1782,7 @@ exit 9
         self.assertIn("safe_to_close=no", out)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             row = store.record_watchdog_runner_run(
                 conn,
                 name="default",
@@ -3803,7 +3803,7 @@ acp_resume_supported = true
         self.write_remote_tui_config()
         config = load_config(self.config)
         store = Store(config)
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.sync_roles(conn, config.roles.values())
             store.upsert_watchdog_runner(
                 conn,
@@ -3966,7 +3966,7 @@ exit 9
         self.write_remote_tui_config()
         config = load_config(self.config)
         store = Store(config)
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.sync_roles(conn, config.roles.values())
             store.upsert_watchdog_runner(
                 conn,
