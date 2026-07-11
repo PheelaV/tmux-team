@@ -203,6 +203,26 @@ does not change launch behavior. Inspect or control a role with `tmux-team acp s
 The prototype `--agent-runtime cursor-acp`, `--cursor-bin`, and `tmux-team cursor show|wake|cancel` forms remain
 compatibility aliases. ACP sleep/resume is not implemented yet.
 
+Switch an idle ACP role to a new provider/model session without changing panes
+or losing durable work context:
+
+```bash
+tmux-team runtime prepare implementer \
+  --summary "Focused fix passes; full verification remains."
+
+tmux-team runtime switch implementer \
+  --acp-agent-command 'claude-agent-acp' \
+  --provider claude \
+  --model sonnet \
+  --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md
+```
+
+The handoff capsule contains bounded role, inbox, todo, memory, and Git state,
+but never durable task bodies or a full transcript. The replacement Toad
+process starts in the same tmux pane and receives a recovery prompt that points
+to the durable capsule and current worktree. Inspect current and previous
+provider sessions with `tmux-team runtime show <role>`.
+
 If role agents need to message each other without stopping at Codex approval prompts, launch managed role panes with an explicit role execution policy:
 
 ```bash

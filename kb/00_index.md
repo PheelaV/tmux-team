@@ -21,3 +21,4 @@ Current high-value agent notes:
 - [11_durable_messaging_state.md](11_durable_messaging_state.md): message-state semantics for reclaimable claims, relation metadata, completion notices, and notice broadcasts.
 - [12_operator_supervision.md](12_operator_supervision.md): supervision surfaces for verbose status, obligations, pane hygiene, pane capture, and watchdog checks.
 - [13_acp_tui_control_socket.md](13_acp_tui_control_socket.md): provider-neutral local socket semantics for safely queueing prompts into a visible ACP TUI without terminal input.
+- [14_runtime_handoff.md](14_runtime_handoff.md): safe provider/model session replacement through draining, bounded handoff capsules, recovery prompts, and session lineage.

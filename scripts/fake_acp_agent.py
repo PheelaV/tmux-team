@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
-SESSION_ID = "fake-acp-session"
+SESSION_ID = os.environ.get("FAKE_ACP_SESSION_ID", "fake-acp-session")
 
 
 def send(payload: dict[str, Any]) -> None:

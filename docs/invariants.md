@@ -98,6 +98,29 @@ Each role has a scratchpad memory file declared in config.
 - Reset safety is mechanical: use Codex `SessionStart` hooks for `startup|resume|clear|compact` to inject `tmux-team codex session-context` output. The hook restores the same role contract as the startup prompt; it is not a competing task or replacement for inbox work.
 - The role contract has a version marker. Ordinary app-server wakes should not cause full skill rereads when the current contract version and role loop are already loaded; reread the full skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
+## ACP Runtime Handoffs
+
+ACP provider sessions are replaceable execution segments. The tmux-team role,
+SQLite work state, scratchpad, todos, worktree, and handoff capsule provide
+continuity.
+
+- Runtime switching is initially limited to visible `acp_tui` roles.
+- Refuse switching while the current TUI is busy or asking unless explicit
+  cooperative cancellation reaches an idle state.
+- Mark the role draining before its pane process is replaced.
+- Create a bounded handoff capsule before switching; never include inbox task
+  bodies, credentials, hidden reasoning, or the full transcript.
+- Reuse the existing pane and control-socket path for the replacement TUI.
+- Update only the selected role's runtime capability fields after the new TUI
+  reports ready.
+- Send a compact recovery prompt pointing to skill, memory, handoff, Git, todos,
+  and inbox state.
+- Append old/new provider session provenance to runtime lineage state.
+- Reactivate the role only after config, SQLite capabilities, lineage, and the
+  recovery prompt are updated.
+- Leave the role draining after failure; do not silently launch additional
+  replacement sessions.
+
 ## Milestone Log
 
 The milestone log is the operator-facing timeline.

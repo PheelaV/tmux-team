@@ -14,11 +14,16 @@ All notable user-visible changes should be recorded here. Keep migration notes c
   3.14; base tmux-team and Codex operation remain Python 3.11+.
 - Made completion replies, initial goals, and MCP sends use each recipient role's configured delivery method.
 - Added `make install-cursor-skill` for the shared `start-tmux-team` skill.
+- Added `tmux-team runtime show/prepare/switch` for safe ACP provider/model
+  session replacement through draining, bounded handoff capsules, recovery
+  prompts, and append-only session lineage.
 
 Prototype limits:
 
 - ACP roles require a Toad build that implements the generic control-socket protocol.
 - ACP sleep/resume is not implemented yet.
+- Same-session ACP model/config changes are not available until the external
+  TUI exposes capability-driven `session/set_config_option`.
 
 Migration notes:
 

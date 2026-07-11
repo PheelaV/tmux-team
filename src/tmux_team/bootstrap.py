@@ -26,7 +26,7 @@ from .config import (
 )
 from .store import Store
 
-ROLE_CONTRACT_VERSION = "2026-07-04.1"
+ROLE_CONTRACT_VERSION = "2026-07-11.1"
 DEFAULT_ROLES = ("orchestrator", "implementer", "collector", "trainer")
 DEFAULT_AGENT_LAYOUT = "grouped"
 DEFAULT_CONTROL_WINDOW = "tt-control"

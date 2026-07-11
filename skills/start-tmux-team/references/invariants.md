@@ -97,6 +97,28 @@ the external Toad TUI, which owns the ACP child and session. ACP sleep/resume is
 
 Do not reload the full skill on every ordinary app-server wake. Use the loaded tmux-team role contract version and role loop when present. Use `tmux-team codex session-context` after startup/resume/clear/compact recovery, explicit operator request, or contract/version mismatch.
 
+## ACP Runtime Handoffs
+
+A provider/model change that creates a new ACP session must preserve continuity
+through durable tmux-team state and a bounded handoff capsule.
+
+- Provider session IDs are replaceable execution identifiers, not role identity.
+- Refuse a switch while the role TUI is busy or asking unless the operator
+  explicitly requests cooperative cancellation and the role reaches idle.
+- Put the role in `draining` before replacing its ACP TUI process.
+- The source role must update scratchpad memory and active todos before handoff.
+- Capsules may include message IDs, summaries, todo state, scratchpad excerpts,
+  Git state, decisions, blockers, and next action.
+- Capsules must not include inbox task bodies, credentials, hidden reasoning, or
+  full transcripts.
+- A new session must read the skill, memory, capsule, Git state, active todos,
+  and inbox before continuing.
+- Record previous/new provider session provenance in append-only lineage state.
+- A failed switch leaves the role draining; never silently loop through fresh
+  sessions.
+- Same-session model changes are valid only when ACP capability/config responses
+  prove the option was applied.
+
 ## Role Memory
 
 Every managed role has a scratchpad memory file declared by config.

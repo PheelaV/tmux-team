@@ -273,6 +273,44 @@ ACP TUI delivery uses `control-socket`: `tmux-team send` writes the durable task
 the role's private Unix socket, and Toad queues an ACP `session/prompt`. The task body is never sent through the
 socket. Urgent wakes are marked urgent and repeated inbox wakes use `coalesceKey="inbox"`.
 
+## ACP Runtime Handoffs
+
+Inspect the current provider session and lineage:
+
+```bash
+tmux-team runtime show implementer
+```
+
+At an idle safe point, create a provider-neutral handoff capsule and put the
+role into draining:
+
+```bash
+tmux-team runtime prepare implementer \
+  --summary "Parser fix is implemented; focused test passes; run the full parser suite next." \
+  --body-file result.md
+```
+
+Replace the ACP provider/model session in the same visible pane:
+
+```bash
+tmux-team runtime switch implementer \
+  --acp-agent-command 'claude-agent-acp' \
+  --provider claude \
+  --model sonnet \
+  --effort high \
+  --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md
+```
+
+Provider-specific flags belong inside `--acp-agent-command`; `--model` and
+`--effort` record provider-neutral provenance for the new session. Use
+`--dry-run` to inspect the `tmux respawn-pane` command without mutation. An
+active turn is refused by default; `--cancel-active` requests cooperative
+cancellation and still requires the TUI to reach idle.
+
+The switch creates a new provider conversation. Same-session ACP model changes
+remain unsupported until the TUI advertises and applies
+`session/set_config_option`.
+
 ## Runtime State
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
@@ -282,6 +320,8 @@ Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the co
 - `milestones.jsonl` for append-only operator milestones;
 - `messages/*.md` for message bodies;
 - `sleeps/*.toml` for operator-facing sleep/restart snapshots.
+- `handoffs/<role>/*.md` and `handoffs/<role>/lineage.jsonl` for bounded ACP
+  runtime-switch continuity and provenance.
 
 Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime-dir`, `TMUX_TEAM_HOME`, or `[team].runtime_dir` in `.tmux-team/team.toml`; that is also the precedence order.
 

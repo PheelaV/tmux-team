@@ -140,6 +140,12 @@ for versioned `ping` and `status` responses before sending the startup prompt. W
 `coalesceKey="inbox"`; urgent work is marked urgent but does not cancel an active turn. The prototype does not yet
 implement ACP sleep/resume.
 
+Replacing an ACP provider/model command is a controlled session boundary.
+`runtime prepare` captures bounded durable role state without task bodies;
+`runtime switch` drains the role, respawns Toad in the same pane, waits for a
+new session, records lineage, and sends one recovery prompt. A switch never
+injects a full transcript or treats provider conversation IDs as role identity.
+
 `app-server-turn` submits a short wake turn that tells the role durable inbox work exists. The wake turn is deliberately blunt. It does not restate the skill, command syntax, scratchpad rules, ack/complete syntax, or role boundaries. Role panes spawned by bootstrap already received the startup prompt and have the `start-tmux-team` skill available; the wake is only an interrupt that says "claim durable inbox work now."
 
 The wake does include a compact subject line for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. It never includes the durable task body. If the highest-priority message is urgent, the wake explicitly tells the role to stop at the current safe point, claim the urgent message before continuing other work, then drain by priority.
