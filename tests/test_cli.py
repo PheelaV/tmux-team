@@ -17,6 +17,7 @@ from tmux_team.bootstrap import (
     BootstrapError,
     RoleBinding,
     acp_control_shell_command,
+    apply_acp_initial_config,
     codex_control_shell_command,
     configure_session_truecolor,
     default_session_name,
@@ -126,6 +127,41 @@ requires_stable_commit = true
         self.assertIn("tmux-team control", acp_command)
         self.assertIn("tt-control.sock", acp_command)
         self.assertNotIn("TMUX_TEAM_ROLE", acp_command)
+
+    def test_acp_initial_config_is_confirmed_before_startup_prompt(self) -> None:
+        def options(model: str, effort: str, fast: bool) -> list[dict[str, object]]:
+            return [
+                {"id": "model", "type": "select", "category": "model", "currentValue": model},
+                {
+                    "id": "reasoning_effort",
+                    "type": "select",
+                    "category": "thought_level",
+                    "currentValue": effort,
+                },
+                {"id": "fast-mode", "type": "boolean", "category": "model_config", "currentValue": fast},
+            ]
+
+        responses = [
+            {"sessionId": "session-1", "configOptions": options("sol", "high", True)},
+            {"sessionId": "session-1", "configOptions": options("terra", "high", True)},
+            {"sessionId": "session-1", "configOptions": options("terra", "medium", True)},
+            {"sessionId": "session-1", "configOptions": options("terra", "medium", False)},
+        ]
+        with patch("tmux_team.bootstrap.send_control_request", side_effect=responses) as request:
+            snapshot = apply_acp_initial_config(
+                self.root / "role.sock",
+                "session-1",
+                ("model=terra", "reasoning_effort=medium", "fast-mode=false"),
+            )
+
+        self.assertEqual(
+            [call.args[1]["action"] for call in request.call_args_list],
+            ["configOptions", "setConfig", "setConfig", "setConfig"],
+        )
+        self.assertIs(request.call_args_list[-1].args[1]["value"], False)
+        self.assertEqual(snapshot["model"], "terra")
+        self.assertEqual(snapshot["effort"], "medium")
+        self.assertEqual(dict(snapshot["values"])["fast-mode"], False)
 
     def test_runtime_dir_uses_cli_then_env_then_config(self) -> None:
         env_runtime = self.root / "env-runtime"
@@ -3257,6 +3293,17 @@ can_notify = ["orchestrator"]
         self.assertIn("bounded gated handoff", prompt)
         self.assertIn("approve/cancel/update follow-up", prompt)
 
+    def test_compact_startup_prompt_keeps_mandatory_skill_and_role_loop(self) -> None:
+        compact = role_startup_prompt("collector", agent_runtime="acp", instruction_profile="compact")
+        guided = role_startup_prompt("collector", agent_runtime="acp", instruction_profile="guided")
+
+        self.assertIn("instruction profile: compact", compact)
+        self.assertIn("skill load is mandatory", compact)
+        self.assertIn("tmux-team memory show --role collector", compact)
+        self.assertIn("tmux-team inbox next --role collector", compact)
+        self.assertIn("do not poll or invent work", compact)
+        self.assertLess(len(compact), len(guided))
+
     def test_bootstrap_dry_run_plans_visible_remote_tui_team(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"
 
@@ -3333,6 +3380,10 @@ can_notify = ["orchestrator"]
             "agent --force acp",
             "--acp-provider",
             "cursor",
+            "--instruction-profile",
+            "compact",
+            "--role-instruction-profile",
+            "implementer=guided",
             "--dry-run",
         )
 
@@ -3355,9 +3406,41 @@ can_notify = ["orchestrator"]
         self.assertIn('agent_runtime = "acp"', out)
         self.assertIn('runtime_session_id = "dry-session-orchestrator"', out)
         self.assertIn('acp_provider = "cursor"', out)
+        self.assertIn('[roles.orchestrator]\nstate = "active"', out)
+        self.assertIn('instruction_profile = "compact"', out)
+        self.assertIn('instruction_profile = "guided"', out)
         self.assertIn("runtime: acp", out)
         self.assertIn("orchestrator: session_id=dry-session-orchestrator", out)
         self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_uses_canonical_provider_presets(self) -> None:
+        for provider, command in (
+            ("codex", "codex-acp"),
+            ("claude", "claude-agent-acp"),
+            ("pool", "pool acp"),
+        ):
+            with self.subTest(provider=provider):
+                code, out, err = self.run_main(
+                    "bootstrap",
+                    "--project-root",
+                    str(self.root),
+                    "--config",
+                    str(self.root / f"{provider}.toml"),
+                    "--session",
+                    f"tt-{provider}",
+                    "--roles",
+                    "orchestrator",
+                    "--agent-runtime",
+                    "acp",
+                    "--acp-provider",
+                    provider,
+                    "--dry-run",
+                )
+
+                self.assertEqual(code, 0, err)
+                self.assertIn("--compact-ui", out)
+                self.assertIn(f'acp_provider = "{provider}"', out)
+                self.assertIn(f'acp_agent_command = "{command}"', out)
 
     def test_bootstrap_acp_reports_missing_toad_before_creating_state(self) -> None:
         generated_config = self.root / ".tmux-team" / "missing-toad.toml"

@@ -30,7 +30,7 @@ Run the same public-snapshot task through an external ACP TUI runtime with:
 make live-demo-setup
 TMUX_TEAM_RUN_LIVE_ACP=1 \
 LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
-make live-demo-acp-bootstrap
+make live-demo-acp-cursor-bootstrap  # or: codex / claude / pool
 tmux attach -t tt-live-demo
 make live-demo-acp-start
 make live-demo-sleep       # after role work completes
@@ -39,7 +39,8 @@ make live-demo-verify
 make live-demo-clean
 ```
 
-The ACP path is provider-agnostic at the tmux-team boundary. Its autonomous demo default is Cursor's `agent --force acp`; override `LIVE_DEMO_ACP_AGENT_COMMAND` and `LIVE_DEMO_ACP_PROVIDER` for another ACP provider or permission policy.
+The ACP path is provider-agnostic at the tmux-team boundary. Named Cursor, Codex, Claude, and Pool targets use their canonical
+local adapters; `live-demo-acp-bootstrap` plus `LIVE_DEMO_ACP_AGENT_COMMAND` remains available for custom providers.
 
 Expected shape:
 
@@ -97,13 +98,57 @@ uv tool install --python 3.14 "tmux-team[acp] @ git+https://github.com/PheelaV/t
 uv tool install --python 3.14 --force --editable ".[acp]"
 ```
 
-Preflight the TUI and your chosen ACP provider before bootstrap:
+### Runtime Setup Matrix
+
+Install only the runtime and adapter you use. `tmux-team[acp]` supplies Toad transport; it does not install provider
+CLIs, credentials, or every adapter.
+
+| Runtime | Required local tools | Setup | tmux-team selection |
+| --- | --- | --- | --- |
+| Native Codex | `tmux`, [Codex CLI](https://developers.openai.com/codex/cli), tmux-team CLI/skill | Authenticate Codex locally | default; no ACP flags |
+| Cursor ACP | Toad, [Cursor Agent](https://cursor.com/docs/cli/installation) | `agent login`; use project policy for autonomous commands | `--agent-runtime acp --acp-provider cursor` |
+| Codex ACP | Toad, `@agentclientprotocol/codex-acp`, Codex CLI/auth | Install the Node adapter and authenticate Codex | `--agent-runtime acp --acp-provider codex` |
+| Claude ACP | Toad, `@agentclientprotocol/claude-agent-acp`, Claude credentials | Install the Node adapter; authenticate Claude Code | `--agent-runtime acp --acp-provider claude` |
+| Pool ACP | Toad, [Poolside Pool CLI](https://poolside.ai/get-started) | `pool login`, or configure Poolside API URL/key; `pool acp setup --editor ...` is not needed for Toad | `--agent-runtime acp --acp-provider pool` |
+
+Pool discovers project skills under `.poolside/skills/` or `.agents/skills/` and global skills under
+`~/.config/poolside/skills/`. Install the tmux-team skill globally with `make install-pool-skill`, or expose the same
+`start-tmux-team` directory through one of the documented project locations.
+
+Preflight the selected runtime before bootstrap:
 
 ```bash
 toad --version
-agent status                 # Cursor example
-toad acp "agent acp"         # optional direct provider/TUI check
+agent status  # Cursor
+codex --version
+claude --version
+pool --version
+
+# Install only the adapter(s) you use:
+npm install -g @agentclientprotocol/codex-acp       # Codex
+npm install -g @agentclientprotocol/claude-agent-acp  # Claude
 ```
+
+Canonical provider presets are `cursor` -> `agent acp`, `codex` -> `codex-acp`, `claude` -> `claude-agent-acp`, and
+`pool` -> `pool acp`. Codex ACP uses local Codex/ChatGPT or API-key authentication. Claude ACP runs the
+official Claude Agent SDK and uses local Claude credentials and settings; it does not require an ACP URL. The ACP extra
+installs Toad transport only; installation stays non-interactive and never selects or installs every provider adapter.
+
+The tested runtime matrix is native Codex (the default), Cursor through native ACP, Codex through `codex-acp`, and
+Claude through `claude-agent-acp`; Pool ACP uses the same canonical adapter boundary and deterministic test target.
+ACP remains optional; native Codex does not require Toad or a provider adapter.
+
+Startup instruction verbosity is configurable without changing the operating framework. Both profiles require every
+spawned role to load the `start-tmux-team` skill and invariants:
+
+```bash
+tmux-team bootstrap --project-root . \
+  --instruction-profile compact \
+  --role-instruction-profile orchestrator=guided
+```
+
+Use `compact` for roles that follow a terse contract reliably and `guided` when a role benefits from the expanded loop.
+Profiles are explicit configuration, not inferred from provider or model names, and are persisted for resume.
 
 Use `agent --force acp` only for explicitly autonomous Cursor roles. For constrained roles, configure a project-local
 `.cursor/cli.json` allowlist; tmux-team never edits the user's global provider policy. See
@@ -128,7 +173,14 @@ Checkout fallback for the skill:
 git clone https://github.com/PheelaV/tmux-team.git
 cd tmux-team
 make install-skill
+# or select one or more Agent Skills homes explicitly:
+make install-skill SKILL_PROVIDERS=codex,cursor,claude,pool
+make install-skill SKILL_PROVIDERS=all
 ```
+
+The default is `codex`. Provider-specific destinations honor `CODEX_HOME`, `CURSOR_HOME`, `CLAUDE_HOME`,
+`POOL_SKILLS_HOME`, and `XDG_CONFIG_HOME` where applicable. Installation is non-interactive and copies the same
+canonical skill/invariants to every selected provider.
 
 ## Getting Started: Fix A Failing Test
 
@@ -198,16 +250,21 @@ The ACP runtime launches one visible Toad TUI per role. Toad owns the ACP child 
 launches the TUI and sends compact prompts through its local control socket:
 
 ```bash
-make install-cursor-skill
+make install-skill SKILL_PROVIDERS=cursor
 
 tmux-team bootstrap \
   --project-root . \
   --agent-runtime acp \
   --acp-tui-bin toad \
-  --acp-agent-command "agent acp" \
   --acp-provider cursor \
   --goal "Inspect the smallest failing test and report the result."
 ```
+
+Use `--acp-provider codex` or `--acp-provider claude` to select their installed standard adapters. Pass
+`--acp-agent-command` only for flags, `npx`, a pinned/local executable, or a custom provider.
+
+Use repeatable `--acp-initial-config ID=VALUE` when the first model turn must use an explicit model, effort, fast mode,
+or permission preset. tmux-team applies and confirms those provider-advertised options before sending startup prompts.
 
 The tmux layout uses a Toad/ACP operator agent in `tt-control` plus visible role panes in `tt-agents`; there is no
 `tt-app-server` window. The control agent is visible and interactive but is not a managed role and receives no role
@@ -221,8 +278,9 @@ SQLite inbox -> private Unix socket -> visible Toad TUI -> ACP session/prompt ->
 ```
 
 The socket carries only the compact wake; durable task bodies remain in SQLite. Provider-specific flags belong in
-`--acp-agent-command` (for example, a provider's non-interactive mode). `--acp-provider` is convenience metadata and
-does not change launch behavior. Inspect or control a role with `tmux-team acp status|wake|cancel <role>`.
+`--acp-agent-command`. For the three canonical providers, `--acp-provider` selects the standard command when no command
+override is supplied; it remains provenance metadata for custom commands. Inspect or control a role with
+`tmux-team acp status|wake|cancel <role>`.
 ACP sleep/resume uses explicit `exact` or `handoff` policy and never silently opens a blank provider session.
 
 Inspect or change options advertised by an idle live ACP session without
@@ -251,7 +309,6 @@ tmux-team runtime prepare implementer \
   --summary "Focused fix passes; full verification remains."
 
 tmux-team runtime switch implementer \
-  --acp-agent-command 'claude-agent-acp' \
   --provider claude \
   --model sonnet \
   --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md

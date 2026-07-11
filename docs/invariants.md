@@ -33,6 +33,10 @@ Role agents remain visible in tmux.
 - Each role has a live Codex TUI pane.
 - Each spawned Codex role must have the `start-tmux-team` skill available in its active `CODEX_HOME`.
 - Each role receives wake turns through Codex app-server, not through tmux keystrokes.
+
+For ACP teams, canonical provider presets resolve locally: Cursor to `agent acp`, Codex to `codex-acp`, and Claude to
+`claude-agent-acp`, and Pool `pool acp`. Unknown providers require an explicit stdio command. Provider authentication and permission policy
+remain external to tmux-team; bootstrap must not modify global provider settings.
 - The durable task body lives in the `tmux-team` inbox, not in pane text.
 
 For the experimental ACP runtime, the visible pane is the external Toad TUI. It must remain visible and
@@ -87,6 +91,7 @@ Each role has a scratchpad memory file declared in config.
 
 - Bootstrap creates missing scratchpads before role Codex panes start.
 - A newly spawned role receives a startup prompt to load the `start-tmux-team` skill, read memory, then claim inbox work or park. It reads invariants only when changing behavior, debugging delivery/layout/lifecycle/recovery, migrating a team, or resolving a state conflict.
+- Skill loading is mandatory in both `compact` and `guided` instruction profiles. Profiles change startup-prompt verbosity only; they must not fork the skill, role contract, or invariants by provider/model name.
 - Scratchpad memory preserves long-term goals across context compression, sleep/resume, and pane restarts.
 - Scratchpad memory is also an observability surface for the role, other agents, and the human overseer.
 - Keep the latest and most important state at the top.
@@ -260,6 +265,8 @@ Message completion is durable state. Conversational completion replies are expli
 - Use `--summary` for the concise result and optional `--body` or `--body-file` for evidence, test output, or handoff detail.
 - Roles should use `--reply-to-sender` when completing delegated work from another managed role.
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.
+- A delegated result must use that completion reply once; do not also send the same result as a new task.
+- After dispatch, end the current turn and rely on wake delivery. Shell-polling `inbox next` can claim a completion before its queued wake is delivered, creating a redundant empty turn and delaying exact sleep.
 - Completion replies must be stored as `message_kind='completion_notice'`.
 - `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
 - Material completion notices must not terminate at an intermediate non-orchestrator role. If a delegated result affects the team goal, stable commit, blocker state, external run state, or operator-visible outcome, the recipient must reconcile upward to `orchestrator` with a concise durable message or by completing the still-active orchestrator-owned task.

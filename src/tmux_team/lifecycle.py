@@ -820,6 +820,7 @@ def role_launch_options_from_capabilities(capabilities: dict[str, Any]) -> RoleL
         profile=optional_capability(capabilities, "codex_profile"),
         config_overrides=config_overrides,
         yolo=optional_bool_capability(capabilities, "codex_yolo"),
+        instruction_profile=optional_capability(capabilities, "instruction_profile"),
     )
 
 
@@ -838,6 +839,9 @@ def merge_role_launch_options(
             profile=override.profile if override.profile is not None else base.profile,
             config_overrides=override.config_overrides or base.config_overrides,
             yolo=override.yolo if override.yolo is not None else base.yolo,
+            instruction_profile=override.instruction_profile
+            if override.instruction_profile is not None
+            else base.instruction_profile,
         )
     return {role: options for role, options in merged.items() if options != RoleLaunchOptions()}
 

@@ -104,6 +104,10 @@ ACP TUI bootstrap runs a Toad operator agent in `tt-control`, visible `tt-agents
 sockets; the control agent is not a role and receives no inbox work. The detailed runtime contract is in
 `references/acp-runtime.md`.
 
+For ACP teams, `--acp-provider cursor|codex|claude|pool` selects the canonical local stdio command when no explicit command
+is supplied. Unknown providers require `--acp-agent-command`. Never infer a remote URL or modify global provider
+credentials/permission policy.
+
 After startup, report the tmux session, config path, app-server endpoint, role thread IDs, and attach command:
 
 ```bash
@@ -139,6 +143,10 @@ Each spawned role must have this skill available in its active agent's skill dir
 provider-specific for ACP). The role startup prompt loads the skill, reads scratchpad memory, then claims inbox work
 or parks.
 
+Bootstrap supports `compact` and `guided` instruction profiles. Both require this skill and its invariants to be loaded;
+the profile controls repeated startup-prompt detail only. Do not infer a profile from provider or model names. Use
+`--instruction-profile` for the team default and `--role-instruction-profile ROLE=PROFILE` for explicit role overrides.
+
 Use Codex `SessionStart` hooks for `startup|resume|clear|compact` recovery. The hook should print `tmux-team codex session-context`; that output restores the role, config, scratchpad path, pending count, contract version, and loop. It is not a task body.
 
 Do not reread the full skill on ordinary app-server wakes when the role contract and loop are already loaded. Reread on first startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
@@ -173,6 +181,11 @@ a concrete-state list. For read-only supervision, `inbox list --state pending`
 matches `status pending=N` and includes queued, notified, retrying, and expired
 claimed work.
 
+After dispatching delegated work, end the current turn and rely on the configured
+wake transport. Do not shell-poll `inbox next`, sleep in a polling loop, or keep a
+turn busy while waiting. Polling can claim a completion before its queued wake is
+delivered, causing a redundant empty turn and delaying exact sleep.
+
 ## Memory, Todos, And Milestones
 
 Scratchpad memory is mandatory durable role state. Keep the newest and most important state near the top. Use it for long-term goals, role boundaries, current task, blockers, running jobs, stable inputs, owned artifacts, and next action.
@@ -199,7 +212,7 @@ tmux-team milestone add --kind routing --summary "Team started" --team
 
 ## Messaging And Supervision
 
-Complete delegated work with `tmux-team inbox complete ... --reply-to-sender` so the sender receives a normal durable completion notice. Do not use it for pure bookkeeping that would create reply loops.
+Complete delegated work with `tmux-team inbox complete ... --reply-to-sender` so the sender receives a normal durable completion notice. Do not also send the same result as a new task; send another message only when it represents genuinely separate follow-up work. Do not use completion replies for pure bookkeeping that would create reply loops.
 
 Material delegated results must not terminate at an intermediate non-orchestrator role. If a completion notice affects the team goal, stable commit, blocker state, external run state, or operator-visible result, send a concise upward report to `orchestrator` or complete the still-active orchestrator-owned task with `--reply-to-sender`.
 

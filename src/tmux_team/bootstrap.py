@@ -15,6 +15,12 @@ from pathlib import Path
 
 import tomli_w
 
+from .acp_providers import (
+    ACPProviderError,
+    acp_command_executable,
+    acp_provider_install_hint,
+    resolve_acp_provider,
+)
 from .acp_tui import ACPControlError, control_socket_path, send_control_request, wait_for_acp_tui
 from .app_server import AppServerClient
 from .config import (
@@ -59,6 +65,10 @@ class RoleBinding:
     session_id: str = ""
     control_socket: str = ""
     resume_supported: bool | None = None
+    acp_config: tuple[tuple[str, str | bool], ...] = ()
+    acp_model: str | None = None
+    acp_effort: str | None = None
+    acp_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,7 @@ class AgentRuntimeAdapter:
 
 CODEX_RUNTIME = AgentRuntimeAdapter("codex", "app_server_remote_tui", "app-server-turn", True, False)
 ACP_RUNTIME = AgentRuntimeAdapter("acp", "acp_tui", "control-socket", False, True)
+INSTRUCTION_PROFILES = ("compact", "guided")
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,7 @@ class RoleLaunchOptions:
     profile: str | None = None
     config_overrides: tuple[str, ...] = ()
     yolo: bool | None = None
+    instruction_profile: str | None = None
 
 
 class BootstrapError(RuntimeError):
@@ -133,8 +145,9 @@ def bootstrap_team(
     enable_truecolor: bool = True,
     agent_runtime: str = "codex",
     acp_tui_bin: str = "toad",
-    acp_agent_command: str = "agent acp",
+    acp_agent_command: str | None = None,
     acp_provider: str | None = None,
+    acp_initial_config: tuple[str, ...] = (),
 ) -> BootstrapResult:
     project_root = project_root.expanduser().resolve()
     config_path = config_path.expanduser()
@@ -146,6 +159,13 @@ def bootstrap_team(
     agent_layout = normalize_agent_layout(agent_layout)
     runtime = agent_runtime_adapter(agent_runtime)
     agent_runtime = runtime.name
+    if runtime.uses_control_socket:
+        try:
+            acp_agent_command, acp_provider = resolve_acp_provider(acp_provider, acp_agent_command)
+        except ACPProviderError as exc:
+            raise BootstrapError(str(exc)) from exc
+    else:
+        acp_agent_command = acp_agent_command or "agent acp"
     role_launch_options = role_launch_options or {}
     validate_role_launch_options(roles, role_launch_options)
     if runtime.uses_control_socket:
@@ -164,8 +184,14 @@ def bootstrap_team(
                 "Install the tmux-team[acp] extra with Python 3.14+, or pass --acp-tui-bin."
             )
         acp_tui_bin = resolved_acp_tui_bin
-    if runtime.uses_control_socket and not acp_agent_command.strip():
-        raise BootstrapError("ACP agent command is required")
+        try:
+            agent_executable = acp_command_executable(acp_agent_command)
+        except ACPProviderError as exc:
+            raise BootstrapError(str(exc)) from exc
+        if resolve_tool_executable(agent_executable) is None:
+            hint = acp_provider_install_hint(acp_provider)
+            suffix = f" {hint}" if hint else ""
+            raise BootstrapError(f"ACP agent executable not found: {agent_executable}.{suffix}")
     if not dry_run and runtime.uses_app_server:
         ensure_start_skill_available()
     role_worktree_paths, worktree_commands = prepare_role_worktrees(
@@ -287,7 +313,12 @@ def bootstrap_team(
         operator_control_socket,
     )
     if runtime.uses_control_socket and operator_started:
-        operator = initialize_acp_control_agent(operator, operator_control_socket, config_path)
+        operator = initialize_acp_control_agent(
+            operator,
+            operator_control_socket,
+            config_path,
+            acp_initial_config,
+        )
     if enable_truecolor:
         configure_session_truecolor(tmux_bin, session)
     if start_app_server and runtime.uses_app_server:
@@ -323,6 +354,8 @@ def bootstrap_team(
             role_control_sockets,
             agent_layout,
             agents_window,
+            acp_initial_config,
+            role_launch_options,
         )
     write_team_config(
         config_path,
@@ -562,7 +595,10 @@ def start_acp_role_panes(
     role_sockets: dict[str, Path],
     agent_layout: str,
     agents_window: str,
+    initial_config: tuple[str, ...] = (),
+    role_launch_options: dict[str, RoleLaunchOptions] | None = None,
 ) -> dict[str, RoleBinding]:
+    role_launch_options = role_launch_options or {}
     role_bindings: dict[str, RoleBinding] = {}
     if agent_layout == "grouped":
         prepare_grouped_agent_window(tmux_bin, session, agents_window)
@@ -596,11 +632,21 @@ def start_acp_role_panes(
         label_role_pane(tmux_bin, pane, role)
         try:
             status = wait_for_acp_tui(role_sockets[role], timeout=30.0)
+            config_snapshot = apply_acp_initial_config(
+                role_sockets[role],
+                str(status.get("sessionId") or ""),
+                initial_config,
+            )
             send_control_request(
                 role_sockets[role],
                 {
                     "action": "prompt",
-                    "text": role_startup_prompt(role, agent_runtime="acp"),
+                    "text": role_startup_prompt(
+                        role,
+                        agent_runtime="acp",
+                        instruction_profile=role_launch_options.get(role, RoleLaunchOptions()).instruction_profile
+                        or "guided",
+                    ),
                     "priority": "normal",
                     "coalesceKey": "tmux-team-startup",
                 },
@@ -616,6 +662,10 @@ def start_acp_role_panes(
             session_id=str(status.get("sessionId") or ""),
             control_socket=str(role_sockets[role]),
             resume_supported=status.get("resumeSupported") if isinstance(status.get("resumeSupported"), bool) else None,
+            acp_config=config_snapshot["values"],
+            acp_model=config_snapshot["model"],
+            acp_effort=config_snapshot["effort"],
+            acp_mode=config_snapshot["mode"],
         )
     return role_bindings
 
@@ -629,9 +679,19 @@ def operator_config(pane: str | None, agent_runtime: str | None, control_socket:
     return OperatorConfig(pane=pane, capabilities=capabilities)
 
 
-def initialize_acp_control_agent(operator: OperatorConfig, control_socket: Path, config_path: Path) -> OperatorConfig:
+def initialize_acp_control_agent(
+    operator: OperatorConfig,
+    control_socket: Path,
+    config_path: Path,
+    initial_config: tuple[str, ...] = (),
+) -> OperatorConfig:
     try:
-        wait_for_acp_tui(control_socket, timeout=30.0)
+        status = wait_for_acp_tui(control_socket, timeout=30.0)
+        config_snapshot = apply_acp_initial_config(
+            control_socket,
+            str(status.get("sessionId") or ""),
+            initial_config,
+        )
         send_control_request(
             control_socket,
             {
@@ -647,9 +707,77 @@ def initialize_acp_control_agent(operator: OperatorConfig, control_socket: Path,
         raise BootstrapError(f"ACP TUI control agent did not start: {exc}") from exc
     capabilities = dict(operator.capabilities)
     capabilities["runtime_session_id"] = str(status.get("sessionId") or "")
+    capabilities["acp_config"] = dict(config_snapshot["values"])
+    for key in ("model", "effort", "mode"):
+        if config_snapshot[key] is not None:
+            capabilities[f"acp_{key}"] = config_snapshot[key]
     if isinstance(status.get("resumeSupported"), bool):
         capabilities["acp_resume_supported"] = status["resumeSupported"]
     return OperatorConfig(pane=operator.pane, capabilities=capabilities)
+
+
+def apply_acp_initial_config(
+    socket_path: Path,
+    session_id: str,
+    assignments: tuple[str, ...],
+) -> dict[str, object]:
+    if not assignments:
+        return {"values": (), "model": None, "effort": None, "mode": None}
+    if not session_id:
+        raise BootstrapError("ACP session did not report a session ID before initial configuration")
+    response = send_control_request(socket_path, {"action": "configOptions", "sessionId": session_id})
+    options = acp_config_options(response, session_id)
+    for assignment in assignments:
+        config_id, separator, raw_value = assignment.partition("=")
+        if not separator or not config_id or not raw_value:
+            raise BootstrapError("--acp-initial-config expects ID=VALUE")
+        option = next((item for item in options if item.get("id") == config_id), None)
+        if option is None:
+            raise BootstrapError(f"ACP session does not advertise initial config option {config_id!r}")
+        value: str | bool
+        if option.get("type") == "boolean":
+            normalized = raw_value.lower()
+            if normalized not in {"true", "false"}:
+                raise BootstrapError(f"ACP boolean initial config {config_id!r} expects true or false")
+            value = normalized == "true"
+        else:
+            value = raw_value
+        response = send_control_request(
+            socket_path,
+            {
+                "action": "setConfig",
+                "sessionId": session_id,
+                "configId": config_id,
+                "value": value,
+            },
+        )
+        options = acp_config_options(response, session_id)
+        confirmed = next((item.get("currentValue") for item in options if item.get("id") == config_id), None)
+        if confirmed != value:
+            raise BootstrapError(f"ACP session did not confirm initial config {config_id}={raw_value}")
+    return {
+        "values": tuple((str(option["id"]), option.get("currentValue")) for option in options),
+        "model": first_acp_category_value(options, "model"),
+        "effort": first_acp_category_value(options, "thought_level"),
+        "mode": first_acp_category_value(options, "mode"),
+    }
+
+
+def acp_config_options(response: dict[str, object], session_id: str) -> list[dict[str, object]]:
+    if response.get("sessionId") != session_id:
+        raise BootstrapError("ACP initial config response reported a different session")
+    raw_options = response.get("configOptions")
+    if not isinstance(raw_options, list):
+        raise BootstrapError("ACP session did not return config options")
+    options = [item for item in raw_options if isinstance(item, dict) and isinstance(item.get("id"), str)]
+    if len(options) != len(raw_options):
+        raise BootstrapError("ACP session returned invalid config options")
+    return options
+
+
+def first_acp_category_value(options: list[dict[str, object]], category: str) -> str | bool | None:
+    option = next((item for item in options if item.get("category") == category), None)
+    return option.get("currentValue") if option is not None else None
 
 
 def prepare_grouped_agent_window(tmux_bin: str, session: str, agents_window: str) -> None:
@@ -918,6 +1046,7 @@ def render_team_config(
             "pane": binding.pane,
             "worktree": str(binding.worktree),
             "scratchpad": role_scratchpads.get(role, f".tmux-team/memory/{role}.md"),
+            "instruction_profile": launch_options.instruction_profile or "guided",
         }
         runtime = agent_runtime_adapter(agent_runtime)
         if runtime.uses_control_socket:
@@ -936,6 +1065,14 @@ def render_team_config(
                 role_data["acp_resume_supported"] = binding.resume_supported
             if acp_provider:
                 role_data["acp_provider"] = acp_provider
+            if binding.acp_config:
+                role_data["acp_config"] = dict(binding.acp_config)
+            if binding.acp_model is not None:
+                role_data["acp_model"] = binding.acp_model
+            if binding.acp_effort is not None:
+                role_data["acp_effort"] = binding.acp_effort
+            if binding.acp_mode is not None:
+                role_data["acp_mode"] = binding.acp_mode
         else:
             role_data.update(
                 {
@@ -1248,15 +1385,27 @@ def role_shell_command(
     codex_args.extend(["--cd", str(project_root)])
     codex_args.extend(["--remote", endpoint])
     if thread_id:
-        codex_args.extend([thread_id, role_resume_prompt(role)])
+        codex_args.extend(
+            [
+                thread_id,
+                role_resume_prompt(role, instruction_profile=role_launch_options.instruction_profile or "guided"),
+            ]
+        )
     else:
-        codex_args.append(role_startup_prompt(role))
+        codex_args.append(
+            role_startup_prompt(role, instruction_profile=role_launch_options.instruction_profile or "guided")
+        )
     env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *codex_args]
     command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
     return keep_open_command(command, "role TUI")
 
 
-def role_startup_prompt(role: str, agent_runtime: str = "codex") -> str:
+def role_startup_prompt(
+    role: str,
+    agent_runtime: str = "codex",
+    instruction_profile: str = "guided",
+) -> str:
+    instruction_profile = normalize_instruction_profile(instruction_profile)
     if normalize_agent_runtime(agent_runtime) == "acp":
         agent_description = "ACP TUI"
         shell_description = "ACP agent tool shells"
@@ -1265,10 +1414,22 @@ def role_startup_prompt(role: str, agent_runtime: str = "codex") -> str:
         agent_description = "Codex"
         shell_description = "Codex tool shells"
         wake_description = "app-server wake"
+    if instruction_profile == "compact":
+        return (
+            f"You are the `{role}` role in a tmux-team managed {agent_description} team. "
+            f"Role contract: {ROLE_CONTRACT_VERSION}; instruction profile: compact.\n"
+            "Use the start-tmux-team skill now and read its invariants before acting. This skill load is mandatory.\n"
+            f"Load durable state with `tmux-team memory show --role {role}`, then drain work with "
+            f"`tmux-team inbox next --role {role}`. Ack claimed work, obey scratchpad boundaries, work only from "
+            "the role worktree, update memory only for material durable changes, and complete concisely. Return "
+            "delegated results once with `--reply-to-sender`. When no work remains, end the turn and wait for "
+            f"{wake_description}; do not poll or invent work.\n"
+            f"{orchestrator_unblock_first_guidance(role)}"
+        )
     return (
         f"You are the `{role}` role in a tmux-team managed {agent_description} team.\n"
-        f"tmux-team role contract version: {ROLE_CONTRACT_VERSION}.\n"
-        "Use the start-tmux-team skill now. Read its invariants before acting.\n"
+        f"tmux-team role contract version: {ROLE_CONTRACT_VERSION}; instruction profile: guided.\n"
+        "Use the start-tmux-team skill now. Read its invariants before acting. This skill load is mandatory.\n"
         f"Use the explicit role commands below. Short commands may work when role discovery succeeds, but {shell_description} do not always inherit TMUX_TEAM_ROLE and shared worktrees are ambiguous.\n"
         "Startup loop:\n"
         f"1. Run `tmux-team memory show --role {role}` to load durable role state.\n"
@@ -1279,18 +1440,27 @@ def role_startup_prompt(role: str, agent_runtime: str = "codex") -> str:
         f"{orchestrator_unblock_first_guidance(role)}"
         f"Use `tmux-team inbox ack <message-id> --role {role}` and `tmux-team inbox complete <message-id> --role {role} ...` for the claimed message.\n"
         "Use `--reply-to-sender` for delegated work results, but not for pure acknowledgement loops.\n"
+        "After dispatching delegated work, end the turn and rely on wake delivery; do not poll the inbox.\n"
     )
 
 
-def role_resume_prompt(role: str) -> str:
+def role_resume_prompt(role: str, instruction_profile: str = "guided") -> str:
+    instruction_profile = normalize_instruction_profile(instruction_profile)
     return (
         f"You are resuming the `{role}` role in a tmux-team managed Codex team after sleep.\n"
-        f"tmux-team role contract version: {ROLE_CONTRACT_VERSION}.\n"
-        "Use the start-tmux-team skill if the operating framework is not already loaded in this context.\n"
+        f"tmux-team role contract version: {ROLE_CONTRACT_VERSION}; instruction profile: {instruction_profile}.\n"
+        "Use the start-tmux-team skill if the operating framework is not already loaded in this context; skill loading remains mandatory on a fresh context.\n"
         f"Run `tmux-team memory show --role {role}` to reload durable role state, then `tmux-team inbox next --role {role}`.\n"
         "If there is no pending message, park and wait for app-server wake. Do not invent work.\n"
         f"{orchestrator_unblock_first_guidance(role)}"
     )
+
+
+def normalize_instruction_profile(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in INSTRUCTION_PROFILES:
+        raise BootstrapError(f"instruction profile must be one of: {', '.join(INSTRUCTION_PROFILES)}")
+    return normalized
 
 
 def orchestrator_unblock_first_guidance(role: str) -> str:

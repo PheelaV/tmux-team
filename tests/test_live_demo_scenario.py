@@ -10,8 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.live_demo_scenario import (
-    configure_acp_demo_model,
+    acp_demo_initial_config,
+    prepare_acp_demo_provider,
     start_goal,
+    verify_acp_demo_model,
     wait_for_acp_session_idle,
     write_acp_goal,
 )
@@ -43,10 +45,15 @@ class LiveDemoScenarioTests(unittest.TestCase):
 
         goal = (self.root / "goal.md").read_text(encoding="utf-8")
         self.assertIn("provider is claude", goal)
+        self.assertIn("--next-update-in 10s", goal)
+        self.assertIn("Do not run the watchdog early", goal)
         self.assertNotIn("provider is cursor", goal)
         self.assertIn("operator exact-sleeps and resumes", goal)
         self.assertIn("broadcast --notice --only implementer,collector", goal)
         self.assertIn("broadcast --notice --exclude orchestrator", goal)
+        self.assertIn("Do not poll `inbox next`", goal)
+        self.assertIn("do not send the same result as a separate task", goal)
+        self.assertIn("omit `--notify-method`", goal)
         self.assertNotIn("--notice-only", goal)
 
     def test_start_goal_submits_deferred_goal_durably(self) -> None:
@@ -62,7 +69,7 @@ class LiveDemoScenarioTests(unittest.TestCase):
         self.assertIn(str(self.root / "goal.md"), command)
         self.assertIn("live-demo-goal", command)
 
-    def test_configure_acp_demo_model_updates_roles_and_operator(self) -> None:
+    def test_verify_acp_demo_model_checks_roles_and_operator_without_mutation(self) -> None:
         model = "test-model[reasoning=medium]"
         self.config.write_text(
             f'''[team]
@@ -86,26 +93,15 @@ runtime_session_id = "collector-session"
 ''',
             encoding="utf-8",
         )
-        response = {
-            "sessionId": "operator-session",
-            "configOptions": [{"id": "model", "currentValue": model}],
-        }
-
         with (
-            patch("scripts.live_demo_scenario.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
-            patch("scripts.live_demo_scenario.send_control_request", return_value=response) as control,
-            patch("scripts.live_demo_scenario.acp_session_model", return_value="old-model"),
+            patch("scripts.live_demo_scenario.acp_session_model", return_value=model) as current_model,
             patch("scripts.live_demo_scenario.wait_for_acp_session_idle") as wait_for_idle,
             redirect_stdout(StringIO()),
         ):
-            configure_acp_demo_model(self.config, model)
+            verify_acp_demo_model(self.config, model)
 
-        self.assertEqual(run.call_count, 3)
         self.assertEqual(wait_for_idle.call_count, 4)
-        for role, call in zip(("orchestrator", "implementer", "collector"), run.call_args_list, strict=True):
-            self.assertIn(role, call.args[0])
-            self.assertIn(f"model={model}", call.args[0])
-        self.assertEqual(control.call_args.args[1]["value"], model)
+        self.assertEqual(current_model.call_count, 4)
 
     def test_wait_for_acp_session_idle_tolerates_startup_turn(self) -> None:
         responses = [
@@ -119,6 +115,40 @@ runtime_session_id = "collector-session"
             wait_for_acp_session_idle(self.root / "role.sock", "session-1", "role implementer", timeout=1)
 
         self.assertEqual(control.call_count, 2)
+
+    def test_acp_demo_initial_config_uses_provider_specific_option_ids(self) -> None:
+        self.assertEqual(
+            acp_demo_initial_config("codex", "gpt-5.6-terra", "medium", "false"),
+            (
+                "model=gpt-5.6-terra",
+                "mode=agent-full-access",
+                "reasoning_effort=medium",
+                "fast-mode=false",
+            ),
+        )
+        self.assertEqual(
+            acp_demo_initial_config("claude", "us.anthropic.claude-opus-4-8", "medium", ""),
+            ("model=us.anthropic.claude-opus-4-8", "mode=bypassPermissions", "effort=medium"),
+        )
+        self.assertEqual(
+            acp_demo_initial_config("pool", "deployment-model", "", ""),
+            ("mode=always-allow",),
+        )
+
+    def test_prepare_claude_demo_provider_writes_ignored_local_permission_settings(self) -> None:
+        for key in ("project", "implementer_worktree", "collector_worktree"):
+            Path(self.metadata[key]).mkdir(parents=True, exist_ok=True)
+        exclude = self.root / "exclude"
+
+        with patch("scripts.live_demo_scenario.git_output", return_value=str(exclude)):
+            prepare_acp_demo_provider(self.metadata, "claude")
+
+        for key in ("project", "implementer_worktree", "collector_worktree"):
+            settings = json.loads(
+                (Path(self.metadata[key]) / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(settings["permissions"]["defaultMode"], "bypassPermissions")
+        self.assertEqual(exclude.read_text(encoding="utf-8"), ".claude/settings.local.json\n")
 
 
 if __name__ == "__main__":

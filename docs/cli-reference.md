@@ -18,7 +18,7 @@ Experimental external ACP TUI roles use the same layout and durable inbox:
 
 ```bash
 tmux-team bootstrap --project-root . --agent-runtime acp \
-  --acp-tui-bin toad --acp-agent-command "agent acp" --acp-provider cursor \
+  --acp-tui-bin toad --acp-provider cursor \
   --goal "Inspect the failing test."
 tmux-team acp status orchestrator
 tmux-team acp wake orchestrator
@@ -336,6 +336,12 @@ tmux-team runtime switch implementer \
   --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md
 ```
 
+Canonical `cursor`, `codex`, `claude`, and `pool` providers default to `agent acp`, `codex-acp`,
+`claude-agent-acp`, and `pool acp`.
+
+Startup guidance can be selected team-wide with `--instruction-profile compact|guided` and overridden per role with
+`--role-instruction-profile ROLE=PROFILE`. Both profiles mandate loading the same `start-tmux-team` skill and invariants;
+the profile changes repeated prompt detail, not the operating contract. Resume accepts the same switches as overrides.
 Provider-specific flags belong inside `--acp-agent-command`; `--model` and
 `--effort` record provider-neutral provenance for the new session. Use
 `--dry-run` to inspect the `tmux respawn-pane` command without mutation. An

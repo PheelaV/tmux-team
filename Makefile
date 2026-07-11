@@ -1,14 +1,27 @@
 UV ?= uv
 UV_RUN = $(UV) run --with-editable .
 UV_RUN_DEV = $(UV) run --with-editable . --extra dev
+SKILL_PROVIDERS ?= codex
 LIVE_DEMO_ROOT ?= /tmp/tmux-team-live-demo
 LIVE_DEMO_SESSION ?= tt-live-demo
-LIVE_DEMO_ACP_TUI_BIN ?= $(HOME)/.local/share/uv/tools/tmux-team/bin/toad
+LIVE_DEMO_ACP_TUI_BIN ?= $(shell if [ -x "$(CURDIR)/.venv/bin/toad" ]; then printf '%s' "$(CURDIR)/.venv/bin/toad"; else command -v toad 2>/dev/null; fi)
 LIVE_DEMO_ACP_AGENT_COMMAND ?= agent --force acp
 LIVE_DEMO_ACP_PROVIDER ?= cursor
 LIVE_DEMO_ACP_MODEL ?=
+LIVE_DEMO_ACP_EFFORT ?=
+LIVE_DEMO_ACP_FAST ?=
+LIVE_DEMO_ACP_STARTUP_TIMEOUT ?= 180
+LIVE_DEMO_ACP_INSTRUCTION_PROFILE ?= compact
+LIVE_DEMO_ACP_CURSOR_COMMAND ?= agent --force acp
+LIVE_DEMO_ACP_CURSOR_MODEL ?= gpt-5.6-terra[context=272k,reasoning=medium,fast=false]
+LIVE_DEMO_ACP_CODEX_COMMAND ?= codex-acp
+LIVE_DEMO_ACP_CODEX_MODEL ?= gpt-5.6-terra
+LIVE_DEMO_ACP_CLAUDE_COMMAND ?= claude-agent-acp
+LIVE_DEMO_ACP_CLAUDE_MODEL ?= us.anthropic.claude-opus-4-8
+LIVE_DEMO_ACP_POOL_COMMAND ?= pool acp
+LIVE_DEMO_ACP_POOL_MODEL ?=
 
-.PHONY: require-uv require-live-acp install-dev install-skill install-cursor-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
+.PHONY: require-uv require-live-acp install-dev install-skill install-cursor-skill install-pool-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-cursor-bootstrap live-demo-acp-codex-bootstrap live-demo-acp-claude-bootstrap live-demo-acp-pool-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
 
 require-uv:
 	@command -v "$(UV)" >/dev/null 2>&1 || (echo "tmux-team tests require uv. Install with: brew install uv" >&2; exit 2)
@@ -29,14 +42,13 @@ install-dev:
 	fi
 
 install-skill:
-	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/agents"
-	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references"
-	cp -R skills/start-tmux-team/. "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/"
+	python3 scripts/install_skill.py --providers "$(SKILL_PROVIDERS)"
 
 install-cursor-skill:
-	mkdir -p "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references"
-	cp skills/start-tmux-team/SKILL.md "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/SKILL.md"
-	cp -R skills/start-tmux-team/references/. "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references/"
+	$(MAKE) install-skill SKILL_PROVIDERS=cursor
+
+install-pool-skill:
+	$(MAKE) install-skill SKILL_PROVIDERS=pool
 
 lint: ruff-check format-check
 
@@ -86,7 +98,19 @@ live-demo-bootstrap: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) bootstrap --session $(LIVE_DEMO_SESSION) --role-yolo --force-config
 
 live-demo-acp-bootstrap: require-uv require-live-acp
-	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) bootstrap --session $(LIVE_DEMO_SESSION) --agent-runtime acp --acp-tui-bin "$(LIVE_DEMO_ACP_TUI_BIN)" --acp-agent-command "$(LIVE_DEMO_ACP_AGENT_COMMAND)" --acp-provider "$(LIVE_DEMO_ACP_PROVIDER)" --acp-model "$(LIVE_DEMO_ACP_MODEL)" --defer-goal --force-config
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) bootstrap --session $(LIVE_DEMO_SESSION) --agent-runtime acp --acp-tui-bin "$(LIVE_DEMO_ACP_TUI_BIN)" --acp-agent-command "$(LIVE_DEMO_ACP_AGENT_COMMAND)" --acp-provider "$(LIVE_DEMO_ACP_PROVIDER)" --acp-model "$(LIVE_DEMO_ACP_MODEL)" $(if $(LIVE_DEMO_ACP_EFFORT),--acp-effort "$(LIVE_DEMO_ACP_EFFORT)") $(if $(LIVE_DEMO_ACP_FAST),--acp-fast "$(LIVE_DEMO_ACP_FAST)") --acp-startup-timeout "$(LIVE_DEMO_ACP_STARTUP_TIMEOUT)" --instruction-profile "$(LIVE_DEMO_ACP_INSTRUCTION_PROFILE)" --defer-goal --force-config
+
+live-demo-acp-cursor-bootstrap:
+	$(MAKE) live-demo-acp-bootstrap LIVE_DEMO_ACP_PROVIDER=cursor LIVE_DEMO_ACP_AGENT_COMMAND='$(LIVE_DEMO_ACP_CURSOR_COMMAND)' LIVE_DEMO_ACP_MODEL='$(LIVE_DEMO_ACP_CURSOR_MODEL)'
+
+live-demo-acp-codex-bootstrap:
+	$(MAKE) live-demo-acp-bootstrap LIVE_DEMO_ACP_PROVIDER=codex LIVE_DEMO_ACP_AGENT_COMMAND='$(LIVE_DEMO_ACP_CODEX_COMMAND)' LIVE_DEMO_ACP_MODEL='$(LIVE_DEMO_ACP_CODEX_MODEL)' LIVE_DEMO_ACP_EFFORT=medium LIVE_DEMO_ACP_FAST=false
+
+live-demo-acp-claude-bootstrap:
+	$(MAKE) live-demo-acp-bootstrap LIVE_DEMO_ACP_PROVIDER=claude LIVE_DEMO_ACP_AGENT_COMMAND='$(LIVE_DEMO_ACP_CLAUDE_COMMAND)' LIVE_DEMO_ACP_MODEL='$(LIVE_DEMO_ACP_CLAUDE_MODEL)' LIVE_DEMO_ACP_EFFORT=medium
+
+live-demo-acp-pool-bootstrap:
+	$(MAKE) live-demo-acp-bootstrap LIVE_DEMO_ACP_PROVIDER=pool LIVE_DEMO_ACP_AGENT_COMMAND='$(LIVE_DEMO_ACP_POOL_COMMAND)' LIVE_DEMO_ACP_MODEL='$(LIVE_DEMO_ACP_POOL_MODEL)'
 
 live-demo-acp-start: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) start-goal

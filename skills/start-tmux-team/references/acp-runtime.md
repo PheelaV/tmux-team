@@ -15,25 +15,42 @@ proves otherwise.
 
 ## Preflight And Bootstrap
 
-Verify Python 3.14+, Toad, and the provider before bootstrap. For Cursor:
+Verify Python 3.14+, Toad, and the local provider adapter before bootstrap:
 
 ```bash
 python3.14 --version
 toad --version
 agent status
+codex-acp --version
+claude-agent-acp --version
+pool --version
 tmux-team bootstrap --project-root . --agent-runtime acp \
-  --acp-tui-bin toad --acp-agent-command "agent acp" --acp-provider cursor \
+  --acp-tui-bin toad --acp-provider claude \
   --goal "USER_GOAL"
 ```
 
+Canonical presets are Cursor `agent acp`, Codex `codex-acp`, Claude `claude-agent-acp`, and Pool `pool acp`. They are local stdio
+children, not ACP URLs. Codex ACP uses local Codex authentication; Claude ACP uses local Claude credentials/settings;
+Pool uses `pool login` or Poolside-owned API URL/key configuration. `pool acp setup --editor ...` is editor registration
+and is not required for Toad.
+Use `--acp-agent-command` for provider flags, `npx`, pinned/local adapters, or custom providers.
+
 Bootstrap must wait for every role's versioned `ping`/`status` handshake, then record its control socket and runtime
 session ID. A provider-triggered TUI crash is a bootstrap failure, not a healthy team.
+
+When model/cost settings matter, pass repeatable `--acp-initial-config ID=VALUE`. Bootstrap must apply and confirm each
+advertised option before sending the control or role startup prompt; never allow the first turn to inherit an
+unverified expensive default.
 
 ## Provider Permissions
 
 Permission policy belongs to the provider. For autonomous Cursor roles, `agent --force acp` is the explicit allow-all
 choice. For constrained operation, use project-local `.cursor/cli.json`; do not silently modify the user's global
 `~/.cursor/cli-config.json`.
+
+Codex ACP can start with `INITIAL_AGENT_MODE=agent-full-access` only when the operator explicitly accepts it. Claude
+ACP reads Claude Code settings; use `.claude/settings.local.json` for deliberate worktree-local policy. Never modify
+global provider policy during bootstrap.
 
 The startup loop invokes both `command` and `tmux-team`, so a Cursor allowlist needs at least:
 

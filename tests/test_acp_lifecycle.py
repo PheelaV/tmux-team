@@ -8,8 +8,15 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+from tmux_team.bootstrap import RoleLaunchOptions
 from tmux_team.config import load_config
-from tmux_team.lifecycle import LifecycleError, prepare_acp_roles_for_sleep, resume_team
+from tmux_team.lifecycle import (
+    LifecycleError,
+    merge_role_launch_options,
+    prepare_acp_roles_for_sleep,
+    resume_team,
+    role_launch_options_from_capabilities,
+)
 from tmux_team.store import Store
 
 
@@ -51,6 +58,16 @@ acp_resume_supported = true
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_instruction_profile_is_restored_and_may_be_overridden(self) -> None:
+        saved = role_launch_options_from_capabilities({"instruction_profile": "compact"})
+        self.assertEqual(saved.instruction_profile, "compact")
+
+        merged = merge_role_launch_options(
+            {"orchestrator": saved},
+            {"orchestrator": RoleLaunchOptions(instruction_profile="guided")},
+        )
+        self.assertEqual(merged["orchestrator"].instruction_profile, "guided")
 
     def test_sleep_prepares_exact_snapshot_metadata_and_handoff(self) -> None:
         actions: list[str] = []

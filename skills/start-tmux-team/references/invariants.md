@@ -10,6 +10,8 @@ The Codex session that invokes the skill is the operator control session.
 - Do not treat `tt-control` as a managed role.
 - Do not route `tmux-team send` work to `tt-control` unless the operator explicitly adds it as a role.
 - Record operator recovery metadata in `[operator]` when available. `operator.pane` and `operator.codex_thread_id` help recovery, but they do not make the control pane a managed role.
+- Resolve canonical ACP providers locally: Cursor `agent acp`, Codex `codex-acp`, Claude `claude-agent-acp`, and Pool `pool acp`.
+  Require an explicit command for any other provider; never invent an ACP URL or alter global provider policy.
 
 ## App Server
 
@@ -61,8 +63,9 @@ Never use tmux stdin as the production wake path for managed agent roles.
 - If an urgent message is pending, the app-server wake must tell the role to stop at the current safe point and claim the urgent message before continuing other work.
 - Durable task content must be claimed from the tmux-team inbox.
 - A role handles work as: `inbox next -> ack -> do work -> complete --reply-to-sender -> inbox next` until there is no pending work. Startup prompts should include explicit `--role <role>` commands; short commands are allowed only when role discovery works.
+- After dispatching delegated work, the sender must end its turn and rely on the configured wake transport. It must not poll `inbox next` or sleep in a polling loop while waiting; doing so can race and delay the queued completion wake.
 - Only `inbox next` proves the role has no claimable work. `inbox list --state pending` is the matching read-only supervision view and includes queued, notified, retrying, and expired claimed work; narrower state filters are diagnostic only.
-- Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command.
+- Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command. Do not send the same result again as a new task.
 - Completion notices are not team-level reconciliation by themselves. If a non-orchestrator role receives a completion notice with material impact on the team goal, stable commit, blocker state, external run state, or operator-visible result, it must send or complete a concise upward report to `orchestrator`.
 - Completion can carry detail with `--body` or `--body-file`; keep `--summary` concise.
 - Role panes are bound to team config and role; do not put full config paths in normal wake instructions.
@@ -138,6 +141,7 @@ Every managed role has a scratchpad memory file declared by config.
 
 - Bootstrap must create the scratchpad if it is missing.
 - A newly spawned role must be instructed to read this skill, read memory with an explicit `--role <role>` command, then claim inbox work or park.
+- `compact` and `guided` startup profiles must both require loading this skill and these invariants. They vary repeated prompt detail only and must not fork behavior by provider/model name.
 - Codex `SessionStart` hooks for `startup|resume|clear|compact` should inject `tmux-team codex session-context` output after resets. This restores the same role contract version as startup; it is not a new task and does not replace the inbox.
 - A role must run `tmux-team memory show --role <role>` before claiming pending inbox work unless role discovery is known to work.
 - Use memory for durable context: long-lived goals, constraints, decisions, blockers, handoff notes, current worktree/commit/dirty state, running jobs, owned artifacts, stable inputs, and next action.

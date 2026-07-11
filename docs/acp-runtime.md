@@ -13,19 +13,84 @@ uv tool install --python 3.14 \
   "tmux-team[acp] @ git+https://github.com/PheelaV/tmux-team.git"
 
 toad --version
-agent status  # Cursor example
+agent status
+codex --version
+claude --version
+pool --version
+
+npm install -g @agentclientprotocol/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
+
+# Pool: install from https://poolside.ai/get-started, then authenticate/configure:
+pool login
+make install-skill SKILL_PROVIDERS=pool
 ```
 
-Bootstrap a Cursor-backed team:
+`tmux-team[acp]` installs the ACP TUI/control transport, not every provider adapter. Install only the adapter(s) you use;
+bootstrap preflights the selected command and prints its provider-specific install hint when it is missing. Package
+installation remains non-interactive and does not choose a provider for the user.
+
+Pool skill discovery is separate from Codex plugin installation. Pool scans `.poolside/skills/`, `.agents/skills/`, and
+`~/.config/poolside/skills/`; `make install-skill SKILL_PROVIDERS=pool` copies the canonical skill to the global Pool directory (or
+`POOL_SKILLS_HOME`). Every Pool role must have the skill available before bootstrap.
+
+## Instruction Profiles
+
+ACP does not weaken the role startup invariant: every spawned role must load the `start-tmux-team` skill and read its
+invariants. `--instruction-profile compact|guided` controls only how much role-loop guidance is repeated in the startup
+prompt. Use repeatable `--role-instruction-profile ROLE=PROFILE` overrides for mixed-capability teams. The selected
+profile is persisted in role metadata and is independent of provider/model names.
+
+Canonical provider presets:
+
+| Provider | Local stdio command | Authentication |
+| --- | --- | --- |
+| Cursor | `agent acp` | Cursor Agent login |
+| Codex | `codex-acp` | local ChatGPT/Codex login, API key, or configured gateway |
+| Claude | `claude-agent-acp` | local Claude credentials/settings through the official Claude Agent SDK |
+| Pool | `pool acp` | `pool login` or Poolside-owned `POOLSIDE_API_URL` / `POOLSIDE_API_KEY` configuration |
+
+These are local child processes launched by Toad. Claude ACP does not require a remote URL. Pool can target a remote
+OpenAI-compatible deployment, but endpoint/model/auth configuration remains Pool-owned and must be supplied through
+Pool settings or environment, never tmux-team config. `pool acp setup --editor zed|jetbrains` only registers editors;
+Toad invokes `pool acp` directly. Bootstrap a team with:
 
 ```bash
 tmux-team bootstrap --project-root . \
   --agent-runtime acp \
   --acp-tui-bin toad \
-  --acp-agent-command "agent acp" \
-  --acp-provider cursor \
+  --acp-provider claude \
   --goal "Inspect the failing test and report verified evidence."
 ```
+
+Pool example with generic runtime-only endpoint placeholders:
+
+```bash
+POOLSIDE_STANDALONE_BASE_URL='http://<openai-compatible-host>/v1' \
+POOLSIDE_STANDALONE_MODEL='<deployment-model>' \
+POOLSIDE_API_KEY='<runtime-secret>' \
+tmux-team bootstrap --project-root . --agent-runtime acp --acp-provider pool
+```
+
+Do not commit deployment URLs, API keys, or private network addresses. Prefer Pool's credential/settings facilities or
+shell/session environment injection.
+
+Use `--acp-agent-command` to override a preset with `npx`, a pinned/local executable, provider flags, or an arbitrary
+ACP stdio adapter. Unknown providers require an explicit command. Bootstrap fails before creating team state when a
+preset executable is missing and prints its install hint.
+
+Apply provider-advertised options before the first startup prompt when model/cost or permission behavior must be
+deterministic:
+
+```bash
+tmux-team bootstrap --project-root . --agent-runtime acp --acp-provider codex \
+  --acp-initial-config model=gpt-5.6-terra \
+  --acp-initial-config reasoning_effort=medium \
+  --acp-initial-config fast-mode=false
+```
+
+IDs and values must come from that adapter's ACP config surface. Bootstrap fails rather than sending the startup turn
+when an option is missing, invalid, or not confirmed.
 
 The layout contains a Toad/ACP operator agent in `tt-control` and visible role panes in `tt-agents`; ACP teams do not
 need `tt-app-server`. The control agent is not a managed role and receives no role inbox work. Bootstrap verifies each
@@ -35,7 +100,7 @@ sets runtime-neutral terminal titles such as `tmux-team: collector`.
 
 ## Permissions
 
-Provider-specific permission flags belong in `--acp-agent-command`. Cursor's explicit autonomous mode is:
+Provider-specific permission policy stays provider-owned:
 
 ```bash
 --acp-agent-command "agent --force acp"
@@ -62,6 +127,11 @@ separate worktrees, make the project-local policy available in each worktree bef
 
 tmux-team does not modify provider-global permission files.
 
+Codex ACP advertises approval and sandbox modes and supports `INITIAL_AGENT_MODE=agent-full-access` as an explicit
+autonomous launch setting. Claude ACP reads Claude Code user/project/local settings; use project-local
+`.claude/settings.local.json` for deliberate local policy. The live demo creates `bypassPermissions` only in its
+disposable Claude worktrees after the operator enables the real-provider test.
+
 ## Delivery And Control
 
 ACP wake delivery is:
@@ -87,7 +157,6 @@ tmux-team runtime prepare implementer \
   --summary "Focused fix passes; full verification remains."
 
 tmux-team runtime switch implementer \
-  --acp-agent-command "claude-agent-acp" \
   --provider claude \
   --model sonnet \
   --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md
@@ -103,7 +172,7 @@ and previous session metadata with `tmux-team runtime show <role>`.
 ## Current Limits
 
 - Same-session changes are limited to options advertised by the active ACP agent.
-- `--acp-provider` is provenance metadata; provider behavior comes from `--acp-agent-command`.
+- Canonical `--acp-provider` values select their standard command unless `--acp-agent-command` overrides it.
 - Replacing the provider command still requires a runtime handoff.
 
 ## Sleep And Resume

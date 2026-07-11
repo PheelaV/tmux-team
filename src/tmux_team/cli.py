@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__
+from .acp_providers import resolve_acp_provider
 from .acp_tui import ACPControlError, control_socket_path, send_control_request
 from .bootstrap import (
     AGENT_LAYOUTS,
@@ -22,6 +23,7 @@ from .bootstrap import (
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
     DEFAULT_CONTROL_WINDOW,
+    INSTRUCTION_PROFILES,
     ROLE_CONTRACT_VERSION,
     ROLE_PANE_OPTION,
     BootstrapError,
@@ -31,6 +33,7 @@ from .bootstrap import (
     detect_current_tmux_pane_id,
     detect_current_tmux_session,
     free_local_endpoint,
+    normalize_instruction_profile,
     parse_roles,
 )
 from .config import (
@@ -315,8 +318,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap.add_argument("--codex-bin", default="codex")
     bootstrap.add_argument("--acp-tui-bin", default="toad")
-    bootstrap.add_argument("--acp-agent-command", default="agent acp")
-    bootstrap.add_argument("--acp-provider", help="Optional provider label recorded in role config")
+    bootstrap.add_argument(
+        "--acp-agent-command",
+        default=None,
+        help="ACP stdio command; defaults from --acp-provider for cursor, codex, claude, or pool",
+    )
+    bootstrap.add_argument(
+        "--acp-provider",
+        help="Provider preset/provenance: cursor, codex, claude, pool, or a custom label with an explicit command",
+    )
+    bootstrap.add_argument(
+        "--acp-initial-config",
+        action="append",
+        default=[],
+        metavar="ID=VALUE",
+        help="Set and confirm an advertised ACP option before the first startup prompt; repeatable",
+    )
     bootstrap.add_argument(
         "--agent-runtime",
         default="codex",
@@ -371,6 +388,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ROLE=KEY=VALUE",
         help="Pass a Codex -c key=value override to one role; repeatable",
+    )
+    bootstrap.add_argument(
+        "--instruction-profile",
+        choices=INSTRUCTION_PROFILES,
+        default="guided",
+        help="Startup instruction verbosity for all roles; default: guided",
+    )
+    bootstrap.add_argument(
+        "--role-instruction-profile",
+        action="append",
+        default=[],
+        metavar="ROLE=PROFILE",
+        help="Override compact/guided startup instructions for one role; repeatable",
     )
     bootstrap.add_argument(
         "--role-worktree",
@@ -678,8 +708,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_prepare.add_argument("--body-file", help="Optional Markdown handoff body")
     runtime_switch = runtime_sub.add_parser("switch", help="Replace an ACP TUI role in its existing pane")
     runtime_switch.add_argument("role")
-    runtime_switch.add_argument("--acp-agent-command", required=True, help="New ACP provider command")
-    runtime_switch.add_argument("--provider", help="New provider metadata")
+    runtime_switch.add_argument(
+        "--acp-agent-command",
+        help="New ACP provider command; defaults from --provider for cursor, codex, claude, or pool",
+    )
+    runtime_switch.add_argument("--provider", help="New provider preset/provenance")
     runtime_switch.add_argument("--model", help="New model metadata")
     runtime_switch.add_argument("--effort", help="New effort metadata")
     runtime_switch.add_argument("--handoff-file", required=True, help="Existing handoff capsule path")
@@ -838,6 +871,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--role-model", action="append", default=[], metavar="ROLE=MODEL")
     resume.add_argument("--role-reasoning-effort", action="append", default=[], metavar="ROLE=EFFORT")
     resume.add_argument("--role-codex-config", action="append", default=[], metavar="ROLE=KEY=VALUE")
+    resume.add_argument("--instruction-profile", choices=INSTRUCTION_PROFILES, default=None)
+    resume.add_argument("--role-instruction-profile", action="append", default=[], metavar="ROLE=PROFILE")
     resume.add_argument("--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint")
     resume.add_argument("--no-reactivate-roles", action="store_true", help="Do not set resumed roles active")
     resume.add_argument(
@@ -924,10 +959,13 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         role_worktrees = parse_role_worktrees(args.role_worktree)
         role_scratchpads = parse_role_paths(args.role_memory, "--role-memory")
         role_launch_options = parse_role_launch_options(
+            roles=roles,
             role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
             role_models=parse_assignments(args.role_model, "--role-model"),
             role_reasoning_efforts=parse_assignments(args.role_reasoning_effort, "--role-reasoning-effort"),
             role_config_overrides=parse_role_config_overrides(args.role_codex_config),
+            instruction_profile=args.instruction_profile,
+            role_instruction_profiles=parse_assignments(args.role_instruction_profile, "--role-instruction-profile"),
         )
         shared_worktrees = parse_role_groups(args.allow_shared_worktree)
         allow_dirty_roles = frozenset(args.allow_dirty_role)
@@ -967,6 +1005,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             acp_tui_bin=args.acp_tui_bin,
             acp_agent_command=args.acp_agent_command,
             acp_provider=args.acp_provider,
+            acp_initial_config=tuple(args.acp_initial_config),
         )
     except BootstrapError as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
@@ -1025,20 +1064,38 @@ def parse_role_config_overrides(values: Sequence[str]) -> dict[str, tuple[str, .
 
 def parse_role_launch_options(
     *,
+    roles: tuple[str, ...] = (),
     role_profiles: dict[str, str],
     role_models: dict[str, str],
     role_reasoning_efforts: dict[str, str],
     role_config_overrides: dict[str, tuple[str, ...]],
+    instruction_profile: str | None = None,
+    role_instruction_profiles: dict[str, str] | None = None,
 ) -> dict[str, RoleLaunchOptions]:
-    roles = set(role_profiles) | set(role_models) | set(role_reasoning_efforts) | set(role_config_overrides)
+    role_instruction_profiles = role_instruction_profiles or {}
+    if instruction_profile is not None:
+        instruction_profile = normalize_instruction_profile(instruction_profile)
+    normalized_role_profiles = {
+        role: normalize_instruction_profile(profile) for role, profile in role_instruction_profiles.items()
+    }
+    selected_roles = (
+        set(role_profiles)
+        | set(role_models)
+        | set(role_reasoning_efforts)
+        | set(role_config_overrides)
+        | set(normalized_role_profiles)
+    )
+    if instruction_profile is not None:
+        selected_roles.update(roles)
     return {
         role: RoleLaunchOptions(
             model=role_models.get(role),
             reasoning_effort=role_reasoning_efforts.get(role),
             profile=role_profiles.get(role),
             config_overrides=role_config_overrides.get(role, ()),
+            instruction_profile=normalized_role_profiles.get(role, instruction_profile),
         )
-        for role in roles
+        for role in selected_roles
     }
 
 
@@ -1935,12 +1992,13 @@ def cmd_runtime(args: argparse.Namespace, store: Store, conn) -> int:
         print(path)
         return 0
     if args.runtime_command == "switch":
+        acp_agent_command, provider = resolve_acp_provider(args.provider, args.acp_agent_command)
         result = switch_runtime(
             store,
             conn,
             args.role,
-            acp_agent_command=args.acp_agent_command,
-            provider=args.provider,
+            acp_agent_command=acp_agent_command,
+            provider=provider,
             model=args.model,
             effort=args.effort,
             handoff_file=Path(args.handoff_file),
@@ -2751,10 +2809,13 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
 
 def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     role_launch_options = parse_role_launch_options(
+        roles=tuple(config.roles),
         role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
         role_models=parse_assignments(args.role_model, "--role-model"),
         role_reasoning_efforts=parse_assignments(args.role_reasoning_effort, "--role-reasoning-effort"),
         role_config_overrides=parse_role_config_overrides(args.role_codex_config),
+        instruction_profile=args.instruction_profile,
+        role_instruction_profiles=parse_assignments(args.role_instruction_profile, "--role-instruction-profile"),
     )
     result = resume_team(
         config,

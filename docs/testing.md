@@ -38,10 +38,38 @@ authorization.
 ACP lifecycle tests verify exact-session command generation and identity checks, explicit handoff override, pending
 work re-wake, capability refusal, quiescence rollback, and snapshot metadata.
 
-The live-demo fixture has two runtime entry points: `live-demo-bootstrap` for Codex/app-server recovery coverage and
-`live-demo-acp-bootstrap` for external ACP/Toad control-socket coverage. ACP bootstrap intentionally waits for the
-operator to attach; `live-demo-acp-start` then submits the durable goal. Both use the same public snapshot and
-deterministic verifier.
+The live-demo fixture has `live-demo-bootstrap` for Codex/app-server recovery and provider-specific ACP entry points:
+`live-demo-acp-cursor-bootstrap`, `live-demo-acp-codex-bootstrap`, `live-demo-acp-claude-bootstrap`, and
+`live-demo-acp-pool-bootstrap`. All ACP paths
+use Toad control-socket delivery, intentionally wait for the operator to attach, and then use `live-demo-acp-start` to
+submit the same durable goal. Every provider must pass the same public snapshot and deterministic verifier.
+
+Real ACP tests are cost-gated and use explicit provider-specific model/effort/fast settings before the first startup
+prompt. Install/authenticate the selected local adapter first, then run for example:
+
+```bash
+make live-demo-setup
+TMUX_TEAM_RUN_LIVE_ACP=1 make live-demo-acp-codex-bootstrap
+tmux attach -t tt-live-demo
+make live-demo-acp-start
+# after role work completes:
+make live-demo-sleep
+make live-demo-resume
+make live-demo-verify
+make live-demo-clean
+```
+
+Codex and Claude adapters are local stdio processes. The tests do not require an ACP service URL. The Claude demo
+writes ignored `bypassPermissions` settings only into its disposable role worktrees; the Codex demo uses the explicit
+`INITIAL_AGENT_MODE=agent-full-access` process setting. Current defaults are GPT-5.6 Terra with medium reasoning and
+fast off for Cursor/Codex, and Claude Opus 4.8 with medium effort for Claude. Claude ACP does not currently advertise a
+fast-mode config option. Override the provider-specific Make variables deliberately when testing another configuration.
+The live matrix covers native Codex plus Cursor ACP, Codex ACP, Claude ACP, and Pool ACP. Each ACP provider
+uses the same public snapshot, durable orchestration flow, exact sleep/resume check, and deterministic verifier.
+ACP startup prompts must settle before the goal is released. The demo waits up to 180 seconds by default because adapter
+startup and first skill loading vary by provider; override `LIVE_DEMO_ACP_STARTUP_TIMEOUT` when needed.
+The ACP matrix uses the `compact` instruction profile by default so capable providers do not receive an unnecessarily
+repeated startup runbook. Override `LIVE_DEMO_ACP_INSTRUCTION_PROFILE=guided` to exercise the expanded profile.
 
 ## 2. Deterministic Fake-Agent Smoke Test
 

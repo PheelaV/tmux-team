@@ -40,6 +40,21 @@ All notable user-visible changes should be recorded here. Keep migration notes c
   atomically quiesced new external prompts, rejected non-empty provider queues, bounded handoff bodies, and preserved
   distinct coalesced notices.
 - Made the ACP live goal validate the configured provider instead of assuming Cursor.
+- Added canonical Cursor, Codex, Claude, and Pool ACP provider presets with missing-executable install diagnostics; explicit
+  commands still support arbitrary stdio adapters. The ACP package extra installs Toad transport, not every provider
+  adapter; operators install only the adapters they select.
+- Added cost-gated Cursor/Codex/Claude orchestrated demo entry points over the same public fixture, exact-resume
+  lifecycle, and deterministic verifier, with explicit provider-specific model/effort and advertised fast-mode defaults.
+- Added repeatable `--acp-initial-config ID=VALUE`; bootstrap confirms these options after ACP session creation and
+  before the first startup prompt, preventing an unintended provider default from consuming the initial turn.
+- Made ACP demo startup readiness configurable with a conservative 180-second default for slower provider initialization
+  and first skill loading.
+- Clarified that dispatchers must end their turn and rely on wake delivery instead of polling the inbox, and that workers
+  return a delegated result once through `--reply-to-sender` rather than duplicating it as a new task.
+- Added persisted `compact` and `guided` startup instruction profiles with team defaults and per-role overrides. Both
+  profiles keep mandatory `start-tmux-team` skill/invariant loading; no profile is inferred from provider/model names.
+- Added provider-selectable skill installation with `make install-skill SKILL_PROVIDERS=...` for Codex, Cursor,
+  Claude, and Pool, plus documented Pool project-local `.poolside/skills/` / `.agents/skills/` alternatives.
 
 Prototype limits:
 
