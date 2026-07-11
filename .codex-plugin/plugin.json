@@ -1,7 +1,7 @@
 {
   "name": "tmux-team",
-  "version": "0.4.2",
-  "description": "Pane-visible Codex team orchestration with tmux, durable inboxes, and app-server wake delivery.",
+  "version": "0.5.0",
+  "description": "Pane-visible agent team orchestration with tmux, durable inboxes, and runtime-native wake delivery.",
   "author": {
     "name": "tmux-team contributors",
     "url": "https://github.com/PheelaV"
@@ -13,8 +13,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "tmux-team",
-    "shortDescription": "Start and operate pane-visible Codex teams",
-    "longDescription": "Bootstraps a tmux-visible Codex team with durable inbox state and app-server wake delivery, avoiding tmux prompt injection.",
+    "shortDescription": "Start and operate pane-visible agent teams",
+    "longDescription": "Bootstraps tmux-visible Codex or external ACP TUI teams with durable inbox state and runtime-native wake delivery, avoiding tmux prompt injection.",
     "developerName": "tmux-team contributors",
     "category": "Productivity",
     "capabilities": ["Skills"],

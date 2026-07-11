@@ -2,7 +2,7 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
-## Unreleased
+## 0.5.0 - 2026-07-11
 
 - Added a minimal Codex/ACP runtime adapter boundary while keeping Codex as the default built-in runtime.
 - Added experimental `--agent-runtime acp` support that launches a visible external Toad TUI per role with an
@@ -24,6 +24,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
   prompts, and append-only session lineage.
 - Moved ACP-only preflight, permission, and runtime-switch instructions into an on-demand skill reference so Codex-only
   teams do not load that provider-specific context.
+- Updated package, CLI, plugin, and marketplace metadata for 0.5.0.
 
 Prototype limits:
 
