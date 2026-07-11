@@ -6,7 +6,7 @@
 
 Plain tmux is great until you have four agents: prompts collide, panes enter copy mode, messages disappear into scrollback, and nobody knows what is actually done.
 
-`tmux-team` keeps the useful part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: SQLite inboxes, ack/complete tracking, role-owned todos, obligations, scratchpad memory, app-server wakeups, milestones, watchdogs, and sleep/resume snapshots.
+`tmux-team` keeps the useful part of tmux: every agent remains visible, interruptible, and human-operable. It moves coordination out of pane text and into durable state: SQLite inboxes, ack/complete tracking, role-owned todos, obligations, scratchpad memory, structured wake delivery, milestones, watchdogs, and sleep/resume snapshots.
 
 The bias is boring reliability: visible panes, explicit states, recoverable claims, and no terminal stdin as production transport.
 
@@ -55,14 +55,14 @@ verifier: LIVE DEMO VERIFY OK
 
 ## What This Is Not
 
-`tmux-team` is not a general agent framework, a virtual office, or a hidden background daemon. It is a local control plane for a handful of visible Codex agents working in tmux.
+`tmux-team` is not a general agent framework, a virtual office, or a hidden background daemon. It is a local control plane for a handful of visible coding agents working in tmux.
 
 ## What You Get
 
-- Visible tmux panes for every role, with a separate runtime-matched `tt-control` operator agent and, for Codex teams,
-  a separate `tt-app-server` transport window.
+- Visible tmux panes for every role, plus a separate runtime-matched `tt-control` operator agent.
 - Durable SQLite inboxes with claim, ack, complete, completion replies, and reclaimable stale work.
-- App-server wake turns instead of production `tmux send-keys`.
+- Runtime-appropriate structured wake delivery: Codex app-server turns or ACP TUI control sockets, never production
+  `tmux send-keys`.
 - Per-role scratchpad memory for long-lived state and active-message todos for reset-safe substeps.
 - Operator timelines, obligations, watchdog runners, pane capture, and an optional Textual dashboard.
 - Sleep/resume snapshots so a team can stop and come back without losing role bindings or watchdog runners.
