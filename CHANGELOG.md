@@ -17,6 +17,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made shell-mode `tt-control` launch a persistent interactive operator shell directly instead of reporting a transient banner command as exited.
 - Made ACP bootstrap discover Toad inside the tmux-team uv tool environment when dependency executables are not exposed on the user PATH.
 - Made managed Toad panes start with compact, reversible chrome and added a post-startup socket stabilization check so provider-triggered TUI crashes fail bootstrap instead of appearing healthy.
+- Made Toad compact mode keep the single-session tab bar hidden after session startup.
 - Made role-scoped stable approvals resolve abbreviated Git revisions to canonical commit object IDs before persistence.
 - Added `tmux-team runtime show/prepare/switch` for safe ACP provider/model
   session replacement through draining, bounded handoff capsules, recovery

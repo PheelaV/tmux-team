@@ -26,18 +26,12 @@ install-dev:
 install-skill:
 	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/agents"
 	mkdir -p "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references"
-	cp skills/start-tmux-team/SKILL.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/SKILL.md"
-	cp skills/start-tmux-team/agents/openai.yaml "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/agents/openai.yaml"
-	cp skills/start-tmux-team/references/invariants.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references/invariants.md"
-	cp skills/start-tmux-team/references/acp-runtime.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references/acp-runtime.md"
-	cp skills/start-tmux-team/references/team-shapes.md "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/references/team-shapes.md"
+	cp -R skills/start-tmux-team/. "$${CODEX_HOME:-$$HOME/.codex}/skills/start-tmux-team/"
 
 install-cursor-skill:
 	mkdir -p "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references"
 	cp skills/start-tmux-team/SKILL.md "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/SKILL.md"
-	cp skills/start-tmux-team/references/invariants.md "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references/invariants.md"
-	cp skills/start-tmux-team/references/acp-runtime.md "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references/acp-runtime.md"
-	cp skills/start-tmux-team/references/team-shapes.md "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references/team-shapes.md"
+	cp -R skills/start-tmux-team/references/. "$${CURSOR_HOME:-$$HOME/.cursor}/skills/start-tmux-team/references/"
 
 lint: ruff-check format-check
 

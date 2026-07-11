@@ -2238,7 +2238,7 @@ def deliver_watchdog_pressure(
     description: str | None,
     goal: str | None,
 ) -> str:
-    if not findings or not watchdog_delivery_enabled(delivery_method):
+    if not findings or delivery_method.strip().lower() in ("", "none", "report-only"):
         return ""
     recipient = watchdog_notify_target(service.store, conn, scope_role=scope_role, notify_role=notify_role)
     correlation_key = watchdog_pressure_correlation_key(name, scope_role, recipient)
@@ -2286,10 +2286,6 @@ def deliver_watchdog_pressure(
         else:
             line = f"{line} notify_failed={result.notification.details}"
     return line
-
-
-def watchdog_delivery_enabled(delivery_method: str) -> bool:
-    return delivery_method.strip().lower() not in ("", "none", "report-only")
 
 
 def watchdog_notify_target(store: Store, conn, *, scope_role: str | None, notify_role: str | None) -> str:

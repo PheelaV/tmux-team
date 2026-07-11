@@ -393,7 +393,7 @@ def resume_team(
     )
     write_role_env_files(config.config_path, resumed_bindings)
 
-    resumed_config = load_resumed_config(config.config_path)
+    resumed_config = load_config(config.config_path)
     store.sync_roles(conn, resumed_config.roles.values())
     for role, binding in resumed_bindings.items():
         store.bind_role_app_server(conn, role, endpoint, binding.thread_id)
@@ -659,7 +659,7 @@ def resume_acp_team(
         )
 
     write_role_env_files(config.config_path, resumed_bindings)
-    resumed_config = load_resumed_config(config.config_path)
+    resumed_config = load_config(config.config_path)
     store.config = resumed_config
     store.sync_roles(conn, resumed_config.roles.values())
     resumed_watchdog_panes = resume_watchdogs_from_snapshot(
@@ -1336,10 +1336,6 @@ def subprocess_run_lifecycle(command: list[str]) -> subprocess.CompletedProcess[
         details = (result.stderr or result.stdout or f"command exited {result.returncode}").strip()
         raise LifecycleError(f"command failed: {' '.join(command)}\n{details}")
     return result
-
-
-def load_resumed_config(config_path: Path) -> TeamConfig:
-    return load_config(config_path)
 
 
 def inspect_role_targets(config: TeamConfig, tmux_bin: str, *, dry_run: bool) -> dict[str, TmuxTarget]:

@@ -29,6 +29,7 @@ tmux-team bootstrap --project-root . \
 
 The layout contains `tt-control` and visible role panes in `tt-agents`; ACP teams do not need `tt-app-server`.
 Bootstrap verifies each Toad socket and provider session before reporting success.
+Managed panes use Toad compact mode, which keeps the single-session tab bar hidden.
 
 ## Permissions
 

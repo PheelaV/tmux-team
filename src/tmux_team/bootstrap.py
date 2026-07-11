@@ -221,7 +221,7 @@ def bootstrap_team(
             enable_truecolor=enable_truecolor,
             agent_runtime=agent_runtime,
         ):
-            print(shell_join(command))
+            print(shlex.join(command))
         print(
             render_team_config(
                 "tmux-team",
@@ -1376,13 +1376,9 @@ def run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if check and result.returncode != 0:
         raise BootstrapError(
-            f"command failed: {shell_join(command)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            f"command failed: {shlex.join(command)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
     return result
-
-
-def shell_join(command: list[str]) -> str:
-    return shlex.join(command)
 
 
 def parse_roles(raw: str | None) -> tuple[str, ...]:
