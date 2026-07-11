@@ -25,6 +25,11 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Moved ACP-only preflight, permission, and runtime-switch instructions into an on-demand skill reference so Codex-only
   teams do not load that provider-specific context.
 - Updated package, CLI, plugin, and marketplace metadata for 0.5.0.
+- Added an explicit `live-demo-acp-start` step so operators can attach before releasing the deferred scenario goal.
+- Bound ACP runtime switches to the latest unchanged role/session handoff, serialized concurrent config updates,
+  atomically quiesced new external prompts, rejected non-empty provider queues, bounded handoff bodies, and preserved
+  distinct coalesced notices.
+- Made the ACP live goal validate the configured provider instead of assuming Cursor.
 
 Prototype limits:
 

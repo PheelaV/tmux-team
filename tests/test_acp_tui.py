@@ -151,6 +151,53 @@ class ACPTUIControlTests(unittest.TestCase):
         self.assertIn("fix parser", request["text"])
         self.assertNotIn("SECRET TASK BODY", request["text"])
 
+    def test_distinct_notices_use_distinct_coalescing_keys(self) -> None:
+        server = FakeControlSocket(
+            self.socket_path,
+            [
+                {"state": "queued", "sessionId": "session-1", "queueDepth": 1},
+                {"state": "queued", "sessionId": "session-1", "queueDepth": 2},
+            ],
+        )
+        server.start()
+        config = TeamConfig(
+            name="acp-test",
+            runtime_dir=self.root / "runtime",
+            project_root=self.root,
+            roles={
+                "implementer": RoleConfig(
+                    name="implementer",
+                    mode="acp_tui",
+                    capabilities={"notify_method": "control-socket", "control_socket": str(self.socket_path)},
+                )
+            },
+        )
+        store = Store(config)
+        with store.connect() as conn:
+            store.sync_roles(conn, config.roles.values())
+            first = store.notify_role(
+                conn,
+                "implementer",
+                "control-socket",
+                notice_message_id="notice-1",
+                notice_summary="First checkpoint",
+            )
+            second = store.notify_role(
+                conn,
+                "implementer",
+                "control-socket",
+                notice_message_id="notice-2",
+                notice_summary="Second checkpoint",
+            )
+        server.join()
+
+        self.assertTrue(first[0])
+        self.assertTrue(second[0])
+        self.assertEqual(
+            [request["coalesceKey"] for request in server.requests],
+            ["notice:notice-1", "notice:notice-2"],
+        )
+
     def test_acp_extra_keeps_base_python_311_compatible(self) -> None:
         pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
 

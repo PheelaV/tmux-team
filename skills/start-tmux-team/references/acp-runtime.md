@@ -61,8 +61,9 @@ Before switching:
 1. Stop claiming new work and reach an idle safe point. Do not switch during a tool call, approval, or partial mutation.
 2. Update scratchpad memory with the current task, decisions, blockers, artifacts, and exact next action.
 3. Reconcile active todos as completed, open, or superseded.
-4. Run `tmux-team runtime prepare <role> --summary "..."`. The capsule must not contain task bodies, credentials,
-   hidden reasoning, or a full transcript.
+4. Run `tmux-team runtime prepare <role> --summary "..."`. This drains the role and binds the latest capsule to its
+   digest and source session. The capsule must not contain task bodies, credentials, hidden reasoning, or a full
+   transcript.
 5. Use `tmux-team runtime switch` with that capsule. Active turns are refused unless explicit cooperative cancellation
    reaches idle.
 
@@ -74,6 +75,6 @@ After replacement:
 4. Recover active todos and claim durable inbox work.
 5. Verify prior claims against durable evidence, then continue without repeating completed work.
 
-The replacement reuses the pane and socket path, records old/new session lineage, and leaves the role `draining` after
-failure. Same-session model or effort changes are valid only when ACP capability/config responses prove they were
-applied.
+The replacement accepts only that role's latest unchanged prepared capsule, atomically quiesces new external prompts,
+reuses the pane and socket path, records old/new session lineage, and leaves the role `draining` after failure.
+Same-session model or effort changes are valid only when ACP capability/config responses prove they were applied.

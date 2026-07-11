@@ -26,6 +26,13 @@ make live-demo-acp-bootstrap
 tmux attach -t tt-live-demo
 ```
 
+ACP bootstrap intentionally defers the goal so the operator can attach before work starts. From another shell, start
+the durable scenario after the observer is ready:
+
+```bash
+make live-demo-acp-start
+```
+
 Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a human will approve role tools. ACP mode uses the same seeded repository and role worktrees, but its goal verifies control-socket wake delivery and omits the unsupported sleep/resume phase.
 
 The live scenario has an operator recovery phase. After the collector reports the first passing stable verification and the orchestrator arms the post-resume watchdog, trigger sleep/resume from the control side:

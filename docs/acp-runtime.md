@@ -91,8 +91,11 @@ tmux-team runtime switch implementer \
 ```
 
 The bounded capsule includes role, inbox metadata, todos, memory, and Git state, but not inbox bodies or a full
-transcript. Active turns are refused unless `--cancel-active` reaches idle. Failed replacement leaves the role
-`draining` for explicit recovery. Inspect current and previous session metadata with `tmux-team runtime show <role>`.
+transcript. `runtime prepare` drains the role before confirming an idle, empty provider queue. `runtime switch` accepts
+only the latest unchanged capsule prepared for that role and source session, then atomically quiesces new external
+prompts before replacing the pane. Active turns are refused unless
+`--cancel-active` reaches idle. Failed replacement leaves the role `draining` for explicit recovery. Inspect current
+and previous session metadata with `tmux-team runtime show <role>`.
 
 ## Current Limits
 

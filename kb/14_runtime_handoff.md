@@ -57,8 +57,10 @@ and active assignments remain in SQLite.
 - Refuse preparation or switching while the ACP TUI is `busy` or `asking`.
 - An explicit cancel option may request cooperative cancellation and wait for
   the role to become idle.
-- Set the role to `draining` before replacing its process so ordinary new work
-  is blocked.
+- Set the role to `draining` before final idle/queue confirmation so ordinary new work cannot race the replacement.
+- Require an atomic TUI `quiesce` barrier before process replacement; repeated status checks are not a lock.
+- Bind the latest prepared capsule to role, content digest, and source session; reject arbitrary, stale, edited, or
+  cross-role files.
 - Urgent durable work may still arrive and remains recoverable from SQLite.
 - Never silently create repeated replacement sessions after a launch failure.
 - A failed switch leaves the role `draining` for operator recovery.

@@ -1761,7 +1761,7 @@ class Store:
                     update_queued=False,
                     event_type="role.notice_sent",
                     event_payload={"message_id": notice_message_id},
-                    coalesce_key="notice",
+                    coalesce_key=f"notice:{notice_message_id}" if notice_message_id else None,
                 )
             wake_context = self.pending_wake_context(conn, role)
             prompt = self.app_server_wake_prompt(

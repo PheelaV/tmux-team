@@ -310,6 +310,11 @@ Provider-specific flags belong inside `--acp-agent-command`; `--model` and
 active turn is refused by default; `--cancel-active` requests cooperative
 cancellation and still requires the TUI to reach idle.
 
+Only the latest capsule emitted by `runtime prepare` for that role is accepted. Its digest and source session must
+still match; arbitrary, edited, stale, or cross-role files are rejected. Optional handoff bodies are capped at 16,000
+characters. Before pane replacement, Toad's control socket atomically quiesces new external prompts; an idle status
+check alone is not treated as a safe boundary.
+
 The switch creates a new provider conversation. Same-session ACP model changes
 remain unsupported until the TUI advertises and applies
 `session/set_config_option`.

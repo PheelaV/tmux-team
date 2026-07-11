@@ -46,6 +46,8 @@ def main() -> int:
             setup(root, args)
         elif args.command == "bootstrap":
             bootstrap(root, args)
+        elif args.command == "start-goal":
+            start_goal(root)
         elif args.command == "verify":
             verify(root)
         elif args.command == "sleep":
@@ -87,6 +89,8 @@ def parse_args() -> argparse.Namespace:
         "--role-yolo", action="store_true", help="Launch managed role panes in Codex YOLO mode"
     )
     bootstrap_parser.add_argument("--force-config", action="store_true", help="Replace an existing team.toml")
+
+    subparsers.add_parser("start-goal", help="Submit the prepared goal after an attach-before-run bootstrap")
 
     subparsers.add_parser("verify", help="Verify the live run reached real target success")
     subparsers.add_parser("sleep", help="Operator phase: sleep the running live-demo team")
@@ -188,7 +192,7 @@ def setup(root: Path, args: argparse.Namespace) -> None:
 def bootstrap(root: Path, args: argparse.Namespace) -> None:
     metadata = load_metadata(root)
     if args.agent_runtime == "acp":
-        write_acp_goal(root, metadata)
+        write_acp_goal(root, metadata, args.acp_provider)
     else:
         write_goal(root, metadata)
     command = [
@@ -252,7 +256,40 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
     print(f"project: {metadata['project']}")
     if args.defer_goal:
         print(f"deferred goal: {root / 'goal.md'}")
+        print(f"start goal: {Path(__file__).name} --root {root} start-goal")
     print(f"verify later: {Path(__file__).name} --root {root} verify")
+
+
+def start_goal(root: Path) -> None:
+    metadata = load_metadata(root)
+    goal_path = root / "goal.md"
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    if not goal_path.is_file():
+        raise ScenarioError(f"prepared goal is missing: {goal_path}")
+    if not config_path.is_file():
+        raise ScenarioError(f"live demo team is not bootstrapped: {config_path}")
+    result = run(
+        [
+            "tmux-team",
+            "--config",
+            str(config_path),
+            "send",
+            "--from",
+            "operator",
+            "--to",
+            "orchestrator",
+            "--priority",
+            "high",
+            "--summary",
+            "Execute the prepared live demo scenario",
+            "--body-file",
+            str(goal_path),
+            "--correlation-key",
+            "live-demo-goal",
+        ]
+    )
+    print("LIVE DEMO GOAL STARTED")
+    print(result.stdout.strip())
 
 
 def verify_acp_demo_ready(session: str, config_path: Path) -> None:
@@ -708,7 +745,7 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     (root / "goal.md").write_text(textwrap.dedent(goal), encoding="utf-8")
 
 
-def write_acp_goal(root: Path, metadata: dict[str, Any]) -> None:
+def write_acp_goal(root: Path, metadata: dict[str, Any], provider: str) -> None:
     goal = f"""\
     Live tmux-team ACP demo objective.
 
@@ -729,7 +766,7 @@ def write_acp_goal(root: Path, metadata: dict[str, Any]) -> None:
 
     Required team flow:
     1. Orchestrator records a start milestone and starts one obligation for demo verification with a short next-update window.
-    2. Orchestrator runs operator show, status --verbose, dashboard --once --no-pane-preview, pane list --all, watchdog, memory show, and acp status for every role before dispatching. Confirm the role runtime is ACP, provider is cursor, and each role has a control socket and runtime session id.
+    2. Orchestrator runs operator show, status --verbose, dashboard --once --no-pane-preview, pane list --all, watchdog, memory show, and acp status for every role before dispatching. Confirm the role runtime is ACP, provider is {provider}, and each role has a control socket and runtime session id.
     3. After the obligation becomes overdue, orchestrator runs `tmux-team watchdog run --once --name {WATCHDOG_PRESSURE_NAME} --delivery control-socket --notify-role orchestrator --description "Live ACP demo pressure check" --goal "Escalate overdue demo obligations"`. Claim and complete the resulting watchdog message after reconciling the obligation.
     4. Orchestrator broadcasts one notice-only checkpoint to implementer and collector.
     5. Orchestrator sends collector exactly one baseline task with --correlation-key {CORRELATION_KEYS["baseline"]}. Collector identifies the minimal failing test and reports evidence with --reply-to-sender.

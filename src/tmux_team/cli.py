@@ -66,6 +66,7 @@ from .policy import PolicyContext, authorize, normalize_policy_mode
 from .runtime_switch import (
     RuntimeSwitchError,
     prepare_runtime_handoff,
+    read_handoff_body,
     runtime_show,
     switch_runtime,
 )
@@ -1893,10 +1894,7 @@ def cmd_runtime(args: argparse.Namespace, store: Store, conn) -> int:
     if args.runtime_command == "prepare":
         body = None
         if args.body_file:
-            try:
-                body = Path(args.body_file).expanduser().read_text(encoding="utf-8")
-            except OSError as exc:
-                raise ValueError(f"could not read handoff body file {args.body_file}: {exc}") from exc
+            body = read_handoff_body(Path(args.body_file))
         path = prepare_runtime_handoff(
             store,
             conn,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -20,6 +21,7 @@ ACTIVE_TURN_STATES = {"busy", "asking"}
 SCRATCHPAD_EXCERPT_CHARS = 4_000
 GIT_OUTPUT_CHARS = 4_000
 CANCEL_TIMEOUT_SECONDS = 15.0
+HANDOFF_BODY_CHARS = 16_000
 
 
 class RuntimeSwitchError(RuntimeError):
@@ -55,6 +57,18 @@ def runtime_show(store: Store, conn: sqlite3.Connection, role: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def read_handoff_body(path: Path) -> str:
+    expanded = path.expanduser()
+    try:
+        with expanded.open(encoding="utf-8") as handle:
+            body = handle.read(HANDOFF_BODY_CHARS + 1)
+    except OSError as exc:
+        raise RuntimeSwitchError(f"could not read handoff body file {path}: {exc}") from exc
+    if len(body) > HANDOFF_BODY_CHARS:
+        raise RuntimeSwitchError(f"handoff body exceeds {HANDOFF_BODY_CHARS} characters")
+    return body
+
+
 def prepare_runtime_handoff(
     store: Store,
     conn: sqlite3.Connection,
@@ -67,14 +81,28 @@ def prepare_runtime_handoff(
     role_row = _acp_role(store, conn, role)
     if not summary.strip():
         raise RuntimeSwitchError("handoff summary is required")
+    if body is not None and len(body) > HANDOFF_BODY_CHARS:
+        raise RuntimeSwitchError(f"handoff body exceeds {HANDOFF_BODY_CHARS} characters")
     socket_path = _control_socket(store, role_row)
-    status = send_control_request(socket_path, {"action": "status"})
-    _require_idle(role, status, "prepare a runtime handoff")
+    previous_state = str(role_row["state"])
+    if previous_state != "draining":
+        store.set_role_state(conn, role, "draining", actor=actor)
+    try:
+        status = send_control_request(socket_path, {"action": "status"})
+        _require_idle(role, status, "prepare a runtime handoff")
+        source_session_id = _optional_string(status.get("sessionId"))
+        if source_session_id is None:
+            raise RuntimeSwitchError(f"cannot prepare a runtime handoff for role {role!r}: session ID is unknown")
+    except Exception:
+        if previous_state != "draining":
+            store.set_role_state(conn, role, previous_state, actor=actor)
+        raise
 
     timestamp = datetime.now(UTC)
     handoff_dir = store.runtime_dir / "handoffs" / role
     handoff_dir.mkdir(parents=True, exist_ok=True)
     handoff_path = handoff_dir / timestamp.strftime("%Y%m%dT%H%M%S.%fZ.md")
+    role_row = _acp_role(store, conn, role)
     capsule = render_handoff_capsule(
         store,
         conn,
@@ -86,9 +114,22 @@ def prepare_runtime_handoff(
     )
     _write_new_private_file(handoff_path, capsule)
     try:
-        store.set_role_state(conn, role, "draining", actor=actor)
+        store.record_event(
+            conn,
+            "role.runtime_handoff_prepared",
+            actor,
+            role,
+            {
+                "handoff_file": str(handoff_path.resolve()),
+                "sha256": _handoff_digest(handoff_path),
+                "source_session_id": source_session_id,
+            },
+        )
+        conn.commit()
     except Exception:
         handoff_path.unlink(missing_ok=True)
+        if previous_state != "draining":
+            store.set_role_state(conn, role, previous_state, actor=actor)
         raise
     return handoff_path
 
@@ -200,8 +241,7 @@ def switch_runtime(
     if not command_value:
         raise RuntimeSwitchError("ACP agent command is required")
     handoff_path = handoff_file.expanduser().resolve()
-    if not handoff_path.is_file():
-        raise RuntimeSwitchError(f"Handoff file does not exist: {handoff_path}")
+    handoff_metadata = validate_prepared_handoff(store, conn, role, handoff_path)
     if store.config.config_path is None:
         raise RuntimeSwitchError("runtime switch requires a config file")
     if not role_row["pane"]:
@@ -226,6 +266,11 @@ def switch_runtime(
     )
     tmux_command = (tmux_bin, "respawn-pane", "-k", "-t", pane, "-c", str(worktree), shell_command)
     old_session_id = _optional_string(capabilities.get("runtime_session_id"))
+    prepared_session_id = str(handoff_metadata["source_session_id"])
+    if old_session_id and prepared_session_id != old_session_id:
+        raise RuntimeSwitchError(
+            f"handoff source session {prepared_session_id!r} does not match configured session {old_session_id!r}"
+        )
     if dry_run:
         return RuntimeSwitchResult(tmux_command, old_session_id, None, handoff_path, dry_run=True)
 
@@ -233,6 +278,10 @@ def switch_runtime(
     live_session_id = _optional_string(status.get("sessionId"))
     if live_session_id:
         old_session_id = live_session_id
+    if old_session_id != prepared_session_id:
+        raise RuntimeSwitchError(
+            f"handoff source session {prepared_session_id!r} does not match live session {old_session_id or 'unknown'!r}"
+        )
     state = str(status.get("state") or "unknown")
     if state in ACTIVE_TURN_STATES:
         if not cancel_active:
@@ -244,7 +293,7 @@ def switch_runtime(
     else:
         _require_idle(role, status, "switch runtime")
 
-    store.set_role_state(conn, role, "draining", actor=actor)
+    quiesce_runtime_session(socket_path, role=role, expected_session_id=prepared_session_id)
     try:
         result = subprocess.run(
             tmux_command,
@@ -329,12 +378,25 @@ def wait_for_idle(socket_path: Path, *, timeout: float) -> dict[str, Any]:
     while time.monotonic() < deadline:
         status = send_control_request(socket_path, {"action": "status"}, timeout=1.0)
         last_state = str(status.get("state") or "unknown")
-        if last_state == "idle":
+        if last_state == "idle" and int(status.get("queueDepth") or 0) == 0:
             return status
         if last_state == "failed":
             raise RuntimeSwitchError("ACP TUI reported failed state while waiting for cancellation")
         time.sleep(0.2)
     raise RuntimeSwitchError(f"ACP TUI did not become idle after cancellation (last state={last_state})")
+
+
+def quiesce_runtime_session(socket_path: Path, *, role: str, expected_session_id: str) -> None:
+    status = send_control_request(socket_path, {"action": "quiesce", "sessionId": expected_session_id})
+    _require_idle(role, status, "switch runtime")
+    if status.get("acceptingPrompts") is not False:
+        raise RuntimeSwitchError(f"ACP TUI did not confirm prompt quiescence for role {role!r}")
+    session_id = _optional_string(status.get("sessionId"))
+    if session_id != expected_session_id:
+        raise RuntimeSwitchError(
+            f"runtime session changed while quiescing role {role!r}: expected {expected_session_id!r}, "
+            f"got {session_id or 'unknown'!r}"
+        )
 
 
 def wait_for_replacement_session(
@@ -394,6 +456,57 @@ def _require_idle(role: str, status: dict[str, Any], operation: str) -> None:
         raise RuntimeSwitchError(f"cannot {operation} for role {role!r}: ACP TUI state={state}")
     if state != "idle":
         raise RuntimeSwitchError(f"cannot {operation} for role {role!r}: ACP TUI is not idle (state={state})")
+    queue_depth = int(status.get("queueDepth") or 0)
+    if queue_depth:
+        raise RuntimeSwitchError(f"cannot {operation} for role {role!r}: ACP TUI has {queue_depth} queued prompt(s)")
+
+
+def validate_prepared_handoff(
+    store: Store,
+    conn: sqlite3.Connection,
+    role: str,
+    handoff_path: Path,
+) -> dict[str, Any]:
+    role_row = _role(store, conn, role)
+    if role_row["state"] != "draining":
+        raise RuntimeSwitchError(f"role {role!r} must be draining; run runtime prepare before runtime switch")
+    expected_dir = (store.runtime_dir / "handoffs" / role).resolve()
+    if not handoff_path.is_file() or handoff_path.parent != expected_dir:
+        raise RuntimeSwitchError(f"handoff file is not a prepared capsule for role {role!r}: {handoff_path}")
+    event = conn.execute(
+        """
+        SELECT payload_json
+        FROM events
+        WHERE type = 'role.runtime_handoff_prepared' AND ref_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (role,),
+    ).fetchone()
+    if event is None:
+        raise RuntimeSwitchError(f"role {role!r} has no prepared runtime handoff")
+    try:
+        payload = json.loads(event["payload_json"])
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeSwitchError(f"role {role!r} has invalid prepared handoff metadata") from exc
+    if payload.get("handoff_file") != str(handoff_path):
+        raise RuntimeSwitchError(f"handoff is stale; use the latest runtime prepare result for role {role!r}")
+    if payload.get("sha256") != _handoff_digest(handoff_path):
+        raise RuntimeSwitchError(f"handoff file changed after preparation: {handoff_path}")
+    if not _optional_string(payload.get("source_session_id")):
+        raise RuntimeSwitchError(f"prepared handoff for role {role!r} has no source session ID")
+    return payload
+
+
+def _handoff_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise RuntimeSwitchError(f"could not read prepared handoff {path}: {exc}") from exc
+    return digest.hexdigest()
 
 
 def _git_snapshot(worktree: Path | None) -> tuple[str, str]:

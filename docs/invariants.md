@@ -107,7 +107,9 @@ continuity.
 - Runtime switching is initially limited to visible `acp_tui` roles.
 - Refuse switching while the current TUI is busy or asking unless explicit
   cooperative cancellation reaches an idle state.
-- Mark the role draining before its pane process is replaced.
+- Mark the role draining before checking final TUI quiescence so ordinary dispatch cannot start a new turn during replacement.
+- Use the TUI control-socket `quiesce` barrier before pane replacement; status polling alone cannot close the prompt race.
+- Accept only the latest role-scoped prepared capsule with an unchanged digest and matching source session.
 - Create a bounded handoff capsule before switching; never include inbox task
   bodies, credentials, hidden reasoning, or the full transcript.
 - Reuse the existing pane and control-socket path for the replacement TUI.
@@ -225,7 +227,7 @@ Initial bootstrap goals are orchestrator inputs only. `--goal` and `--goal-file`
 
 `tmux-team broadcast` is a convenience wrapper around durable send. It must create separate messages per recipient so every role has independent claim, ack, completion, and reply state. It must not create a shared message that multiple roles compete to claim. Recipient shaping must use either `--only` or `--exclude`, not both.
 
-`tmux-team broadcast --notice` is the exception for announcements. It must record one durable `message_kind='notice'` row per recipient, keep those rows out of pending inbox work, and wake roles with notice-only wording when notification is requested.
+`tmux-team broadcast --notice` is the exception for announcements. It must record one durable `message_kind='notice'` row per recipient, keep those rows out of pending inbox work, and wake roles with notice-only wording when notification is requested. ACP notice coalescing keys are message-specific so distinct announcements cannot replace each other.
 
 ## Completion Tracking
 

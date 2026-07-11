@@ -31,7 +31,10 @@ Runtime-switch tests mock Toad readiness and tmux respawn while verifying
 capsule redaction, idle/cancel gates, TOML preservation, failure-to-draining
 behavior, recovery prompts, and append-only session lineage.
 
-The live-demo fixture has two runtime entry points: `live-demo-bootstrap` for Codex/app-server recovery coverage and `live-demo-acp-bootstrap` for external ACP/Toad control-socket coverage. Both use the same public snapshot and deterministic verifier.
+The live-demo fixture has two runtime entry points: `live-demo-bootstrap` for Codex/app-server recovery coverage and
+`live-demo-acp-bootstrap` for external ACP/Toad control-socket coverage. ACP bootstrap intentionally waits for the
+operator to attach; `live-demo-acp-start` then submits the durable goal. Both use the same public snapshot and
+deterministic verifier.
 
 ## 2. Deterministic Fake-Agent Smoke Test
 

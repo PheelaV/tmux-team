@@ -199,7 +199,7 @@ wheels = [
 [[package]]
 name = "batrachian-toad"
 version = "0.6.20"
-source = { git = "https://github.com/PheelaV/toad.git?rev=feature%2Facp-control-socket#2aafc1439a753395f612d7459bf7e7371fe83631" }
+source = { git = "https://github.com/PheelaV/toad.git?rev=feature%2Facp-control-socket#2ca246b8e5d491b3d9e37c454d33a6aa4202af94" }
 dependencies = [
     { name = "aiosqlite", marker = "python_full_version >= '3.14'" },
     { name = "bashlex", marker = "python_full_version >= '3.14'" },

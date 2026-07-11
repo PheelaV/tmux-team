@@ -7,7 +7,7 @@ LIVE_DEMO_ACP_TUI_BIN ?= $(HOME)/.local/share/uv/tools/tmux-team/bin/toad
 LIVE_DEMO_ACP_AGENT_COMMAND ?= agent --force acp
 LIVE_DEMO_ACP_PROVIDER ?= cursor
 
-.PHONY: require-uv install-dev install-skill install-cursor-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
+.PHONY: require-uv install-dev install-skill install-cursor-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
 
 require-uv:
 	@command -v "$(UV)" >/dev/null 2>&1 || (echo "tmux-team tests require uv. Install with: brew install uv" >&2; exit 2)
@@ -88,6 +88,9 @@ live-demo-bootstrap: require-uv
 
 live-demo-acp-bootstrap: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) bootstrap --session $(LIVE_DEMO_SESSION) --agent-runtime acp --acp-tui-bin "$(LIVE_DEMO_ACP_TUI_BIN)" --acp-agent-command "$(LIVE_DEMO_ACP_AGENT_COMMAND)" --acp-provider "$(LIVE_DEMO_ACP_PROVIDER)" --defer-goal --force-config
+
+live-demo-acp-start: require-uv
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) start-goal
 
 live-demo-sleep: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) sleep

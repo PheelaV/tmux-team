@@ -141,10 +141,14 @@ for versioned `ping` and `status` responses before sending the startup prompt. W
 implement ACP sleep/resume.
 
 Replacing an ACP provider/model command is a controlled session boundary.
-`runtime prepare` captures bounded durable role state without task bodies;
-`runtime switch` drains the role, respawns Toad in the same pane, waits for a
-new session, records lineage, and sends one recovery prompt. A switch never
+`runtime prepare` drains the role before confirming an idle, empty TUI queue and captures bounded durable role state
+without task bodies. `runtime switch` accepts only that role's latest unchanged capsule for the same source session,
+atomically quiesces external Toad prompts, respawns Toad in the same pane, waits for a new session, records lineage,
+and sends one recovery prompt. A switch never
 injects a full transcript or treats provider conversation IDs as role identity.
+
+ACP inbox wakes intentionally share `coalesceKey="inbox"`; they only signal that durable work exists. Notice wakes use
+`coalesceKey="notice:<message-id>"`, preserving distinct announcements while allowing retries of one notice to coalesce.
 
 `app-server-turn` submits a short wake turn that tells the role durable inbox work exists. The wake turn is deliberately blunt. It does not restate the skill, command syntax, scratchpad rules, ack/complete syntax, or role boundaries. Role panes spawned by bootstrap already received the startup prompt and have the `start-tmux-team` skill available; the wake is only an interrupt that says "claim durable inbox work now."
 

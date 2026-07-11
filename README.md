@@ -30,6 +30,7 @@ Run the same public-snapshot task through an external ACP TUI runtime with:
 make live-demo-setup
 make live-demo-acp-bootstrap
 tmux attach -t tt-live-demo
+make live-demo-acp-start
 make live-demo-verify
 make live-demo-clean
 ```
