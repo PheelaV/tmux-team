@@ -219,9 +219,7 @@ SQLite inbox -> private Unix socket -> visible Toad TUI -> ACP session/prompt ->
 The socket carries only the compact wake; durable task bodies remain in SQLite. Provider-specific flags belong in
 `--acp-agent-command` (for example, a provider's non-interactive mode). `--acp-provider` is convenience metadata and
 does not change launch behavior. Inspect or control a role with `tmux-team acp status|wake|cancel <role>`.
-The prototype `--agent-runtime cursor-acp`, `--cursor-bin`, and `tmux-team cursor show|wake|cancel` forms remain
-compatibility aliases. ACP sleep/resume uses explicit `exact` or `handoff` policy and never silently opens a blank
-provider session.
+ACP sleep/resume uses explicit `exact` or `handoff` policy and never silently opens a blank provider session.
 
 Inspect or change options advertised by an idle live ACP session without
 starting a new provider conversation:

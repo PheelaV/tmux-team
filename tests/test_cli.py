@@ -3314,7 +3314,7 @@ can_notify = ["orchestrator"]
             "--roles",
             "orchestrator,implementer",
             "--agent-runtime",
-            "cursor-acp",
+            "acp",
             "--acp-tui-bin",
             "toad",
             "--acp-agent-command",
@@ -3342,29 +3342,6 @@ can_notify = ["orchestrator"]
         self.assertIn("runtime: acp", out)
         self.assertIn("orchestrator: session_id=dry-session-orchestrator", out)
         self.assertFalse(generated_config.exists())
-
-    def test_bootstrap_cursor_bin_alias_builds_acp_command(self) -> None:
-        code, out, err = self.run_main(
-            "bootstrap",
-            "--project-root",
-            str(self.root),
-            "--config",
-            str(self.root / ".tmux-team" / "cursor-alias.toml"),
-            "--session",
-            "tt-acp-alias",
-            "--roles",
-            "orchestrator",
-            "--agent-runtime",
-            "cursor-acp",
-            "--cursor-bin",
-            "cursor-agent",
-            "--dry-run",
-        )
-
-        self.assertEqual(code, 0, err)
-        self.assertIn("cursor-agent acp", out)
-        self.assertIn('acp_agent_command = "cursor-agent acp"', out)
-        self.assertIn("runtime: acp", out)
 
     def test_bootstrap_acp_reports_missing_toad_before_creating_state(self) -> None:
         generated_config = self.root / ".tmux-team" / "missing-toad.toml"

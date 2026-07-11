@@ -50,7 +50,6 @@ class RuntimeOptionsResult:
 class RuntimeConfigureResult:
     session_id: str
     changes: tuple[tuple[str, str | bool], ...]
-    options: tuple[dict[str, Any], ...]
 
 
 def runtime_show(store: Store, conn: sqlite3.Connection, role: str) -> str:
@@ -190,7 +189,7 @@ def _configure_runtime_options(
         confirmed_changes.append((config_id, value))
         current_options = next_options
 
-    return RuntimeConfigureResult(initial.session_id, tuple(confirmed_changes), current_options)
+    return RuntimeConfigureResult(initial.session_id, tuple(confirmed_changes))
 
 
 def _request_runtime_options(socket_path: Path, *, expected_session_id: str | None) -> RuntimeOptionsResult:

@@ -35,7 +35,7 @@ DEFAULT_CONTROL_WINDOW = "tt-control"
 DEFAULT_APP_SERVER_WINDOW = "tt-app-server"
 DEFAULT_AGENTS_WINDOW = "tt-agents"
 AGENT_LAYOUTS = ("grouped", "separate-windows")
-AGENT_RUNTIMES = ("codex", "acp", "cursor-acp")
+AGENT_RUNTIMES = ("codex", "acp")
 CONTROL_MODES = ("auto", "shell", "codex")
 ROLE_PANE_OPTION = "@tmux-team-role"
 TT_PREFIX = "tt-"
@@ -50,7 +50,6 @@ class BootstrapResult:
     role_threads: dict[str, str]
     role_sessions: dict[str, str]
     role_panes: dict[str, str]
-    operator_pane: str | None = None
     operator_thread_id: str | None = None
 
 
@@ -139,7 +138,6 @@ def bootstrap_team(
     acp_tui_bin: str = "toad",
     acp_agent_command: str = "agent acp",
     acp_provider: str | None = None,
-    cursor_bin: str | None = None,
 ) -> BootstrapResult:
     project_root = project_root.expanduser().resolve()
     config_path = config_path.expanduser()
@@ -151,8 +149,6 @@ def bootstrap_team(
     agent_layout = normalize_agent_layout(agent_layout)
     runtime = agent_runtime_adapter(agent_runtime)
     agent_runtime = runtime.name
-    if cursor_bin:
-        acp_agent_command = f"{shlex.quote(cursor_bin)} acp"
     control_mode = normalize_control_mode(control_mode)
     if runtime.uses_control_socket and control_mode == "auto":
         control_mode = "shell"
@@ -251,7 +247,6 @@ def bootstrap_team(
             role_threads={role: binding.thread_id for role, binding in role_bindings.items()},
             role_sessions={role: binding.session_id for role, binding in role_bindings.items()},
             role_panes={role: binding.pane for role, binding in role_bindings.items()},
-            operator_pane=f"{session}:{control_window}.0",
         )
 
     provisional_bindings = {
@@ -350,7 +345,6 @@ def bootstrap_team(
         role_threads={role: binding.thread_id for role, binding in role_bindings.items()},
         role_sessions={role: binding.session_id for role, binding in role_bindings.items()},
         role_panes={role: binding.pane for role, binding in role_bindings.items()},
-        operator_pane=operator_pane,
     )
 
 
@@ -1115,10 +1109,6 @@ def app_server_shell_command(codex_bin: str, endpoint: str) -> str:
     )
 
 
-def shell_session_command(tmux_bin: str, session: str, cwd: Path, window: str = DEFAULT_CONTROL_WINDOW) -> list[str]:
-    return [tmux_bin, "new-session", "-d", "-s", session, "-n", window, "-c", str(cwd)]
-
-
 def acp_role_shell_command(
     acp_tui_bin: str,
     acp_agent_command: str,
@@ -1598,18 +1588,18 @@ def normalize_agent_runtime(value: str) -> str:
 
 def agent_runtime_adapter(value: str) -> AgentRuntimeAdapter:
     normalized = value.strip().lower().replace("_", "-")
-    if normalized in ("codex", "app-server"):
+    if normalized == "codex":
         return CODEX_RUNTIME
-    if normalized in ("acp", "cursor", "cursor-acp"):
+    if normalized == "acp":
         return ACP_RUNTIME
     raise BootstrapError(f"invalid agent runtime: {value} (expected codex or acp)")
 
 
 def normalize_agent_layout(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
-    if normalized in ("grouped", "agents", "single-window", "one-window", "tiled"):
+    if normalized == "grouped":
         return "grouped"
-    if normalized in ("separate", "separate-windows", "windows", "per-role-window"):
+    if normalized == "separate-windows":
         return "separate-windows"
     raise BootstrapError(f"invalid agent layout: {value} (expected grouped or separate-windows)")
 

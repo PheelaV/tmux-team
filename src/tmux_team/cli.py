@@ -175,7 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_resume(args, store, conn, config)
             if args.command == "codex":
                 return cmd_codex(args, store, service, conn)
-            if args.command in ("acp", "cursor"):
+            if args.command == "acp":
                 return cmd_acp(args, store, service, conn)
             if args.command == "stable":
                 return cmd_stable(args, store, conn)
@@ -315,11 +315,6 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--acp-tui-bin", default="toad")
     bootstrap.add_argument("--acp-agent-command", default="agent acp")
     bootstrap.add_argument("--acp-provider", help="Optional provider label recorded in role config")
-    bootstrap.add_argument(
-        "--cursor-bin",
-        default=None,
-        help="Compatibility alias: use '<BIN> acp' as --acp-agent-command",
-    )
     bootstrap.add_argument(
         "--agent-runtime",
         default="codex",
@@ -881,7 +876,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     add_acp_control_parser(subparsers, "acp", "Inspect and control external ACP TUI roles")
-    add_acp_control_parser(subparsers, "cursor", "Compatibility alias for ACP TUI controls", compatibility=True)
 
     stable = subparsers.add_parser("stable", help="Manage stable commit approvals")
     stable_sub = stable.add_subparsers(dest="stable_command", required=True)
@@ -903,15 +897,12 @@ def add_acp_control_parser(
     subparsers: argparse._SubParsersAction,
     name: str,
     help_text: str,
-    *,
-    compatibility: bool = False,
 ) -> None:
     parser = subparsers.add_parser(name, help=help_text)
     commands = parser.add_subparsers(dest="acp_command", required=True)
     wake = commands.add_parser("wake", help="Wake a role through its configured control socket")
     wake.add_argument("role")
-    status_name = "show" if compatibility else "status"
-    status = commands.add_parser(status_name, help="Show the ACP TUI control-socket status")
+    status = commands.add_parser("status", help="Show the ACP TUI control-socket status")
     status.add_argument("role")
     cancel = commands.add_parser("cancel", help="Request cancellation of the active ACP turn")
     cancel.add_argument("role")
@@ -981,7 +972,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             acp_tui_bin=args.acp_tui_bin,
             acp_agent_command=args.acp_agent_command,
             acp_provider=args.acp_provider,
-            cursor_bin=args.cursor_bin,
         )
     except BootstrapError as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
@@ -1291,7 +1281,7 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "memory.read", role=args.role)
         return
 
-    if args.command in ("acp", "cursor") and args.acp_command in ("wake", "cancel"):
+    if args.command == "acp" and args.acp_command in ("wake", "cancel"):
         authorize(config, policy_context, "role.notify", role=args.role, method="control-socket")
         return
 

@@ -99,10 +99,9 @@ and previous session metadata with `tmux-team runtime show <role>`.
 
 ## Current Limits
 
-- Same-session model/config changes are not claimed until the TUI can prove `session/set_config_option` support.
-- `--acp-provider`, `--model`, and `--effort` are provenance metadata; provider behavior comes from
-  `--acp-agent-command`.
-- The `cursor-acp`, `--cursor-bin`, and `tmux-team cursor` forms are prototype compatibility aliases.
+- Same-session changes are limited to options advertised by the active ACP agent.
+- `--acp-provider` is provenance metadata; provider behavior comes from `--acp-agent-command`.
+- Replacing the provider command still requires a runtime handoff.
 
 ## Sleep And Resume
 

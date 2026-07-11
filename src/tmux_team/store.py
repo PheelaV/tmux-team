@@ -2562,14 +2562,7 @@ def empty_to_none(value: str | None) -> str | None:
 
 
 def normalize_notify_method(method: str) -> str:
-    value = method.strip().lower().replace("_", "-")
-    if value == "display":
-        return "display-message"
-    if value in ("app-server", "appserver", "codex", "codex-app-server"):
-        return "app-server-turn"
-    if value in ("acp", "acp-tui", "cursor", "cursor-acp", "cursor-acp-turn"):
-        return "control-socket"
-    return value
+    return method.strip().lower()
 
 
 def truncate_wake_line(value: str, limit: int = 200) -> str:

@@ -1765,7 +1765,3 @@ def optional_string(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(value)
-
-
-def configured_acp_roles(config: TeamConfig) -> list[str]:
-    return sorted(role.name for role in config.roles.values() if role.mode == "acp_tui")

@@ -8,8 +8,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Added experimental `--agent-runtime acp` support that launches a visible external Toad TUI per role with an
   arbitrary `--acp-agent-command`, unique private control socket, readiness/status handshake, and compact
   control-socket wake delivery.
-- Added generic ACP config and `tmux-team acp status/wake/cancel` controls. The prototype `cursor-acp`,
-  `--cursor-bin`, and `tmux-team cursor show/wake/cancel` forms remain compatibility aliases.
+- Added generic ACP config and `tmux-team acp status/wake/cancel` controls.
 - Added the temporary `tmux-team[acp]` package extra for the Toad control-socket branch. The extra requires Python
   3.14; base tmux-team and Codex operation remain Python 3.11+.
 - Made completion replies, initial goals, and MCP sends use each recipient role's configured delivery method.
@@ -45,10 +44,7 @@ Prototype limits:
   `tmux-team[acp]` extra. It provides the generic control socket, exact session
   loading, and `configOptions`/`setConfig` actions.
 
-Migration notes:
-
-- Replace `--agent-runtime cursor-acp --role-yolo` with `--agent-runtime acp --acp-agent-command "agent --force acp"`
-  when provider-specific non-interactive behavior is required.
+ACP runtime, layout, and notification values accept their documented canonical spellings only.
 
 ## 0.4.2 - 2026-07-10
 

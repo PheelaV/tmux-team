@@ -27,8 +27,7 @@ tmux-team acp cancel orchestrator
 
 The ACP prototype uses visible Toad panes. Toad owns the arbitrary ACP command and its session; tmux-team uses a
 unique role control socket for readiness, status, compact prompts, cancellation, and advertised session
-configuration. The `cursor-acp` runtime, `--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP
-sleep/resume supports explicit `exact` and `handoff` policies.
+configuration. ACP sleep/resume supports explicit `exact` and `handoff` policies.
 Install the temporary `tmux-team[acp]` extra with Python 3.14; the base package remains Python 3.11+.
 Use a provider's explicit autonomous flag only when intended. For constrained Cursor roles, configure project-local
 `.cursor/cli.json` permissions including `Shell(command)` and `Shell(tmux-team)`; see
