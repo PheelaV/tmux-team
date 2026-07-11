@@ -63,6 +63,12 @@ from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
+from .runtime_switch import (
+    RuntimeSwitchError,
+    prepare_runtime_handoff,
+    runtime_show,
+    switch_runtime,
+)
 from .service import TeamService
 from .store import (
     MESSAGE_STATE_FILTERS,
@@ -150,6 +156,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_obligation(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
+            if args.command == "runtime":
+                return cmd_runtime(args, store, conn)
             if args.command == "pane":
                 return cmd_pane(args, store, conn)
             if args.command == "notify":
@@ -173,6 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         HookDenied,
         HookError,
         LifecycleError,
+        RuntimeSwitchError,
         ValueError,
         KeyError,
         PermissionError,
@@ -650,6 +659,27 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         role_state = role_sub.add_parser(state_command, help=f"Set role state to {state}")
         role_state.add_argument("role")
+
+    runtime = subparsers.add_parser("runtime", help="Inspect or switch a role runtime")
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_show_parser = runtime_sub.add_parser("show", help="Show role runtime metadata")
+    runtime_show_parser.add_argument("role")
+    runtime_prepare = runtime_sub.add_parser("prepare", help="Write a provider-neutral handoff capsule")
+    runtime_prepare.add_argument("role")
+    runtime_prepare.add_argument("--summary", required=True, help="Operator handoff summary")
+    runtime_prepare.add_argument("--body-file", help="Optional Markdown handoff body")
+    runtime_switch = runtime_sub.add_parser("switch", help="Replace an ACP TUI role in its existing pane")
+    runtime_switch.add_argument("role")
+    runtime_switch.add_argument("--acp-agent-command", required=True, help="New ACP provider command")
+    runtime_switch.add_argument("--provider", help="New provider metadata")
+    runtime_switch.add_argument("--model", help="New model metadata")
+    runtime_switch.add_argument("--effort", help="New effort metadata")
+    runtime_switch.add_argument("--handoff-file", required=True, help="Existing handoff capsule path")
+    runtime_switch.add_argument(
+        "--cancel-active", action="store_true", help="Cancel an active ACP turn before switching"
+    )
+    runtime_switch.add_argument("--tmux-bin", default="tmux")
+    runtime_switch.add_argument("--dry-run", action="store_true")
 
     pane = subparsers.add_parser("pane", help="Inspect managed role tmux panes")
     pane_sub = pane.add_subparsers(dest="pane_command", required=True)
@@ -1180,6 +1210,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         return
 
     if args.command == "role" and args.role_command != "list":
+        authorize(config, policy_context, "role.state.change", role=args.role)
+        return
+
+    if args.command == "runtime" and args.runtime_command in ("prepare", "switch"):
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
 
@@ -1850,6 +1884,54 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
     store.set_role_state(conn, args.role, state, actor=args.actor or "operator")
     print(f"{args.role} state={state}")
     return 0
+
+
+def cmd_runtime(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.runtime_command == "show":
+        print(runtime_show(store, conn, args.role), end="")
+        return 0
+    if args.runtime_command == "prepare":
+        body = None
+        if args.body_file:
+            try:
+                body = Path(args.body_file).expanduser().read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"could not read handoff body file {args.body_file}: {exc}") from exc
+        path = prepare_runtime_handoff(
+            store,
+            conn,
+            args.role,
+            summary=args.summary,
+            body=body,
+            actor=args.actor or "operator",
+        )
+        print(path)
+        return 0
+    if args.runtime_command == "switch":
+        result = switch_runtime(
+            store,
+            conn,
+            args.role,
+            acp_agent_command=args.acp_agent_command,
+            provider=args.provider,
+            model=args.model,
+            effort=args.effort,
+            handoff_file=Path(args.handoff_file),
+            cancel_active=args.cancel_active,
+            tmux_bin=args.tmux_bin,
+            dry_run=args.dry_run,
+            actor=args.actor or "operator",
+        )
+        print(f"command: {format_command(result.tmux_command)}")
+        if result.dry_run:
+            print("dry-run: no role, tmux, config, prompt, or lineage state changed")
+        else:
+            print(
+                f"{args.role} session_id={result.new_session_id} "
+                f"previous_session_id={result.old_session_id or '-'} handoff={result.handoff_file}"
+            )
+        return 0
+    return 2
 
 
 def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:

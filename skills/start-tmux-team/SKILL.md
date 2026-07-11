@@ -135,6 +135,7 @@ tmux-team milestone list --today
 tmux-team obligation start --role collector --summary "Monitor verification" --next-update-in 15m
 tmux-team watchdog start --name default --interval 15m --notify-role orchestrator --delivery app-server-turn
 tmux-team role pause trainer
+tmux-team runtime show implementer
 tmux-team sleep
 tmux-team resume
 ```
@@ -152,6 +153,37 @@ Use Codex `SessionStart` hooks for `startup|resume|clear|compact` recovery. The 
 Do not reread the full skill on ordinary app-server wakes when the role contract and loop are already loaded. Reread on first startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
 
 App-server wakes are blunt interrupts. They say durable inbox work exists; the task body must be claimed from SQLite inbox state.
+
+### ACP Runtime Switch Contract
+
+An ACP provider/model switch that changes the provider session is a lifecycle
+boundary, not an ordinary wake.
+
+Before a switch:
+
+1. Stop claiming new work and let the operator put the role in `draining`.
+2. Reach an idle safe point; do not switch during a tool call, approval, or
+   partially applied mutation.
+3. Update scratchpad memory with the current task, decisions, blockers, owned
+   artifacts, and exact next action.
+4. Ensure active todos accurately distinguish completed, open, and superseded
+   work.
+5. Create a bounded handoff capsule with `tmux-team runtime prepare`; never put
+   task bodies, hidden reasoning, credentials, or a full transcript in it.
+
+After the new ACP session starts:
+
+1. Load this skill and the current role contract.
+2. Read scratchpad memory and the handoff capsule.
+3. Inspect Git status and diff directly.
+4. Recover active todos and run `tmux-team inbox next`.
+5. Verify the previous session's reported state against durable evidence before
+   editing or rerunning work.
+6. Continue from the recorded next action without repeating completed work.
+
+Same-session model/effort changes do not require a capsule when the ACP agent
+advertises and successfully applies a compatible config option. Do not claim
+that capability when the TUI control protocol cannot prove it.
 
 Role loop on startup or wake:
 

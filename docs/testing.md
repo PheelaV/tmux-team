@@ -27,6 +27,9 @@ The app-server delivery unit test uses `socketpair()` and a fake WebSocket JSON-
 
 The ACP TUI unit tests exercise the versioned Unix-socket client, readiness/status handshake, structured errors, and
 SQLite wake routing without starting Toad or a provider. They verify that task bodies stay out of wake prompts.
+Runtime-switch tests mock Toad readiness and tmux respawn while verifying
+capsule redaction, idle/cancel gates, TOML preservation, failure-to-draining
+behavior, recovery prompts, and append-only session lineage.
 
 The live-demo fixture has two runtime entry points: `live-demo-bootstrap` for Codex/app-server recovery coverage and `live-demo-acp-bootstrap` for external ACP/Toad control-socket coverage. Both use the same public snapshot and deterministic verifier.
 
