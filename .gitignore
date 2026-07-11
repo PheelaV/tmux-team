@@ -10,3 +10,4 @@ build/
 *.egg-info/
 .venv/
 .tmux-team/
+.vscode/
