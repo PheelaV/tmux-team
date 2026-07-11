@@ -60,6 +60,7 @@ class RoleBinding:
     worktree: Path
     session_id: str = ""
     control_socket: str = ""
+    resume_supported: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -606,6 +607,7 @@ def start_acp_role_panes(
             worktree=role_worktrees[role],
             session_id=str(status.get("sessionId") or ""),
             control_socket=str(role_sockets[role]),
+            resume_supported=status.get("resumeSupported") if isinstance(status.get("resumeSupported"), bool) else None,
         )
     return role_bindings
 
@@ -890,6 +892,8 @@ def render_team_config(
             )
             if binding.session_id:
                 role_data["runtime_session_id"] = binding.session_id
+            if binding.resume_supported is not None:
+                role_data["acp_resume_supported"] = binding.resume_supported
             if acp_provider:
                 role_data["acp_provider"] = acp_provider
         else:
@@ -1121,6 +1125,7 @@ def acp_role_shell_command(
     config_path: Path,
     role: str,
     control_socket: str,
+    session_id: str | None = None,
 ) -> str:
     tui_args = [
         acp_tui_bin,
@@ -1132,8 +1137,10 @@ def acp_role_shell_command(
         "--control-socket",
         control_socket,
         "--compact-ui",
-        acp_agent_command,
     ]
+    if session_id:
+        tui_args.extend(["--session-id", session_id])
+    tui_args.append(acp_agent_command)
     env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *tui_args]
     command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
     return keep_open_command(command, "ACP TUI role")
@@ -1326,6 +1333,7 @@ def acp_role_spawn_command(
     index: int,
     agent_layout: str,
     agents_window: str,
+    session_id: str | None = None,
     *,
     print_pane: bool = False,
 ) -> list[str]:
@@ -1336,6 +1344,7 @@ def acp_role_spawn_command(
         config_path,
         role,
         control_socket,
+        session_id,
     )
     if agent_layout == "grouped":
         if index == 0:

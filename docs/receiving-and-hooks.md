@@ -137,8 +137,8 @@ tmux-team queue
 
 This avoids tmux stdin and preserves the human composer. Each role uses a unique mode-`0600` socket. Bootstrap waits
 for versioned `ping` and `status` responses before sending the startup prompt. Wakes use `prompt` with
-`coalesceKey="inbox"`; urgent work is marked urgent but does not cancel an active turn. The prototype does not yet
-implement ACP sleep/resume.
+`coalesceKey="inbox"`; urgent work is marked urgent but does not cancel an active turn. ACP exact resume uses the
+provider's negotiated `session/load` capability; explicit handoff resume creates a fresh session from durable state.
 
 Replacing an ACP provider/model command is a controlled session boundary.
 `runtime prepare` drains the role before confirming an idle, empty TUI queue and captures bounded durable role state

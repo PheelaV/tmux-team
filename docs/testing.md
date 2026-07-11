@@ -30,6 +30,8 @@ SQLite wake routing without starting Toad or a provider. They verify that task b
 Runtime-switch tests mock Toad readiness and tmux respawn while verifying
 capsule redaction, idle/cancel gates, TOML preservation, failure-to-draining
 behavior, recovery prompts, and append-only session lineage.
+ACP lifecycle tests verify exact-session command generation and identity checks, explicit handoff override, pending
+work re-wake, capability refusal, quiescence rollback, and snapshot metadata.
 
 The live-demo fixture has two runtime entry points: `live-demo-bootstrap` for Codex/app-server recovery coverage and
 `live-demo-acp-bootstrap` for external ACP/Toad control-socket coverage. ACP bootstrap intentionally waits for the

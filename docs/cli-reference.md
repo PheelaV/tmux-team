@@ -27,7 +27,8 @@ tmux-team acp cancel orchestrator
 
 The ACP prototype uses visible Toad panes. Toad owns the arbitrary ACP command and its session; tmux-team uses a
 unique role control socket only for readiness, status, compact prompts, and cancellation. The `cursor-acp` runtime,
-`--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP sleep/resume is not implemented.
+`--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP sleep/resume supports explicit `exact` and
+`handoff` policies.
 Install the temporary `tmux-team[acp]` extra with Python 3.14; the base package remains Python 3.11+.
 Use a provider's explicit autonomous flag only when intended. For constrained Cursor roles, configure project-local
 `.cursor/cli.json` permissions including `Shell(command)` and `Shell(tmux-team)`; see
@@ -337,14 +338,20 @@ Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime
 
 Use `sleep` to snapshot and stop managed role, app-server, and watchdog windows without killing `tt-control`.
 
-Sleep/resume currently applies to Codex roles. Do not use it for the experimental ACP TUI runtime.
-
 ```bash
 tmux-team sleep
 tmux-team sleep --dry-run
+tmux-team sleep --acp-resume-policy exact
 ```
 
 Use `resume` to restore from `.tmux-team/runtime/sleeps/latest.toml` or a chosen snapshot. If no graceful sleep snapshot exists, `resume` builds a recovery snapshot from durable `team.toml` and SQLite runtime state when the role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.
+
+For ACP, `exact` requires saved and currently advertised `session/load` capability and verifies the restored session
+ID. `handoff` is an explicit fresh-session recovery from the saved capsule. Override only intentionally:
+
+```bash
+tmux-team resume --acp-resume-policy handoff
+```
 
 ```bash
 tmux-team resume

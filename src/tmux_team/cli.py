@@ -805,6 +805,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mark active/draining roles paused after snapshotting",
     )
+    sleep.add_argument(
+        "--acp-resume-policy",
+        choices=("exact", "handoff"),
+        default="exact",
+        help="ACP snapshot policy: require exact session/load support or explicitly use a fresh handoff session",
+    )
 
     resume = subparsers.add_parser("resume", help="Resume managed panes from a tmux-team sleep snapshot")
     resume.add_argument("--snapshot", help="Sleep snapshot path; defaults to runtime sleeps/latest.toml")
@@ -833,6 +839,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not set tmux truecolor options on the restored session",
     )
     resume.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
+    resume.add_argument(
+        "--acp-resume-policy",
+        choices=("exact", "handoff"),
+        help="Override the saved ACP resume policy; fallback is never automatic",
+    )
 
     codex = subparsers.add_parser("codex", help="Manage Codex app-server role bindings")
     codex_sub = codex.add_subparsers(dest="codex_command", required=True)
@@ -2689,6 +2700,7 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
         force=args.force,
         kill_session=args.kill_session,
         pause_roles=not args.no_pause_roles,
+        acp_resume_policy=args.acp_resume_policy,
     )
     print(f"sleep_id: {result.sleep_id}")
     print(f"session: {result.session or '-'}")
@@ -2744,6 +2756,7 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
         role_yolo=args.role_yolo,
         role_profile=args.role_profile,
         role_launch_options=role_launch_options,
+        acp_resume_policy=args.acp_resume_policy,
         start_app_server=not args.no_start_app_server,
         reactivate_roles=not args.no_reactivate_roles,
         enable_truecolor=not args.no_truecolor,
@@ -2751,16 +2764,19 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     )
     print(f"snapshot: {result.snapshot_path}")
     print(f"session: {result.session}")
-    print(f"endpoint: {result.endpoint}")
+    print(f"runtime: {result.agent_runtime}")
+    print(f"endpoint: {result.endpoint or '-'}")
     print(f"roles: {result.role_count}")
     print(f"watchdogs: {len(result.watchdog_panes)}")
     print(f"reactivated_roles: {'yes' if result.reactivated_roles else 'no'}")
-    restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
-    print(f"codex_launch_settings: restored={restored} fast=unknown")
-    print("role_threads:")
+    if result.agent_runtime == "codex":
+        restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
+        print(f"codex_launch_settings: restored={restored} fast=unknown")
+    print("role_sessions:" if result.agent_runtime == "acp" else "role_threads:")
     for role, thread_id in result.role_threads.items():
         pane = result.role_panes.get(role) or "-"
-        print(f"  {role}: thread_id={thread_id} pane={pane}")
+        identity_label = "session_id" if result.agent_runtime == "acp" else "thread_id"
+        print(f"  {role}: {identity_label}={thread_id} pane={pane}")
     if result.watchdog_panes:
         print("watchdog_panes:")
         for name, pane in result.watchdog_panes.items():
@@ -2804,7 +2820,8 @@ def cmd_acp(args: argparse.Namespace, store: Store, service: TeamService, conn) 
         print(
             f"{args.role} acp-tui socket={socket_path} state={response.get('state', 'unknown')} "
             f"session_id={response.get('sessionId') or '-'} pid={response.get('pid', 'unknown')} "
-            f"queue_depth={response.get('queueDepth', 'unknown')}"
+            f"queue_depth={response.get('queueDepth', 'unknown')} "
+            f"resume_supported={str(response.get('resumeSupported', False)).lower()}"
         )
         return 0
 

@@ -99,8 +99,30 @@ and previous session metadata with `tmux-team runtime show <role>`.
 
 ## Current Limits
 
-- ACP sleep/resume is not implemented.
 - Same-session model/config changes are not claimed until the TUI can prove `session/set_config_option` support.
 - `--acp-provider`, `--model`, and `--effort` are provenance metadata; provider behavior comes from
   `--acp-agent-command`.
 - The `cursor-acp`, `--cursor-bin`, and `tmux-team cursor` forms are prototype compatibility aliases.
+
+## Sleep And Resume
+
+ACP sleep defaults to exact restoration:
+
+```bash
+tmux-team sleep --acp-resume-policy exact
+tmux-team resume
+```
+
+Sleep requires every role to be idle with an empty external queue, verifies `resumeSupported`, quiesces new prompts,
+and snapshots the provider session ID plus launch/binding metadata and a fallback capsule. Resume starts Toad with
+`--session-id`, requires the loaded ID to match, and then re-wakes durable pending inbox work.
+
+Use a fresh provider session only by explicit choice:
+
+```bash
+tmux-team resume --acp-resume-policy handoff
+```
+
+Handoff mode requires the saved capsule and sends its recovery prompt. Exact restoration never silently falls back to
+handoff. Provider retention, credentials, host changes, or adapter incompatibility can still make exact load fail; the
+team remains paused for operator recovery.

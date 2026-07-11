@@ -33,7 +33,7 @@ the durable scenario after the observer is ready:
 make live-demo-acp-start
 ```
 
-Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a human will approve role tools. ACP mode uses the same seeded repository and role worktrees, but its goal verifies control-socket wake delivery and omits the unsupported sleep/resume phase.
+Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a human will approve role tools. ACP mode uses the same seeded repository and role worktrees and verifies control-socket delivery plus exact provider-session sleep/resume.
 
 The live scenario has an operator recovery phase. After the collector reports the first passing stable verification and the orchestrator arms the post-resume watchdog, trigger sleep/resume from the control side:
 
@@ -45,7 +45,9 @@ make live-demo-watchdog-now
 
 `live-demo-watchdog-now` changes the restored watchdog from report-only supervision to `app-server-turn` delivery and shortens it to `5s` so it wakes the orchestrator for a second post-resume operation. The orchestrator should then route one implementer test-only task, complete the post-resume obligation, and stop the watchdog once the tests stay passing.
 
-The recovery phase applies only to the Codex runtime. ACP sleep fails before teardown by design until session restoration is implemented.
+After ACP role work finishes, run `make live-demo-sleep` and `make live-demo-resume`, then verify. ACP uses exact
+`session/load` restoration and the verifier compares every resumed provider session ID with the sleep snapshot. The
+watchdog nudge and second implementer operation apply only to the Codex runtime.
 
 After the agents report final completion, verify real success:
 

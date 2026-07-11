@@ -340,6 +340,8 @@ def verify(root: Path) -> None:
                 raise ScenarioError(f"{role} does not use ACP control-socket delivery")
             if not roles[role].get("control_socket") or not roles[role].get("runtime_session_id"):
                 raise ScenarioError(f"{role} is missing ACP socket/session metadata")
+            if roles[role].get("acp_resume_supported") is not True:
+                raise ScenarioError(f"{role} does not advertise ACP exact resume support")
         elif roles[role].get("codex_reasoning_effort") != "high":
             raise ScenarioError(f"{role} did not preserve configured Codex reasoning effort")
     verify_tmux_truecolor(config)
@@ -461,14 +463,25 @@ def verify(root: Path) -> None:
                 1,
             )
             require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
-            require_sql_count(conn, "events", "type = 'team.sleep.snapshot'", 1)
-            require_sql_count(conn, "events", "type = 'team.sleep.teardown'", 1)
-            require_sql_count(conn, "events", "type = 'team.resume'", 1)
+        require_sql_count(conn, "events", "type = 'team.sleep.snapshot'", 1)
+        require_sql_count(conn, "events", "type = 'team.sleep.teardown'", 1)
+        require_sql_count(conn, "events", "type = 'team.resume'", 1)
         require_sql_count(conn, "events", "type = 'stable.approved'", 1)
         if not is_acp:
             require_sql_count_exact(conn, "watchdog_runners", "name = 'live-resume' AND state = 'stopped'", 1)
     finally:
         conn.close()
+
+    if is_acp:
+        snapshot_path = project / ".tmux-team" / "runtime" / "sleeps" / "latest.toml"
+        if not snapshot_path.exists():
+            raise ScenarioError(f"missing ACP sleep snapshot: {snapshot_path}")
+        snapshot = tomllib.loads(snapshot_path.read_text(encoding="utf-8"))
+        for role in ROLES:
+            saved = snapshot.get("roles", {}).get(role, {}).get("acp", {}).get("session_id")
+            resumed = roles[role].get("runtime_session_id")
+            if not saved or saved != resumed:
+                raise ScenarioError(f"{role} ACP exact resume mismatch: saved={saved or '-'} resumed={resumed or '-'}")
 
     milestones = project / ".tmux-team" / "runtime" / "milestones.jsonl"
     if not milestones.exists():
@@ -553,12 +566,15 @@ def resume_team(root: Path, args: argparse.Namespace) -> None:
     metadata = load_metadata(root)
     config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
     command = ["tmux-team", "--config", str(config_path), "resume"]
-    if args.role_yolo:
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    is_acp = all(role.get("mode") == "acp_tui" for role in config.get("roles", {}).values())
+    if args.role_yolo and not is_acp:
         command.append("--role-yolo")
     run(command)
     print("LIVE DEMO RESUME OK")
     print(f"config: {config_path}")
-    print("nudge watchdog next: make live-demo-watchdog-now")
+    if not is_acp:
+        print("nudge watchdog next: make live-demo-watchdog-now")
 
 
 def nudge_resumed_watchdog(root: Path) -> None:
@@ -793,9 +809,10 @@ def write_acp_goal(root: Path, metadata: dict[str, Any], provider: str) -> None:
     - ACP role wakes use the private control socket, not tmux stdin.
     - The run exercises status, dashboard, inbox relations, pane inspection, watchdog control-socket pressure, obligations, milestones, stable approve/sync, completion replies, and notice broadcasts.
     - Non-orchestrator roles do not write milestones.
+    - After role work completes, the operator exact-sleeps and resumes the team; every provider session ID matches the snapshot.
 
     Boundaries:
-    - Do not call sleep or resume; ACP sleep/resume is intentionally unsupported and the operator tests fail-safe rejection separately.
+    - The orchestrator must not call sleep/resume itself; the operator triggers exact recovery after role work completes.
     - Do not edit the tmux-team source checkout that launched this demo.
     - Do not mark success from chat alone; the real test must pass.
     - Do not route work to tt-control.

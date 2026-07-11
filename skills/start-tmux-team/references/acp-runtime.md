@@ -9,8 +9,9 @@ Each ACP role remains visible in a Toad pane. Toad owns the configured ACP child
 tmux-team sends compact wake prompts through a private role Unix socket. Durable task bodies remain exclusively in the
 SQLite inbox. ACP roles do not create `tt-app-server`.
 
-The prototype does not implement ACP sleep/resume. Provider-specific flags belong in `--acp-agent-command`;
-`--acp-provider`, `--model`, and `--effort` are provenance metadata unless the provider protocol proves otherwise.
+ACP sleep/resume supports explicit `exact` and `handoff` policies. Provider-specific flags belong in
+`--acp-agent-command`; `--acp-provider`, `--model`, and `--effort` are provenance metadata unless the provider protocol
+proves otherwise.
 
 ## Preflight And Bootstrap
 
@@ -51,6 +52,17 @@ The startup loop invokes both `command` and `tmux-team`, so a Cursor allowlist n
 Add only the project commands and scoped read/write paths required by each role, such as `Shell(git)`, `Shell(uv)`,
 `Read(**/*)`, `Write(src/**/*)`, or `Write(tests/**/*)`. Keep secrets and destructive commands denied. Because roles may
 use separate worktrees, ensure the project-local policy is available in every role worktree before bootstrap.
+
+## Sleep And Resume
+
+Use `tmux-team sleep --acp-resume-policy exact` by default. Exact sleep requires each provider to advertise session
+loading, drains and quiesces every role, records session/launch/socket metadata plus a fallback capsule, then tears down
+managed panes. `tmux-team resume` starts Toad with the saved session ID and must verify the returned ID before waking
+pending work.
+
+Use `tmux-team resume --acp-resume-policy handoff` only when the operator explicitly accepts a fresh provider session.
+It requires the saved capsule and sends the recovery prompt. Never infer or silently apply handoff after exact load
+fails.
 
 ## Runtime Switch Contract
 

@@ -224,6 +224,31 @@ def update_role_capabilities(path: Path, role: str, updates: Mapping[str, Any | 
         _write_config_data_atomic(path, data)
 
 
+def update_role_runtime_binding(
+    path: Path,
+    role: str,
+    *,
+    pane: str,
+    state: str,
+    capabilities: Mapping[str, Any | None],
+) -> None:
+    path = path.expanduser().resolve()
+    with _config_update_lock(path):
+        data = _read_config_data(path)
+        roles = data.get("roles")
+        if not isinstance(roles, dict) or not isinstance(roles.get(role), dict):
+            raise ConfigError(f"Unknown role: {role}")
+        role_data = roles[role]
+        role_data["pane"] = pane
+        role_data["state"] = state
+        for key, value in capabilities.items():
+            if value is None:
+                role_data.pop(key, None)
+            else:
+                role_data[key] = value
+        _write_config_data_atomic(path, data)
+
+
 @contextmanager
 def _config_update_lock(path: Path):
     lock_path = path.with_name(f"{path.name}.lock")

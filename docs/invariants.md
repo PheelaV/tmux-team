@@ -310,14 +310,17 @@ If a role pane target changes, config must change with it.
 
 `tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
 
-The experimental ACP TUI runtime does not yet implement this boundary. Do not claim ACP role sleep/resume support
-until session IDs, socket ownership, replay suppression, and lifecycle snapshots are restored together.
-
-- It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, running watchdog runners, operator mapping metadata, and configured Codex launch settings before teardown.
+- It snapshots role state, pane targets, tmux session/window/pane IDs, runtime-specific session bindings, running watchdog runners, operator mapping metadata, and configured launch settings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
 - It tears down managed role, app-server, and watchdog windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
 - Resume reads the latest or specified sleep snapshot, recreates the app-server, role, and running watchdog panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
+- ACP `exact` resume requires negotiated `session/load` support, starts Toad with the saved provider session ID, and
+  verifies the returned ID before reactivating or waking pending work.
+- ACP `handoff` resume is an explicit operator choice that starts a fresh provider session and injects the saved
+  memory/capsule recovery prompt. Never silently fall back from `exact` to `handoff`.
+- ACP sleep drains and atomically quiesces every role before snapshot/teardown; any pre-teardown failure unquiesces
+  roles and restores their prior state.
 - Resume restores configured model, reasoning effort, profile, raw Codex config overrides, and YOLO mode when present. TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown and must be verified manually if important.
 - Bootstrap and resume set tmux truecolor options on the managed session by default. They should use `tmux-256color`, prefer RGB terminal features when supported, set `COLORTERM=truecolor`, and keep `--no-truecolor` as the opt-out for unusual terminal stacks.
 - Resume must update config/runtime pane and app-server bindings after recreating panes.

@@ -31,6 +31,8 @@ make live-demo-setup
 make live-demo-acp-bootstrap
 tmux attach -t tt-live-demo
 make live-demo-acp-start
+make live-demo-sleep       # after role work completes
+make live-demo-resume
 make live-demo-verify
 make live-demo-clean
 ```
@@ -218,7 +220,8 @@ The socket carries only the compact wake; durable task bodies remain in SQLite. 
 `--acp-agent-command` (for example, a provider's non-interactive mode). `--acp-provider` is convenience metadata and
 does not change launch behavior. Inspect or control a role with `tmux-team acp status|wake|cancel <role>`.
 The prototype `--agent-runtime cursor-acp`, `--cursor-bin`, and `tmux-team cursor show|wake|cancel` forms remain
-compatibility aliases. ACP sleep/resume is not implemented yet.
+compatibility aliases. ACP sleep/resume uses explicit `exact` or `handoff` policy and never silently opens a blank
+provider session.
 
 Switch an idle ACP role to a new provider/model session without changing panes
 or losing durable work context:

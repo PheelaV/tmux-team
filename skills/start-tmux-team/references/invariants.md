@@ -93,7 +93,8 @@ tmux-team pane capture collector --lines 120 --offset 40
 Every Codex role spawned by bootstrap must have the `start-tmux-team` skill available in the active `CODEX_HOME`. The skill may not be loaded into the current turn context until triggered, so wake prompts still include a compact role wake signal.
 
 Every experimental ACP role must have the same skill available in the provider's active skill location. Its pane is
-the external Toad TUI, which owns the ACP child and session. ACP sleep/resume is not implemented in the prototype.
+the external Toad TUI, which owns the ACP child and session. ACP exact resume must prove `session/load` capability and
+session identity; handoff resume must be explicitly selected.
 
 Do not reload the full skill on every ordinary app-server wake. Use the loaded tmux-team role contract version and role loop when present. Use `tmux-team codex session-context` after startup/resume/clear/compact recovery, explicit operator request, or contract/version mismatch.
 

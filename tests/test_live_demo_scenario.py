@@ -39,6 +39,7 @@ class LiveDemoScenarioTests(unittest.TestCase):
         goal = (self.root / "goal.md").read_text(encoding="utf-8")
         self.assertIn("provider is claude", goal)
         self.assertNotIn("provider is cursor", goal)
+        self.assertIn("operator exact-sleeps and resumes", goal)
 
     def test_start_goal_submits_deferred_goal_durably(self) -> None:
         (self.root / "goal.md").write_text("Execute the scenario.\n", encoding="utf-8")

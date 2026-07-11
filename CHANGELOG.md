@@ -22,6 +22,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Added `tmux-team runtime show/prepare/switch` for safe ACP provider/model
   session replacement through draining, bounded handoff capsules, recovery
   prompts, and append-only session lineage.
+- Added ACP sleep/resume with exact `session/load` restoration, verified provider session identity, durable pending-work
+  re-wake, and explicit handoff fallback. Sleep quiescence rolls back safely before teardown on failure.
 - Moved ACP-only preflight, permission, and runtime-switch instructions into an on-demand skill reference so Codex-only
   teams do not load that provider-specific context.
 - Updated package, CLI, plugin, and marketplace metadata for 0.5.0.
@@ -34,7 +36,6 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 Prototype limits:
 
 - ACP roles require a Toad build that implements the generic control-socket protocol.
-- ACP sleep/resume is not implemented yet.
 - Same-session ACP model/config changes are not available until the external
   TUI exposes capability-driven `session/set_config_option`.
 

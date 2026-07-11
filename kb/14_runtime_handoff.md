@@ -73,6 +73,17 @@ Append one JSON object per successful switch to:
 <runtime>/handoffs/<role>/lineage.jsonl
 ```
 
+## Team Sleep/Resume
+
+Runtime replacement and team sleep share capsules but have different defaults:
+
+- ACP sleep defaults to `exact`, requires negotiated `loadSession`, quiesces prompt intake, and snapshots provider
+  session IDs and launch/binding metadata before teardown.
+- Exact resume starts Toad with the saved ID and proves the returned ID matches before role reactivation.
+- `handoff` is an explicit fallback policy that starts a new provider session and injects the saved capsule.
+- Never silently convert a failed exact load into a blank or handoff session.
+- Pre-teardown failures unquiesce affected Toad panes and restore prior role states.
+
 Each entry records:
 
 - switch timestamp and actor;

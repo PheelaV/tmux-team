@@ -20,6 +20,7 @@ from tmux_team.bootstrap import (
     control_plane_shell_command,
     default_session_name,
     prepare_role_worktrees,
+    render_team_config,
     resolve_tool_executable,
     role_startup_prompt,
     write_role_env_files,
@@ -85,6 +86,27 @@ requires_stable_commit = true
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
         self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
+
+    def test_acp_config_records_negotiated_resume_capability(self) -> None:
+        rendered = render_team_config(
+            "test",
+            str(self.root / "runtime"),
+            "",
+            {
+                "orchestrator": RoleBinding(
+                    thread_id="",
+                    pane="%1",
+                    worktree=self.root,
+                    session_id="saved-session",
+                    control_socket=str(self.root / "runtime" / "orchestrator.sock"),
+                    resume_supported=True,
+                )
+            },
+            agent_runtime="acp",
+        )
+
+        data = tomllib.loads(rendered)
+        self.assertTrue(data["roles"]["orchestrator"]["acp_resume_supported"])
 
     def test_shell_control_plane_starts_persistent_bound_shell_directly(self) -> None:
         command = control_plane_shell_command("codex", self.root, self.config, "shell")
@@ -3744,8 +3766,10 @@ exit 0
         self.assertIn("tmux kill-window -t tt:tt-app-server", out)
         self.assertFalse((self.root / "runtime" / "sleeps" / "latest.toml").exists())
 
-    def test_sleep_rejects_acp_tui_before_teardown(self) -> None:
+    def test_sleep_dry_run_plans_exact_acp_resume_snapshot(self) -> None:
         acp_config = self.root / ".tmux-team" / "acp-team.toml"
+        worktree = self.root / "acp-worktree"
+        worktree.mkdir()
         acp_config.write_text(
             f"""[team]
 name = "acp-team"
@@ -3755,17 +3779,24 @@ runtime_dir = "{self.root / "acp-runtime"}"
 mode = "acp_tui"
 state = "active"
 pane = "tt:tt-agents.0"
+worktree = "{worktree}"
 notify_method = "control-socket"
 control_socket = "{self.root / "acp-runtime" / "acp" / "orchestrator.sock"}"
+acp_tui_bin = "toad"
+acp_agent_command = "agent acp"
+acp_provider = "cursor"
+runtime_session_id = "saved-session"
+acp_resume_supported = true
 """,
             encoding="utf-8",
         )
 
         code, out, err = self.run_main("--config", str(acp_config), "sleep", "--dry-run")
 
-        self.assertEqual(code, 2)
-        self.assertEqual(out, "")
-        self.assertIn("sleep/resume does not yet support external ACP TUI roles: orchestrator", err)
+        self.assertEqual(code, 0, err)
+        self.assertIn("snapshot: (dry-run)", out)
+        self.assertIn("roles: 1", out)
+        self.assertIn("tmux kill-window -t tt:tt-agents", out)
         self.assertFalse((self.root / "acp-runtime" / "sleeps" / "latest.toml").exists())
 
     def test_sleep_snapshots_and_tears_down_managed_windows(self) -> None:
