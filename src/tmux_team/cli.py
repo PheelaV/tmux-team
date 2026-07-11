@@ -55,9 +55,12 @@ from .dashboard import (
     run_textual_dashboard,
 )
 from .display import (
+    format_age,
     format_seconds_duration,
+    milestone_subject_label,
     role_capabilities,
     role_runtime_summary,
+    row_value,
     watchdog_runner_display_state,
 )
 from .extensions.manifest import ExtensionError, inspect_extensions
@@ -3211,16 +3214,6 @@ def format_milestone(row: dict) -> str:
     return line
 
 
-def milestone_subject_label(row: dict) -> str:
-    scope = row.get("scope")
-    if scope == "team":
-        return "team"
-    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
-    if subject_roles:
-        return ",".join(subject_roles)
-    return str(row.get("role") or "-")
-
-
 def watchdog_findings(
     store: Store,
     conn,
@@ -3460,20 +3453,6 @@ def obligation_one_line(row) -> str:
     return " ".join(parts)
 
 
-def format_age(created_at: str) -> str:
-    age = datetime.now(UTC) - parse_utc_datetime(created_at)
-    seconds = max(0, int(age.total_seconds()))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 48:
-        return f"{hours}h"
-    return f"{hours // 24}d"
-
-
 def claimed_unacked_warning(row, threshold_seconds: int | None) -> bool:
     if threshold_seconds is None:
         return False
@@ -3622,13 +3601,6 @@ def pane_summary_prompt(*, role: str, pane: str, text: str) -> str:
         f"{text.rstrip()}\n"
         "```\n"
     )
-
-
-def row_value(row, key: str, default=None):
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return default
 
 
 def print_stable_row(row) -> None:

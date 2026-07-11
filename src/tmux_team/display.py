@@ -16,6 +16,36 @@ def format_seconds_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def format_age(created_at: str) -> str:
+    age = datetime.now(UTC) - parse_utc_datetime(created_at)
+    seconds = max(0, int(age.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def milestone_subject_label(row: dict) -> str:
+    if row.get("scope") == "team":
+        return "team"
+    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
+    if subject_roles:
+        return ",".join(subject_roles)
+    return str(row.get("role") or "-")
+
+
+def row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 def role_capabilities(row) -> dict[str, object]:
     try:
         data = json.loads(row["capabilities_json"] or "{}")

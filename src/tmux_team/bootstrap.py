@@ -1144,6 +1144,7 @@ def role_shell_command(
     config_path: Path,
     role: str,
     *,
+    thread_id: str | None = None,
     role_yolo: bool = False,
     role_profile: str | None = None,
     role_launch_options: RoleLaunchOptions | None = None,
@@ -1151,6 +1152,8 @@ def role_shell_command(
     role_launch_options = role_launch_options or RoleLaunchOptions()
     profile = role_launch_options.profile or role_profile
     codex_args = [codex_bin]
+    if thread_id:
+        codex_args.append("resume")
     if profile:
         codex_args.extend(["--profile", profile])
     if role_yolo or role_launch_options.yolo:
@@ -1163,41 +1166,10 @@ def role_shell_command(
         codex_args.extend(["-c", override])
     codex_args.extend(["--cd", str(project_root)])
     codex_args.extend(["--remote", endpoint])
-    codex_args.append(role_startup_prompt(role))
-    env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *codex_args]
-    command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
-    return keep_open_command(command, "role TUI")
-
-
-def role_resume_shell_command(
-    codex_bin: str,
-    endpoint: str,
-    project_root: Path,
-    config_path: Path,
-    role: str,
-    thread_id: str,
-    *,
-    role_yolo: bool = False,
-    role_profile: str | None = None,
-    role_launch_options: RoleLaunchOptions | None = None,
-) -> str:
-    role_launch_options = role_launch_options or RoleLaunchOptions()
-    profile = role_launch_options.profile or role_profile
-    codex_args = [codex_bin, "resume"]
-    if profile:
-        codex_args.extend(["--profile", profile])
-    if role_yolo or role_launch_options.yolo:
-        codex_args.append("--dangerously-bypass-approvals-and-sandbox")
-    if role_launch_options.model:
-        codex_args.extend(["--model", role_launch_options.model])
-    if role_launch_options.reasoning_effort:
-        codex_args.extend(["-c", f"model_reasoning_effort={json.dumps(role_launch_options.reasoning_effort)}"])
-    for override in role_launch_options.config_overrides:
-        codex_args.extend(["-c", override])
-    codex_args.extend(["--cd", str(project_root)])
-    codex_args.extend(["--remote", endpoint])
-    codex_args.append(thread_id)
-    codex_args.append(role_resume_prompt(role))
+    if thread_id:
+        codex_args.extend([thread_id, role_resume_prompt(role)])
+    else:
+        codex_args.append(role_startup_prompt(role))
     env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *codex_args]
     command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
     return keep_open_command(command, "role TUI")
@@ -1303,13 +1275,9 @@ def role_spawn_command(
         role_profile=role_profile,
         role_launch_options=role_launch_options,
     )
-    if agent_layout == "grouped":
-        if index == 0:
-            return new_window_command(tmux_bin, session, agents_window, project_root, command, print_pane=print_pane)
-        return split_window_command(
-            tmux_bin, f"{session}:{agents_window}", project_root, command, print_pane=print_pane
-        )
-    return new_window_command(tmux_bin, session, tt_name(role), project_root, command, print_pane=print_pane)
+    return role_pane_spawn_command(
+        tmux_bin, session, project_root, role, index, agent_layout, agents_window, command, print_pane=print_pane
+    )
 
 
 def acp_role_spawn_command(
@@ -1337,13 +1305,9 @@ def acp_role_spawn_command(
         control_socket,
         session_id,
     )
-    if agent_layout == "grouped":
-        if index == 0:
-            return new_window_command(tmux_bin, session, agents_window, project_root, command, print_pane=print_pane)
-        return split_window_command(
-            tmux_bin, f"{session}:{agents_window}", project_root, command, print_pane=print_pane
-        )
-    return new_window_command(tmux_bin, session, tt_name(role), project_root, command, print_pane=print_pane)
+    return role_pane_spawn_command(
+        tmux_bin, session, project_root, role, index, agent_layout, agents_window, command, print_pane=print_pane
+    )
 
 
 def role_resume_spawn_command(
@@ -1364,17 +1328,34 @@ def role_resume_spawn_command(
     *,
     print_pane: bool = False,
 ) -> list[str]:
-    command = role_resume_shell_command(
+    command = role_shell_command(
         codex_bin,
         endpoint,
         project_root,
         config_path,
         role,
-        thread_id,
+        thread_id=thread_id,
         role_yolo=role_yolo,
         role_profile=role_profile,
         role_launch_options=role_launch_options,
     )
+    return role_pane_spawn_command(
+        tmux_bin, session, project_root, role, index, agent_layout, agents_window, command, print_pane=print_pane
+    )
+
+
+def role_pane_spawn_command(
+    tmux_bin: str,
+    session: str,
+    project_root: Path,
+    role: str,
+    index: int,
+    agent_layout: str,
+    agents_window: str,
+    command: str,
+    *,
+    print_pane: bool = False,
+) -> list[str]:
     if agent_layout == "grouped":
         if index == 0:
             return new_window_command(tmux_bin, session, agents_window, project_root, command, print_pane=print_pane)
