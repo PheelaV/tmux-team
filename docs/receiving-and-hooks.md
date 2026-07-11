@@ -28,6 +28,12 @@ memory show -> inbox next -> ack -> optional active todos -> do work -> memory u
 
 and repeat until `inbox next` reports no pending messages. This keeps claim leases and completion evidence attached to one task at a time instead of letting a role hoard the whole backlog.
 
+For read-only inspection, `tmux-team inbox list --state pending` uses the same
+definition as `status pending=N`: queued, notified, retrying, and expired claimed
+messages. A concrete-state filter such as `--state queued` is intentionally
+narrow and must not be used as a drain check. `inbox next` remains the
+authoritative claim-and-drain operation.
+
 If `inbox next` reports no new pending messages but the role already has claimed or acknowledged work, it points at that active message and any open todos. Use `tmux-team todo recover --role <role>` after context reset to rebuild the active subplan from durable state.
 
 Ordering is by priority first, then creation time:

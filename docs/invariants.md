@@ -188,6 +188,9 @@ Initial bootstrap goals are orchestrator inputs only. `--goal` and `--goal-file`
 
 Message completion is durable state. Conversational completion replies are explicit but one-command.
 
+- `pending` is a derived message selector, not a stored message state. It means queued, notified, retrying, or expired claimed work, and `inbox list --state pending` must match the `status pending=N` count.
+- A concrete-state inbox list is diagnostic only. Roles must use `inbox next` to determine whether claimable work remains; they must not declare the inbox clear from `--state queued`, `--state notified`, or any other partial filter.
+- Unknown inbox state filters must fail explicitly instead of producing a false empty result.
 - `tmux-team inbox complete` records the result on the original message.
 - Expired claimed messages are recoverable work, not silent ownership. They must appear as `stale_claimed` in operator status surfaces and remain reclaimable through `tmux-team inbox next`.
 - `tmux-team inbox reclaimable --role ROLE` is an observation aid for expired claims; it must not create a second claim/ack path.

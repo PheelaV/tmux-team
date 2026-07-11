@@ -75,6 +75,7 @@ The congestion variant adds:
 - a paused role that blocks normal work;
 - an urgent message that bypasses the paused-role block;
 - multiple queued priorities for one role;
+- canonical pending visibility after successful notification, before claim;
 - multiple orchestrator inbox items;
 - two independent code regressions;
 - claim-order verification from the SQLite event ledger.

@@ -2,6 +2,20 @@
 
 This note explains the message-state decisions that keep role-to-role coordination reliable. It is agent-facing design memory; current command behavior is in `README.md`, `docs/`, and tests.
 
+## Pending Is A Derived Selector
+
+`pending` is not stored in the message row. It is the canonical aggregate for
+work that `inbox next` can claim:
+
+```text
+queued + notified + retrying + expired claimed
+```
+
+`status pending=N` and `inbox list --state pending` must use this exact
+definition. Stored-state filters remain useful for diagnosis, but no partial
+filter can prove a role has drained its inbox. Unknown filters fail instead of
+silently looking empty.
+
 ## Reclaimable Claims
 
 Expired `claimed` messages are recoverable work, not silent ownership.

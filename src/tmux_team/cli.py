@@ -63,7 +63,7 @@ from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
 from .service import TeamService
 from .store import (
-    CLAIMABLE_STATES,
+    MESSAGE_STATE_FILTERS,
     OBLIGATION_ACTIVE_STATES,
     OBLIGATION_PAUSED_STATE,
     OBLIGATION_STATES,
@@ -75,6 +75,7 @@ from .store import (
     normalize_priority,
     normalize_watchdog_runner_name,
     parse_utc_datetime,
+    pending_count_from_state_counts,
 )
 from .watchdog_runner import (
     watchdog_layout_command,
@@ -458,7 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_next.add_argument("--auto-ack", action="store_true", help="Acknowledge the claimed message immediately")
     inbox_list = inbox_sub.add_parser("list", help="List inbox messages")
     inbox_list.add_argument("--role", help=f"Role inbox; defaults to --actor or ${ROLE_ENV}")
-    inbox_list.add_argument("--state", action="append", help="Filter state; repeatable")
+    inbox_list.add_argument(
+        "--state",
+        action="append",
+        choices=MESSAGE_STATE_FILTERS,
+        help="Filter by stored state or derived pending/stale_claimed state; repeatable",
+    )
     inbox_list.add_argument("--limit", type=int, default=50)
     inbox_list.add_argument("--verbose", action="store_true", help="Show correlation and relation metadata")
     inbox_reclaimable = inbox_sub.add_parser(
@@ -1199,7 +1205,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
     for role in store.list_roles(conn):
         role_counts = counts.get(role["name"], {})
         stale_claimed = role_counts.get(STALE_CLAIMED_STATE, 0)
-        pending = sum(role_counts.get(state, 0) for state in CLAIMABLE_STATES) + stale_claimed
+        pending = pending_count_from_state_counts(role_counts)
         claimed = role_counts.get("claimed", 0)
         acknowledged = role_counts.get("acknowledged", 0)
         completed = role_counts.get("completed", 0)

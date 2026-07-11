@@ -11,7 +11,13 @@ from .config import ConfigError, load_config
 from .extensions.manifest import ExtensionError
 from .extensions.runner import HookDenied, HookError
 from .service import TeamService
-from .store import CLAIMABLE_STATES, STALE_CLAIMED_STATE, Store, normalize_notify_method, normalize_priority
+from .store import (
+    STALE_CLAIMED_STATE,
+    Store,
+    normalize_notify_method,
+    normalize_priority,
+    pending_count_from_state_counts,
+)
 
 JSONRPC_VERSION = "2.0"
 SERVER_NAME = "tmux-team"
@@ -245,7 +251,7 @@ def team_notify(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[s
 
 def role_status_dict(store: Store, conn: Any, row: Any, counts: dict[str, int]) -> dict[str, Any]:
     stale_claimed = counts.get(STALE_CLAIMED_STATE, 0)
-    pending = sum(counts.get(state, 0) for state in CLAIMABLE_STATES) + stale_claimed
+    pending = pending_count_from_state_counts(counts)
     result = {
         "name": row["name"],
         "state": row["state"],

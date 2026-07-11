@@ -15,10 +15,21 @@ from typing import Any
 from .app_server import AppServerError, submit_app_server_wake
 from .config import RoleConfig, TeamConfig
 
+ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
 MESSAGE_ACTIVE_STATES = ("queued", "notified", "retrying")
 STALE_CLAIMED_STATE = "stale_claimed"
+PENDING_MESSAGE_STATE = "pending"
 CLAIMABLE_STATES = MESSAGE_ACTIVE_STATES
-ROLE_STATES = ("active", "paused", "draining", "retired", "failed")
+MESSAGE_STORED_STATES = (
+    MESSAGE_ACTIVE_STATES
+    + (
+        "claimed",
+        "acknowledged",
+        "completed",
+    )
+    + tuple(f"blocked_by_role_{state}" for state in ROLE_STATES)
+)
+MESSAGE_STATE_FILTERS = (PENDING_MESSAGE_STATE, STALE_CLAIMED_STATE) + MESSAGE_STORED_STATES
 OBLIGATION_ACTIVE_STATES = ("active", "blocked")
 OBLIGATION_PAUSED_STATE = "paused"
 OBLIGATION_VISIBLE_STATES = OBLIGATION_ACTIVE_STATES + (OBLIGATION_PAUSED_STATE,)
@@ -421,16 +432,24 @@ class Store:
         if role:
             clauses.append("recipient = ?")
             params.append(role)
+        now = utc_now()
         if states:
-            placeholders = ", ".join("?" for _ in states)
-            clauses.append(f"state IN ({placeholders})")
-            params.extend(states)
+            state_clause, state_params = message_state_filter_clause(states, now=now)
+            clauses.append(state_clause)
+            params.extend(state_params)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         return list(
             conn.execute(
                 f"""
-                SELECT * FROM messages
+                SELECT
+                  *,
+                  CASE
+                    WHEN state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+                    THEN '{STALE_CLAIMED_STATE}'
+                    ELSE state
+                  END AS display_state
+                FROM messages
                 {where}
                 ORDER BY
                   CASE priority
@@ -442,7 +461,7 @@ class Store:
                   created_at
                 LIMIT ?
                 """,
-                tuple(params),
+                (now, *params),
             )
         )
 
@@ -2379,6 +2398,36 @@ def normalize_priority(priority: str) -> str:
     if value not in PRIORITY_ORDER:
         raise ValueError(f"Invalid priority: {priority}")
     return value
+
+
+def message_state_filter_clause(states: Iterable[str], *, now: str) -> tuple[str, list[str]]:
+    selectors = tuple(dict.fromkeys(state.lower() for state in states))
+    invalid = tuple(state for state in selectors if state not in MESSAGE_STATE_FILTERS)
+    if invalid:
+        raise ValueError(f"Invalid message state filter: {', '.join(invalid)}")
+
+    conditions: list[str] = []
+    params: list[str] = []
+    concrete_states = tuple(state for state in selectors if state not in (PENDING_MESSAGE_STATE, STALE_CLAIMED_STATE))
+    if concrete_states:
+        placeholders = ", ".join("?" for _ in concrete_states)
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(concrete_states)
+    if PENDING_MESSAGE_STATE in selectors:
+        placeholders = ", ".join("?" for _ in CLAIMABLE_STATES)
+        conditions.append(
+            f"(state IN ({placeholders}) "
+            "OR (state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?))"
+        )
+        params.extend((*CLAIMABLE_STATES, now))
+    elif STALE_CLAIMED_STATE in selectors:
+        conditions.append("(state = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)")
+        params.append(now)
+    return f"({' OR '.join(conditions)})", params
+
+
+def pending_count_from_state_counts(counts: dict[str, int]) -> int:
+    return sum(counts.get(state, 0) for state in CLAIMABLE_STATES) + counts.get(STALE_CLAIMED_STATE, 0)
 
 
 def normalize_summary(summary: str) -> str:
