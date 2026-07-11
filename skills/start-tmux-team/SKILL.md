@@ -1,11 +1,11 @@
 ---
 name: start-tmux-team
-description: Bootstrap and operate a pane-resident Codex agent team with tmux-team. Use when the user asks to start, spawn, initialize, resize, or coordinate a tmux/Codex agent team; wants a default orchestrator/implementer/collector/trainer setup; or wants reliable app-server wake delivery without tmux prompt injection.
+description: Bootstrap and operate a pane-resident Codex or experimental external ACP TUI agent team with tmux-team. Use when the user asks to start, spawn, initialize, resize, or coordinate a tmux agent team; wants a default orchestrator/implementer/collector/trainer setup; or wants reliable agent wake delivery without tmux prompt injection.
 ---
 
 # Start Tmux Team
 
-Use `tmux-team` as the control plane for visible Codex roles in tmux. The Codex session that invokes this skill is the operator control session. Do not manually paste role work into panes with `tmux send-keys`.
+Use `tmux-team` as the control plane for visible agent roles in tmux. The session that invokes this skill is the operator control session. Do not manually paste role work into panes with `tmux send-keys`.
 
 ## Reference Routing
 
@@ -40,6 +40,21 @@ Start from the target project root:
 ```bash
 tmux-team bootstrap --project-root . --goal "USER_GOAL"
 ```
+
+For an explicitly requested external ACP TUI team, verify Python 3.14+, Toad, and the provider command first:
+
+```bash
+python3.14 --version
+toad --version
+agent status
+tmux-team bootstrap --project-root . --agent-runtime acp \
+  --acp-tui-bin toad --acp-agent-command "agent acp" --acp-provider cursor \
+  --goal "USER_GOAL"
+```
+
+ACP roles use visible Toad panes. Toad owns the arbitrary ACP child command and session; tmux-team wakes it through a
+private role control socket. The socket carries compact prompts, never durable task bodies. ACP sleep/resume is not
+implemented. Put provider-specific execution flags in `--acp-agent-command`; `--acp-provider` is metadata only.
 
 Default roles:
 
@@ -88,7 +103,7 @@ tmux-team bootstrap --project-root . --role-yolo
 
 Prefer `--role-profile`. Use `--role-yolo` only when the operator accepts Codex allow-all/no-sandbox mode for managed role panes. It does not change the operator control session.
 
-Bootstrap creates or updates:
+Codex bootstrap creates or updates:
 
 - `tt-control` for the operator launcher, not a managed role;
 - `tt-app-server` for isolated `codex app-server` transport;
@@ -96,6 +111,9 @@ Bootstrap creates or updates:
 - per-role Codex remote TUI sessions launched with `codex --cd <role-worktree> --remote ...`;
 - `.tmux-team/team.toml`, `team.sqlite`, pane metadata, env discovery files, and scratchpad memory;
 - the initial orchestrator inbox message and app-server wake when a goal is provided.
+
+ACP TUI bootstrap keeps `tt-control` and visible `tt-agents` panes, omits `tt-app-server`, waits for each role's
+`ping`/`status` handshake, and records its private control socket and runtime session ID in team config.
 
 After startup, report the tmux session, config path, app-server endpoint, role thread IDs, and attach command:
 
@@ -125,7 +143,9 @@ Inside managed role panes, prefer short commands such as `tmux-team memory show`
 
 ## Role Runtime Contract
 
-Each spawned role must have this skill available in its active `CODEX_HOME`. The role startup prompt loads the skill, reads scratchpad memory, then claims inbox work or parks.
+Each spawned role must have this skill available in its active agent's skill directory (`CODEX_HOME` for Codex;
+provider-specific for ACP). The role startup prompt loads the skill, reads scratchpad memory, then claims inbox work
+or parks.
 
 Use Codex `SessionStart` hooks for `startup|resume|clear|compact` recovery. The hook should print `tmux-team codex session-context`; that output restores the role, config, scratchpad path, pending count, contract version, and loop. It is not a task body.
 
@@ -197,8 +217,8 @@ Bootstrap and resume set tmux truecolor options on the managed session by defaul
 ## Safety Rules
 
 - Keep agents in visible tmux panes.
-- Keep `tt-control`, `tt-app-server`, and role panes isolated by purpose.
-- Use app-server `turn/start` for production wake delivery.
+- Keep `tt-control`, runtime infrastructure, and role panes isolated by purpose.
+- Use app-server `turn/start` for Codex delivery and the generic control socket for ACP TUI delivery.
 - Never use `tmux send-keys` as the production wake path.
 - Keep task bodies in the inbox, not wake prompts or scratchpads.
 - Preserve user takeover: role panes and infrastructure panes stay inspectable.

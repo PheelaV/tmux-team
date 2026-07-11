@@ -22,6 +22,9 @@ Codex app-server is infrastructure and stays isolated.
 - It is the wake transport for Codex roles through app-server `turn/start`.
 - If it exits, the pane stays open so the operator can inspect the failure.
 
+Experimental ACP TUI roles do not create `tt-app-server`. Each visible Toad pane owns its configured ACP child and
+accepts wake requests over a private runtime Unix socket.
+
 ## Role Agents
 
 Role agents remain visible in tmux.
@@ -31,6 +34,9 @@ Role agents remain visible in tmux.
 - Each spawned Codex role must have the `start-tmux-team` skill available in its active `CODEX_HOME`.
 - Each role receives wake turns through Codex app-server, not through tmux keystrokes.
 - The durable task body lives in the `tmux-team` inbox, not in pane text.
+
+For the experimental ACP runtime, the visible pane is the external Toad TUI. It must remain visible and
+interruptible, and the ACP child must remain owned by that TUI rather than becoming hidden team infrastructure.
 
 The default role set is:
 
@@ -157,7 +163,7 @@ The operator and orchestrator may inspect managed role panes.
 
 ## Delivery
 
-Never use tmux stdin as the production wake path for Codex roles.
+Never use tmux stdin as the production wake path for managed agent roles.
 
 - Do not paste task bodies into panes.
 - Do not use `tmux send-keys` to wake a pane that a human might be typing in.
@@ -175,6 +181,20 @@ SQLite inbox message
   -> role Codex TUI receives wake turn
   -> role claims durable inbox item
 ```
+
+Experimental ACP TUI wake delivery is:
+
+```text
+SQLite inbox message
+  -> private role Unix socket
+  -> visible Toad TUI prompt queue
+  -> ACP session/prompt
+  -> role claims durable inbox item
+```
+
+The generic versioned control socket carries only the compact wake prompt. It must not carry the durable task body.
+Each role has a unique socket, and bootstrap must complete a `ping`/`status` readiness handshake before sending its
+startup prompt.
 
 `send-keys` is a debug/unsafe path only and must fail closed when tmux reports copy mode.
 
@@ -244,7 +264,8 @@ Watchdog checks are local supervision, not autonomous orchestration.
 
 The config and runtime store are the source of truth.
 
-- `.tmux-team/team.toml` records role names, pane targets, app-server endpoint, and Codex thread IDs.
+- `.tmux-team/team.toml` records role names, pane targets, runtime-specific app-server or control-socket bindings,
+  and provider metadata.
 - Operator-facing team, role, and lifecycle configuration is TOML.
 - `team.sqlite` records messages, todos, notifications, role state, obligations, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
@@ -263,6 +284,9 @@ If a role pane target changes, config must change with it.
 ## Sleep
 
 `tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
+
+The experimental ACP TUI runtime does not yet implement this boundary. Do not claim ACP role sleep/resume support
+until session IDs, socket ownership, replay suppression, and lifecycle snapshots are restored together.
 
 - It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, running watchdog runners, operator mapping metadata, and configured Codex launch settings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.

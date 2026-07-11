@@ -2,6 +2,29 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## Unreleased
+
+- Added a minimal Codex/ACP runtime adapter boundary while keeping Codex as the default built-in runtime.
+- Added experimental `--agent-runtime acp` support that launches a visible external Toad TUI per role with an
+  arbitrary `--acp-agent-command`, unique private control socket, readiness/status handshake, and compact
+  control-socket wake delivery.
+- Added generic ACP config and `tmux-team acp status/wake/cancel` controls. The prototype `cursor-acp`,
+  `--cursor-bin`, and `tmux-team cursor show/wake/cancel` forms remain compatibility aliases.
+- Added the temporary `tmux-team[acp]` package extra for the Toad control-socket branch. The extra requires Python
+  3.14; base tmux-team and Codex operation remain Python 3.11+.
+- Made completion replies, initial goals, and MCP sends use each recipient role's configured delivery method.
+- Added `make install-cursor-skill` for the shared `start-tmux-team` skill.
+
+Prototype limits:
+
+- ACP roles require a Toad build that implements the generic control-socket protocol.
+- ACP sleep/resume is not implemented yet.
+
+Migration notes:
+
+- Replace `--agent-runtime cursor-acp --role-yolo` with `--agent-runtime acp --acp-agent-command "agent --force acp"`
+  when provider-specific non-interactive behavior is required.
+
 ## 0.4.2 - 2026-07-10
 
 - Fixed notified inbox work becoming invisible to a plausible drain check: `inbox list --state pending` now matches the `status pending=N` definition and includes queued, notified, retrying, and expired claimed work.

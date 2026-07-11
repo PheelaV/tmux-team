@@ -14,6 +14,22 @@ tmux-team bootstrap --project-root . --agent-layout separate-windows
 tmux-team bootstrap --project-root . --no-truecolor
 ```
 
+Experimental external ACP TUI roles use the same layout and durable inbox:
+
+```bash
+tmux-team bootstrap --project-root . --agent-runtime acp \
+  --acp-tui-bin toad --acp-agent-command "agent acp" --acp-provider cursor \
+  --goal "Inspect the failing test."
+tmux-team acp status orchestrator
+tmux-team acp wake orchestrator
+tmux-team acp cancel orchestrator
+```
+
+The ACP prototype uses visible Toad panes. Toad owns the arbitrary ACP command and its session; tmux-team uses a
+unique role control socket only for readiness, status, compact prompts, and cancellation. The `cursor-acp` runtime,
+`--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP sleep/resume is not implemented.
+Install the temporary `tmux-team[acp]` extra with Python 3.14; the base package remains Python 3.11+.
+
 Use `init` only when you want a config/runtime scaffold without launching Codex role panes.
 
 ```bash
@@ -253,6 +269,10 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 `app-server-turn` submits a real Codex turn to the role's thread. The pane stays the live Codex UI, but `tmux-team` never types into the pane.
 
+ACP TUI delivery uses `control-socket`: `tmux-team send` writes the durable task to SQLite, sends a compact wake to
+the role's private Unix socket, and Toad queues an ACP `session/prompt`. The task body is never sent through the
+socket. Urgent wakes are marked urgent and repeated inbox wakes use `coalesceKey="inbox"`.
+
 ## Runtime State
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
@@ -268,6 +288,8 @@ Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime
 ## Sleep And Resume
 
 Use `sleep` to snapshot and stop managed role, app-server, and watchdog windows without killing `tt-control`.
+
+Sleep/resume currently applies to Codex roles. Do not use it for the experimental ACP TUI runtime.
 
 ```bash
 tmux-team sleep

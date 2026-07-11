@@ -121,6 +121,25 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 The normal startup path is `tmux-team bootstrap`, which creates role panes and discovers their app-server thread IDs for you.
 
+### Experimental ACP TUI Boundary
+
+The external ACP runtime launches one visible Toad TUI per role. Toad owns the configured ACP child command and
+session state; tmux-team does not speak ACP directly:
+
+```text
+tmux-team queue
+  -> private role Unix socket
+  -> Toad's external prompt queue
+  -> ACP session/prompt
+  -> provider output and tool activity remain in the visible pane
+  -> role claims durable inbox work
+```
+
+This avoids tmux stdin and preserves the human composer. Each role uses a unique mode-`0600` socket. Bootstrap waits
+for versioned `ping` and `status` responses before sending the startup prompt. Wakes use `prompt` with
+`coalesceKey="inbox"`; urgent work is marked urgent but does not cancel an active turn. The prototype does not yet
+implement ACP sleep/resume.
+
 `app-server-turn` submits a short wake turn that tells the role durable inbox work exists. The wake turn is deliberately blunt. It does not restate the skill, command syntax, scratchpad rules, ack/complete syntax, or role boundaries. Role panes spawned by bootstrap already received the startup prompt and have the `start-tmux-team` skill available; the wake is only an interrupt that says "claim durable inbox work now."
 
 The wake does include a compact subject line for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. It never includes the durable task body. If the highest-priority message is urgent, the wake explicitly tells the role to stop at the current safe point, claim the urgent message before continuing other work, then drain by priority.

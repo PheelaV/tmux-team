@@ -28,6 +28,7 @@ from tmux_team.dashboard import (
     DashboardSnapshot,
     collect_dashboard_snapshot,
     dashboard_codex_chips,
+    dashboard_runtime_chips,
     format_alert_line,
     format_milestone_line,
     format_plain_alert_line,
@@ -757,6 +758,16 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(chips, "yolo e:high m:gpt-5.5 p:team-role cfg:2")
         self.assertNotIn("fast", chips)
         self.assertEqual(dashboard_codex_chips({}), "-")
+
+    def test_dashboard_runtime_chips_distinguish_acp_and_codex(self) -> None:
+        self.assertEqual(
+            dashboard_runtime_chips("acp_tui", {"acp_provider": "cursor"}),
+            "acp cursor",
+        )
+        self.assertEqual(
+            dashboard_runtime_chips("app_server_remote_tui", {"codex_model": "gpt-5.5"}),
+            "codex m:gpt-5.5",
+        )
 
     def test_dashboard_concise_rows_keep_key_state_without_full_detail(self) -> None:
         obligation = {
@@ -3213,7 +3224,103 @@ can_notify = ["orchestrator"]
         self.assertIn('scratchpad = ".tmux-team/memory/orchestrator.md"', out)
         self.assertIn('mode = "app_server_remote_tui"', out)
         self.assertIn('notify_method = "app-server-turn"', out)
+        self.assertIn("runtime: codex", out)
+        self.assertNotIn("toad acp", out)
+        self.assertNotIn("control_socket", out)
         self.assertIn("session: tt-bootstrap", out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_plans_visible_acp_tui_team(self) -> None:
+        generated_config = self.root / ".tmux-team" / "acp-generated.toml"
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--runtime-dir",
+            ".tmux-team/runtime",
+            "--session",
+            "tt-acp",
+            "--roles",
+            "orchestrator,implementer",
+            "--agent-runtime",
+            "cursor-acp",
+            "--acp-tui-bin",
+            "toad",
+            "--acp-agent-command",
+            "agent --force acp",
+            "--acp-provider",
+            "cursor",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("tmux new-session -d -s tt-acp -n tt-control", out)
+        self.assertIn("tmux new-window -t tt-acp -n tt-agents", out)
+        self.assertIn("toad acp --project-dir", out)
+        self.assertIn("--control-socket", out)
+        self.assertIn("orchestrator.sock", out)
+        self.assertIn("implementer.sock", out)
+        self.assertIn("agent --force acp", out)
+        self.assertNotIn("tt-app-server", out)
+        self.assertNotIn("codex app-server", out)
+        self.assertIn('mode = "acp_tui"', out)
+        self.assertIn('notify_method = "control-socket"', out)
+        self.assertIn('runtime_session_id = "dry-session-orchestrator"', out)
+        self.assertIn('acp_provider = "cursor"', out)
+        self.assertIn("runtime: acp", out)
+        self.assertIn("orchestrator: session_id=dry-session-orchestrator", out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_cursor_bin_alias_builds_acp_command(self) -> None:
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(self.root / ".tmux-team" / "cursor-alias.toml"),
+            "--session",
+            "tt-acp-alias",
+            "--roles",
+            "orchestrator",
+            "--agent-runtime",
+            "cursor-acp",
+            "--cursor-bin",
+            "cursor-agent",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("cursor-agent acp", out)
+        self.assertIn('acp_agent_command = "cursor-agent acp"', out)
+        self.assertIn("runtime: acp", out)
+
+    def test_bootstrap_acp_reports_missing_toad_before_creating_state(self) -> None:
+        generated_config = self.root / ".tmux-team" / "missing-toad.toml"
+
+        code, _out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-acp",
+            "--roles",
+            "orchestrator",
+            "--agent-runtime",
+            "acp",
+            "--tmux-bin",
+            "/usr/bin/true",
+            "--acp-tui-bin",
+            "definitely-missing-toad",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("ACP TUI binary not found: definitely-missing-toad", err)
+        self.assertIn("Python 3.14+", err)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_can_disable_truecolor(self) -> None:
@@ -3571,6 +3678,30 @@ exit 0
         self.assertIn("tmux kill-window -t tt:tt-app-server", out)
         self.assertFalse((self.root / "runtime" / "sleeps" / "latest.toml").exists())
 
+    def test_sleep_rejects_acp_tui_before_teardown(self) -> None:
+        acp_config = self.root / ".tmux-team" / "acp-team.toml"
+        acp_config.write_text(
+            f"""[team]
+name = "acp-team"
+runtime_dir = "{self.root / "acp-runtime"}"
+
+[roles.orchestrator]
+mode = "acp_tui"
+state = "active"
+pane = "tt:tt-agents.0"
+notify_method = "control-socket"
+control_socket = "{self.root / "acp-runtime" / "acp" / "orchestrator.sock"}"
+""",
+            encoding="utf-8",
+        )
+
+        code, out, err = self.run_main("--config", str(acp_config), "sleep", "--dry-run")
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("sleep/resume does not yet support external ACP TUI roles: orchestrator", err)
+        self.assertFalse((self.root / "acp-runtime" / "sleeps" / "latest.toml").exists())
+
     def test_sleep_snapshots_and_tears_down_managed_windows(self) -> None:
         self.write_remote_tui_config()
         config = load_config(self.config)
@@ -3630,8 +3761,8 @@ exit 0
 
         self.assertEqual(code, 0, err)
         self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
-        self.assertIn("codex: yolo=yes model=gpt-5.5 effort=xhigh fast=unknown", out)
-        self.assertIn("codex: profile=implementer-profile config_overrides=1 fast=unknown", out)
+        self.assertIn("agent: runtime=codex yolo=yes model=gpt-5.5 effort=xhigh fast=unknown", out)
+        self.assertIn("agent: runtime=codex profile=implementer-profile config_overrides=1 fast=unknown", out)
 
     def test_resume_dry_run_plans_codex_resume_from_sleep_snapshot(self) -> None:
         self.write_remote_tui_config()

@@ -14,8 +14,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__
+from .acp_tui import ACPControlError, control_socket_path, send_control_request
 from .bootstrap import (
     AGENT_LAYOUTS,
+    AGENT_RUNTIMES,
     CONTROL_MODES,
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
@@ -52,9 +54,9 @@ from .dashboard import (
     run_textual_dashboard,
 )
 from .display import (
-    codex_settings_summary,
     format_seconds_duration,
     role_capabilities,
+    role_runtime_summary,
     watchdog_runner_display_state,
 )
 from .extensions.manifest import ExtensionError, inspect_extensions
@@ -113,7 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy_context = build_policy_context(args, config)
         apply_actor_defaults(args, policy_context)
         authorize_cli_command(args, config, policy_context)
-    except (BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError, KeyError) as exc:
+    except (ACPControlError, BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError, KeyError) as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
@@ -160,10 +162,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_resume(args, store, conn, config)
             if args.command == "codex":
                 return cmd_codex(args, store, service, conn)
+            if args.command in ("acp", "cursor"):
+                return cmd_acp(args, store, service, conn)
             if args.command == "stable":
                 return cmd_stable(args, store, conn)
     except (
         ConfigError,
+        ACPControlError,
         ExtensionError,
         HookDenied,
         HookError,
@@ -271,7 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     ext_sub.add_parser("list", help="List discovered extensions")
     ext_sub.add_parser("doctor", help="Validate extension manifests")
 
-    bootstrap = subparsers.add_parser("bootstrap", help="Start a pane-resident Codex team in tmux")
+    bootstrap = subparsers.add_parser("bootstrap", help="Start a pane-resident agent team in tmux")
     bootstrap.add_argument("--project-root", default=".", help="Project root for the team")
     bootstrap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Config path to create")
     bootstrap.add_argument(
@@ -293,6 +298,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Existing or desired app-server endpoint; default picks a free local ws:// port",
     )
     bootstrap.add_argument("--codex-bin", default="codex")
+    bootstrap.add_argument("--acp-tui-bin", default="toad")
+    bootstrap.add_argument("--acp-agent-command", default="agent acp")
+    bootstrap.add_argument("--acp-provider", help="Optional provider label recorded in role config")
+    bootstrap.add_argument(
+        "--cursor-bin",
+        default=None,
+        help="Compatibility alias: use '<BIN> acp' as --acp-agent-command",
+    )
+    bootstrap.add_argument(
+        "--agent-runtime",
+        default="codex",
+        choices=AGENT_RUNTIMES,
+        help="Managed role runtime: codex (default) or an external ACP TUI",
+    )
     bootstrap.add_argument("--tmux-bin", default="tmux")
     bootstrap.add_argument(
         "--agent-layout",
@@ -418,7 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument(
         "--notify-method",
         default="auto",
-        help="Notification method: auto, display-message, send-keys, or app-server-turn",
+        help="Notification method: auto, display-message, send-keys, app-server-turn, or control-socket",
     )
 
     broadcast = subparsers.add_parser("broadcast", help="Queue one message per recipient role")
@@ -448,7 +467,7 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast.add_argument(
         "--notify-method",
         default="auto",
-        help="Notification method: auto, display-message, send-keys, or app-server-turn",
+        help="Notification method: auto, display-message, send-keys, app-server-turn, or control-socket",
     )
 
     inbox = subparsers.add_parser("inbox", help="Work with role inboxes")
@@ -803,6 +822,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum scratchpad characters to include; 0 omits scratchpad content",
     )
 
+    add_acp_control_parser(subparsers, "acp", "Inspect and control external ACP TUI roles")
+    add_acp_control_parser(subparsers, "cursor", "Compatibility alias for ACP TUI controls", compatibility=True)
+
     stable = subparsers.add_parser("stable", help="Manage stable commit approvals")
     stable_sub = stable.add_subparsers(dest="stable_command", required=True)
     stable_approve = stable_sub.add_parser("approve", help="Approve a stable commit")
@@ -817,6 +839,24 @@ def build_parser() -> argparse.ArgumentParser:
     stable_sync.add_argument("--apply", action="store_true", help="Run git checkout --detach")
 
     return parser
+
+
+def add_acp_control_parser(
+    subparsers: argparse._SubParsersAction,
+    name: str,
+    help_text: str,
+    *,
+    compatibility: bool = False,
+) -> None:
+    parser = subparsers.add_parser(name, help=help_text)
+    commands = parser.add_subparsers(dest="acp_command", required=True)
+    wake = commands.add_parser("wake", help="Wake a role through its configured control socket")
+    wake.add_argument("role")
+    status_name = "show" if compatibility else "status"
+    status = commands.add_parser(status_name, help="Show the ACP TUI control-socket status")
+    status.add_argument("role")
+    cancel = commands.add_parser("cancel", help="Request cancellation of the active ACP turn")
+    cancel.add_argument("role")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -879,17 +919,28 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             allow_dirty_roles=allow_dirty_roles,
             enable_truecolor=not args.no_truecolor,
             dry_run=args.dry_run,
+            agent_runtime=args.agent_runtime,
+            acp_tui_bin=args.acp_tui_bin,
+            acp_agent_command=args.acp_agent_command,
+            acp_provider=args.acp_provider,
+            cursor_bin=args.cursor_bin,
         )
     except BootstrapError as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
     print(f"session: {result.session}")
-    print(f"endpoint: {result.endpoint}")
+    print(f"runtime: {result.agent_runtime}")
+    if result.agent_runtime == "codex":
+        print(f"endpoint: {result.endpoint}")
     print(f"config: {result.config_path}")
     print("roles:")
-    for role, thread_id in result.role_threads.items():
-        print(f"  {role}: thread_id={thread_id}")
+    if result.agent_runtime == "acp":
+        for role, session_id in result.role_sessions.items():
+            print(f"  {role}: session_id={session_id}")
+    else:
+        for role, thread_id in result.role_threads.items():
+            print(f"  {role}: thread_id={thread_id}")
     return 0
 
 
@@ -1174,6 +1225,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "memory.read", role=args.role)
         return
 
+    if args.command in ("acp", "cursor") and args.acp_command in ("wake", "cancel"):
+        authorize(config, policy_context, "role.notify", role=args.role, method="control-socket")
+        return
+
     if args.command == "stable" and args.stable_command == "approve":
         authorize(config, policy_context, "stable.approve", role=args.role)
         return
@@ -1216,7 +1271,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
         if args.verbose:
-            print(f"    codex: {codex_settings_summary(role_capabilities(role))}")
+            print(f"    agent: {role_runtime_summary(str(role['mode']), role_capabilities(role))}")
             rows = store.list_active_messages(conn, role=role["name"], limit=args.active_limit)
             if not rows:
                 print("    active: none")
@@ -2639,6 +2694,41 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     if args.dry_run:
         print("dry-run: no tmux panes created and no config/runtime state updated")
     return 0
+
+
+def cmd_acp(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
+    role = store.get_role(conn, args.role)
+    if role is None:
+        raise KeyError(f"Unknown role: {args.role}")
+    socket_value = store.resolve_role_control_socket(role)
+    if not socket_value:
+        socket_path = control_socket_path(store.runtime_dir, args.role)
+        raise ACPControlError(f"role {args.role!r} has no ACP TUI control-socket binding (expected {socket_path})")
+    socket_path = Path(str(socket_value))
+
+    if args.acp_command == "wake":
+        result = service.notify_role(conn, args.role, "control-socket", actor=args.actor)
+        if result.ok:
+            print(result.details)
+            return 0
+        print(result.details, file=sys.stderr)
+        return 1
+
+    if args.acp_command == "cancel":
+        response = send_control_request(socket_path, {"action": "cancel"})
+        print(f"{args.role} cancellation_requested={str(response.get('submitted', False)).lower()}")
+        return 0
+
+    if args.acp_command in ("status", "show"):
+        response = send_control_request(socket_path, {"action": "status"})
+        print(
+            f"{args.role} acp-tui socket={socket_path} state={response.get('state', 'unknown')} "
+            f"session_id={response.get('sessionId') or '-'} pid={response.get('pid', 'unknown')} "
+            f"queue_depth={response.get('queueDepth', 'unknown')}"
+        )
+        return 0
+
+    return 2
 
 
 def cmd_codex(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:

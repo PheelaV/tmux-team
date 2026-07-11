@@ -20,6 +20,9 @@ dependencies = [
 dashboard = [
   "textual>=0.89",
 ]
+acp = [
+  "batrachian-toad @ git+https://github.com/PheelaV/toad.git@feature/acp-control-socket ; python_version >= '3.14'",
+]
 dev = [
   "ruff>=0.8",
 ]

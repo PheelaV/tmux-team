@@ -45,6 +45,22 @@ def codex_settings_summary(capabilities: dict[str, object]) -> str:
     return f"{launch} fast=unknown"
 
 
+def role_runtime_summary(mode: str, capabilities: dict[str, object]) -> str:
+    if mode == "acp_tui" or capabilities.get("control_socket"):
+        parts = ["runtime=acp"]
+        provider = capabilities.get("acp_provider")
+        if provider:
+            parts.append(f"provider={provider}")
+        tui = capabilities.get("acp_tui_bin")
+        if tui:
+            parts.append(f"tui={tui}")
+        session_id = capabilities.get("runtime_session_id")
+        if session_id:
+            parts.append(f"session={str(session_id)[:12]}")
+        return " ".join(parts)
+    return f"runtime=codex {codex_settings_summary(capabilities)}"
+
+
 def watchdog_runner_display_state(row, stale_grace_seconds: int) -> str:
     if row["state"] != "running":
         return str(row["state"])

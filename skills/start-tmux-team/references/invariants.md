@@ -19,6 +19,9 @@ The app-server is isolated infrastructure.
 - Do not group it with role agents.
 - Use it for app-server `turn/start` wake delivery.
 
+Experimental ACP TUI roles do not create `tt-app-server`. Their visible Toad pane owns the configured ACP child and
+private control socket.
+
 ## Role Layout
 
 The default role layout is grouped:
@@ -45,11 +48,14 @@ When roles already have separate git worktrees, bootstrap must preserve them wit
 
 ## Delivery
 
-Never use tmux stdin as the production wake path for Codex roles.
+Never use tmux stdin as the production wake path for managed agent roles.
 
 - Do not paste task bodies into panes.
 - Do not use `tmux send-keys` for normal Codex wake.
 - Use app-server `turn/start`.
+- Experimental ACP roles use a private Unix socket into the visible Toad TUI, which queues `session/prompt`.
+- Each ACP role has a unique socket; bootstrap must complete a versioned `ping`/`status` handshake before sending the
+  startup prompt.
 - Wake prompts should be blunt interrupts; do not restate the skill, scratchpad rules, or ack/complete syntax in every wake turn.
 - App-server wake prompts may include compact metadata for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. They must not include the task body.
 - If an urgent message is pending, the app-server wake must tell the role to stop at the current safe point and claim the urgent message before continuing other work.
@@ -85,6 +91,9 @@ tmux-team pane capture collector --lines 120 --offset 40
 ## Skill Availability
 
 Every Codex role spawned by bootstrap must have the `start-tmux-team` skill available in the active `CODEX_HOME`. The skill may not be loaded into the current turn context until triggered, so wake prompts still include a compact role wake signal.
+
+Every experimental ACP role must have the same skill available in the provider's active skill location. Its pane is
+the external Toad TUI, which owns the ACP child and session. ACP sleep/resume is not implemented in the prototype.
 
 Do not reload the full skill on every ordinary app-server wake. Use the loaded tmux-team role contract version and role loop when present. Use `tmux-team codex session-context` after startup/resume/clear/compact recovery, explicit operator request, or contract/version mismatch.
 

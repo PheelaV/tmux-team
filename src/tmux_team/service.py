@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .extensions.runner import HookRunner
-from .store import Message, Store, normalize_notify_method, normalize_priority
+from .store import Message, Store, normalize_notify_method, normalize_priority, role_notify_method
 
 
 @dataclass(frozen=True)
@@ -315,7 +315,7 @@ class TeamService:
             summary=reply_summary,
             body=reply_body,
             wake=reply_wake,
-            notify_method="app-server-turn",
+            notify_method="auto",
             related_to=row["id"],
             message_kind="completion_notice",
             actor=actor or role,
@@ -340,6 +340,11 @@ class TeamService:
         notification = data.get("notification") or {}
         role = str(notification.get("role") or role)
         method = normalize_notify_method(str(notification.get("method") or method))
+        if method == "auto":
+            role_row = self.store.get_role(conn, role)
+            if role_row is None:
+                raise KeyError(f"Unknown role: {role}")
+            method = normalize_notify_method(role_notify_method(role_row))
         ok, details = self.store.notify_role(conn, role, method)
         event = "notification.after" if ok else "notification.failed"
         self.hook_runner.run(

@@ -2,7 +2,7 @@
 
 ![tmux-team banner](docs/assets/banner.png)
 
-`tmux-team` is a tiny tmux-native control plane for visible Codex agent teams.
+`tmux-team` is a tiny tmux-native control plane for visible agent teams. Codex is the default built-in runtime.
 
 Plain tmux is great until you have four agents: prompts collide, panes enter copy mode, messages disappear into scrollback, and nobody knows what is actually done.
 
@@ -52,7 +52,7 @@ verifier: LIVE DEMO VERIFY OK
 
 ## Install
 
-Prerequisites: `tmux`, Codex CLI authenticated locally, and either `uv` or `pipx`.
+Default-runtime prerequisites: `tmux`, Codex CLI authenticated locally, and either `uv` or `pipx`.
 
 Install the CLI from GitHub:
 
@@ -68,6 +68,23 @@ Install the optional Textual dashboard extra when you want the live operator das
 uv tool install "tmux-team[dashboard] @ git+https://github.com/PheelaV/tmux-team.git"
 # or
 pipx install "tmux-team[dashboard] @ git+https://github.com/PheelaV/tmux-team.git"
+```
+
+The experimental external ACP TUI runtime uses Toad and requires Python 3.14. Base tmux-team and Codex operation
+remain Python 3.11+. Until the Toad control-socket branch is released, install the temporary extra with:
+
+```bash
+uv tool install --python 3.14 "tmux-team[acp] @ git+https://github.com/PheelaV/tmux-team.git"
+# or, from a checkout:
+uv tool install --python 3.14 --force --editable ".[acp]"
+```
+
+Preflight the TUI and your chosen ACP provider before bootstrap:
+
+```bash
+toad --version
+agent status                 # Cursor example
+toad acp "agent acp"         # optional direct provider/TUI check
 ```
 
 Install the Codex plugin/skill from the public marketplace metadata:
@@ -150,7 +167,41 @@ tmux-team resume
 
 ## How It Works
 
-`tmux-team` is a small Python CLI backed by SQLite, TOML config, tmux windows, and Codex app-server remote TUI wake delivery.
+`tmux-team` is a small Python CLI backed by SQLite, TOML config, and tmux windows. Codex roles use app-server wake
+turns; experimental ACP roles use an external TUI control socket.
+
+### Experimental External ACP TUI Roles
+
+The ACP runtime launches one visible Toad TUI per role. Toad owns the ACP child command and session; tmux-team only
+launches the TUI and sends compact prompts through its local control socket:
+
+```bash
+make install-cursor-skill
+
+tmux-team bootstrap \
+  --project-root . \
+  --agent-runtime acp \
+  --acp-tui-bin toad \
+  --acp-agent-command "agent acp" \
+  --acp-provider cursor \
+  --goal "Inspect the smallest failing test and report the result."
+```
+
+The tmux layout remains `tt-control` plus visible role panes in `tt-agents`, but there is no `tt-app-server`
+window. Each role gets a unique mode-`0600` Unix socket under the runtime directory. Bootstrap waits for Toad's
+`ping`/`status` handshake before sending the role startup prompt.
+
+Production wake delivery does not type into the pane:
+
+```text
+SQLite inbox -> private Unix socket -> visible Toad TUI -> ACP session/prompt -> provider agent
+```
+
+The socket carries only the compact wake; durable task bodies remain in SQLite. Provider-specific flags belong in
+`--acp-agent-command` (for example, a provider's non-interactive mode). `--acp-provider` is convenience metadata and
+does not change launch behavior. Inspect or control a role with `tmux-team acp status|wake|cancel <role>`.
+The prototype `--agent-runtime cursor-acp`, `--cursor-bin`, and `tmux-team cursor show|wake|cancel` forms remain
+compatibility aliases. ACP sleep/resume is not implemented yet.
 
 If role agents need to message each other without stopping at Codex approval prompts, launch managed role panes with an explicit role execution policy:
 

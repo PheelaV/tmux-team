@@ -21,8 +21,12 @@ Coverage target:
 - stable commit lookup;
 - CLI parsing for common commands;
 - fake Codex app-server WebSocket delivery for `app-server-turn`.
+- fake ACP TUI control-socket delivery for `control-socket`.
 
 The app-server delivery unit test uses `socketpair()` and a fake WebSocket JSON-RPC server. It verifies the wake turn protocol without opening a network listener, starting Codex, or using credentials.
+
+The ACP TUI unit tests exercise the versioned Unix-socket client, readiness/status handshake, structured errors, and
+SQLite wake routing without starting Toad or a provider. They verify that task bodies stay out of wake prompts.
 
 ## 2. Deterministic Fake-Agent Smoke Test
 

@@ -101,6 +101,9 @@ def sleep_team(
 ) -> SleepResult:
     if not config.roles:
         raise LifecycleError("no roles configured")
+    acp_roles = configured_acp_roles(config)
+    if acp_roles:
+        raise LifecycleError("sleep/resume does not yet support external ACP TUI roles: " + ", ".join(acp_roles))
 
     if shutil.which(tmux_bin) is None and not dry_run:
         raise LifecycleError(f"tmux binary not found: {tmux_bin}")
@@ -200,6 +203,9 @@ def resume_team(
 ) -> ResumeResult:
     if config.config_path is None:
         raise LifecycleError("resume requires a config file")
+    acp_roles = configured_acp_roles(config)
+    if acp_roles:
+        raise LifecycleError("sleep/resume does not yet support external ACP TUI roles: " + ", ".join(acp_roles))
     if shutil.which(tmux_bin) is None and not dry_run:
         raise LifecycleError(f"tmux binary not found: {tmux_bin}")
     if shutil.which(codex_bin) is None and not dry_run:
@@ -1192,3 +1198,7 @@ def optional_string(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(value)
+
+
+def configured_acp_roles(config: TeamConfig) -> list[str]:
+    return sorted(role.name for role in config.roles.values() if role.mode == "acp_tui")

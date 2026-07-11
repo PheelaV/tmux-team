@@ -76,7 +76,7 @@ def list_tools() -> list[dict[str, Any]]:
         },
         {
             "name": "team_send",
-            "description": "Queue a durable role message and optionally wake the recipient through app-server.",
+            "description": "Queue a durable role message and optionally wake the recipient through its configured runtime.",
             "inputSchema": {
                 "type": "object",
                 "required": ["to", "summary"],
@@ -95,20 +95,20 @@ def list_tools() -> list[dict[str, Any]]:
         },
         {
             "name": "team_notify",
-            "description": "Wake a role through Codex app-server turn/start. Shell and tmux send-keys methods are not exposed.",
+            "description": "Wake a role through its configured safe delivery method. Tmux send-keys is not exposed.",
             "inputSchema": {
                 "type": "object",
                 "required": ["role"],
                 "properties": {
                     "role": {"type": "string"},
-                    "method": {"type": "string", "default": "app-server-turn"},
+                    "method": {"type": "string", "default": "auto"},
                 },
                 "additionalProperties": False,
             },
         },
         {
             "name": "team_wake",
-            "description": "Alias for team_notify with app-server-turn delivery.",
+            "description": "Alias for team_notify with the role's configured delivery.",
             "inputSchema": {
                 "type": "object",
                 "required": ["role"],
@@ -225,7 +225,7 @@ def team_send(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str
         body=body,
         force=force,
         wake=wake,
-        notify_method="app-server-turn",
+        notify_method="auto",
         actor=sender,
     )
     row = conn.execute("SELECT * FROM messages WHERE id = ?", (sent.message.id,)).fetchone()
@@ -242,10 +242,10 @@ def team_send(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str
 
 def team_notify(service: TeamService, conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     role = required_str(args, "role")
-    method = normalize_notify_method(str_arg(args, "method", "app-server-turn"))
-    if method != "app-server-turn":
-        raise ToolCallError("MCP notify only supports app-server-turn delivery")
-    result = service.notify_role(conn, role, "app-server-turn", actor=role)
+    method = normalize_notify_method(str_arg(args, "method", "auto"))
+    if method not in ("auto", "app-server-turn", "control-socket"):
+        raise ToolCallError("MCP notify only supports configured agent delivery")
+    result = service.notify_role(conn, role, method, actor=role)
     return {"ok": result.ok, "method": result.method, "details": result.details}
 
 

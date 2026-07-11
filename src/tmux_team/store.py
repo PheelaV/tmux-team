@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .acp_tui import ACPControlError, send_control_request
 from .app_server import AppServerError, submit_app_server_wake
 from .config import RoleConfig, TeamConfig
 
@@ -1748,6 +1749,38 @@ class Store:
                 )
             return self.notify_role_app_server(conn, role, role_row, self.pending_wake_context(conn, role))
 
+        if method == "control-socket":
+            if is_notice:
+                prompt = self.app_server_notice_prompt(role, str(notice_summary))
+                return self.notify_role_control_socket_prompt(
+                    conn,
+                    role,
+                    role_row,
+                    prompt=prompt,
+                    message_id=notice_message_id,
+                    update_queued=False,
+                    event_type="role.notice_sent",
+                    event_payload={"message_id": notice_message_id},
+                    coalesce_key="notice",
+                )
+            wake_context = self.pending_wake_context(conn, role)
+            prompt = self.app_server_wake_prompt(
+                role,
+                int(wake_context["pending"]),
+                top_message=wake_context.get("top_message"),
+                urgent_count=int(wake_context.get("urgent_count") or 0),
+            )
+            return self.notify_role_control_socket_prompt(
+                conn,
+                role,
+                role_row,
+                prompt=prompt,
+                update_queued=True,
+                event_payload={"pending": int(wake_context["pending"])},
+                priority="urgent" if int(wake_context.get("urgent_count") or 0) else "normal",
+                coalesce_key="inbox",
+            )
+
         pane = role_row["pane"]
         if not pane:
             self.record_notification(conn, notice_message_id, role, method, "notify_failed", "role has no pane")
@@ -1960,6 +1993,86 @@ class Store:
         if not endpoint or not thread_id:
             return None
         return endpoint, thread_id, timeout
+
+    def notify_role_control_socket_prompt(
+        self,
+        conn: sqlite3.Connection,
+        role: str,
+        role_row: sqlite3.Row,
+        *,
+        prompt: str,
+        message_id: str | None = None,
+        update_queued: bool,
+        event_type: str = "role.notified",
+        event_payload: dict[str, Any] | None = None,
+        priority: str = "normal",
+        coalesce_key: str | None = None,
+    ) -> tuple[bool, str]:
+        socket_path = self.resolve_role_control_socket(role_row)
+        if socket_path is None:
+            details = "role has no ACP TUI control-socket binding"
+            self.record_notification(conn, message_id, role, "control-socket", "notify_failed", details)
+            self.record_event(
+                conn,
+                "role.notification_failed",
+                "control-socket",
+                role,
+                {"method": "control-socket", "details": details, "message_id": message_id},
+            )
+            conn.commit()
+            return False, details
+        try:
+            request: dict[str, Any] = {
+                "action": "prompt",
+                "text": prompt,
+                "priority": priority,
+            }
+            if coalesce_key:
+                request["coalesceKey"] = coalesce_key
+            response = send_control_request(Path(socket_path), request)
+        except ACPControlError as exc:
+            details = f"ACP TUI wake submission failed: {exc}"
+            self.record_notification(conn, message_id, role, "control-socket", "notify_failed", details)
+            self.record_event(
+                conn,
+                "role.notification_failed",
+                "control-socket",
+                role,
+                {"method": "control-socket", "details": details, "message_id": message_id},
+            )
+            conn.commit()
+            return False, details
+
+        if update_queued:
+            now = utc_now()
+            conn.execute(
+                """
+                UPDATE messages
+                SET state = 'notified', attempts = attempts + 1, updated_at = ?
+                WHERE recipient = ? AND state = 'queued'
+                """,
+                (now, role),
+            )
+        payload = {
+            "method": "control-socket",
+            "session_id": response.get("sessionId"),
+            "queue_depth": response.get("queueDepth"),
+            "state": response.get("state"),
+        }
+        if event_payload:
+            payload.update(event_payload)
+        details = json.dumps({"socket": socket_path, **payload}, sort_keys=True)
+        self.record_notification(conn, message_id, role, "control-socket", "submitted", details)
+        self.record_event(conn, event_type, "control-socket", role, payload)
+        conn.commit()
+        return True, f"ACP TUI wake {response.get('state', 'accepted')} session={response.get('sessionId')}"
+
+    def resolve_role_control_socket(self, role_row: sqlite3.Row) -> str | None:
+        try:
+            capabilities = json.loads(role_row["capabilities_json"] or "{}")
+        except json.JSONDecodeError:
+            return None
+        return _optional_capability(capabilities, "control_socket", "cursor_socket", "cursor_acp_socket")
 
     def app_server_wake_prompt(
         self,
@@ -2454,6 +2567,8 @@ def normalize_notify_method(method: str) -> str:
         return "display-message"
     if value in ("app-server", "appserver", "codex", "codex-app-server"):
         return "app-server-turn"
+    if value in ("acp", "acp-tui", "cursor", "cursor-acp", "cursor-acp-turn"):
+        return "control-socket"
     return value
 
 

@@ -24,7 +24,7 @@ class DashboardDependencyError(RuntimeError):
     pass
 
 
-ROLE_TABLE_HEADERS = ("role", "state", "pane", "pend", "clmd", "ack", "stale", "todo", "codex", "active")
+ROLE_TABLE_HEADERS = ("role", "state", "pane", "pend", "clmd", "ack", "stale", "todo", "runtime", "active")
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ def collect_dashboard_snapshot(
                 "completed": role_counts.get("completed", 0),
                 "open_todos": open_todos,
                 "active_summary": str(active_summary),
-                "codex_settings": dashboard_codex_chips(capabilities),
+                "runtime_settings": dashboard_runtime_chips(str(role["mode"]), capabilities),
             }
         )
 
@@ -349,6 +349,17 @@ def dashboard_codex_chips(capabilities: dict[str, object]) -> str:
     elif config_overrides:
         chips.append("cfg")
     return " ".join(chips) if chips else "-"
+
+
+def dashboard_runtime_chips(mode: str, capabilities: dict[str, object]) -> str:
+    if mode == "acp_tui" or capabilities.get("control_socket"):
+        chips = ["acp"]
+        provider = capabilities.get("acp_provider")
+        if provider:
+            chips.append(str(provider))
+        return " ".join(chips)
+    codex = dashboard_codex_chips(capabilities)
+    return "codex" if codex == "-" else f"codex {codex}"
 
 
 def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool = False) -> str:
@@ -1011,7 +1022,7 @@ def role_table_rows(snapshot: DashboardSnapshot, *, codex_limit: int, active_lim
             row_text(row, "acknowledged"),
             row_text(row, "stale_claimed"),
             row_text(row, "open_todos"),
-            truncate(row_text(row, "codex_settings"), codex_limit),
+            truncate(row_text(row, "runtime_settings"), codex_limit),
             truncate(row_text(row, "active_summary"), active_limit),
         )
 
@@ -1034,7 +1045,7 @@ def textual_role_table_rows(
             row_text(row, "acknowledged"),
             row_text(row, "stale_claimed"),
             row_text(row, "open_todos"),
-            truncate(row_text(row, "codex_settings"), codex_limit),
+            truncate(row_text(row, "runtime_settings"), codex_limit),
             truncate(row_text(row, "active_summary"), active_limit),
         )
 
