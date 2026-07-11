@@ -24,6 +24,18 @@ make live-demo-clean
 
 The demo starts a visible Codex team, gives the orchestrator a failing test, routes implementation work, verifies the fix in a collector worktree, approves a stable commit, and exits with a clean inbox.
 
+Run the same public-snapshot task through an external ACP TUI runtime with:
+
+```bash
+make live-demo-setup
+make live-demo-acp-bootstrap
+tmux attach -t tt-live-demo
+make live-demo-verify
+make live-demo-clean
+```
+
+The ACP path is provider-agnostic at the tmux-team boundary. Its autonomous demo default is Cursor's `agent --force acp`; override `LIVE_DEMO_ACP_AGENT_COMMAND` and `LIVE_DEMO_ACP_PROVIDER` for another ACP provider or permission policy.
+
 Expected shape:
 
 ```text

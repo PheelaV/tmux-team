@@ -1,6 +1,6 @@
 # Live Demo Scenario
 
-This repository includes a repeatable real-Codex demo scenario for validating tmux-team against a public codebase snapshot. It is meant to be a dogfood investigation run, not just a passing-test fixture.
+This repository includes repeatable Codex and external-ACP demo paths for validating tmux-team against one public codebase snapshot. They are dogfood investigation runs, not just passing-test fixtures.
 
 The scenario intentionally clones `https://github.com/PheelaV/tmux-team.git` at the fixed public snapshot `v0.1.3` / `78602d1497a81f0e8e5026999585a65c1eea19b1`, then seeds a small urgent-priority regression in that cloned target. The old tag is the demo target, not the current tmux-team release. The setup creates separate orchestrator/implementer/collector worktrees and writes a goal for the orchestrator. The goal describes the behavior and success criteria, but not the faulty function or patch.
 
@@ -19,6 +19,15 @@ tmux attach -t tt-live-demo
 
 Bootstrap opens the live Textual dashboard as a split next to `tt-control`, so the operator can watch durable state without leaving the control window.
 
+Alternatively, start a provider-agnostic ACP/Toad team. Cursor is the default provider command for this demo:
+
+```bash
+make live-demo-acp-bootstrap
+tmux attach -t tt-live-demo
+```
+
+Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a human will approve role tools. ACP mode uses the same seeded repository and role worktrees, but its goal verifies control-socket wake delivery and omits the unsupported sleep/resume phase.
+
 The live scenario has an operator recovery phase. After the collector reports the first passing stable verification and the orchestrator arms the post-resume watchdog, trigger sleep/resume from the control side:
 
 ```bash
@@ -28,6 +37,8 @@ make live-demo-watchdog-now
 ```
 
 `live-demo-watchdog-now` changes the restored watchdog from report-only supervision to `app-server-turn` delivery and shortens it to `5s` so it wakes the orchestrator for a second post-resume operation. The orchestrator should then route one implementer test-only task, complete the post-resume obligation, and stop the watchdog once the tests stay passing.
+
+The recovery phase applies only to the Codex runtime. ACP sleep fails before teardown by design until session restoration is implemented.
 
 After the agents report final completion, verify real success:
 

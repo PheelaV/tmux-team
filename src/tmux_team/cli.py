@@ -2851,14 +2851,15 @@ def scratchpad_excerpt(path: Path, max_chars: int) -> str:
 def cmd_stable(args: argparse.Namespace, store: Store, conn) -> int:
     if args.stable_command == "approve":
         approved_by = args.by or os.environ.get("USER") or getpass.getuser()
+        commit_sha = canonical_role_commit(store, conn, args.role, args.commit)
         store.approve_stable_commit(
             conn,
             scope=args.role,
-            commit_sha=args.commit,
+            commit_sha=commit_sha,
             approved_by=approved_by,
             note=args.note,
         )
-        print(f"{args.role}: {args.commit} approved_by={approved_by}")
+        print(f"{args.role}: {commit_sha} approved_by={approved_by}")
         return 0
 
     if args.stable_command == "current":
@@ -2881,6 +2882,28 @@ def cmd_stable(args: argparse.Namespace, store: Store, conn) -> int:
         return cmd_stable_sync(args, store, conn)
 
     return 2
+
+
+def canonical_role_commit(store: Store, conn, scope: str, revision: str) -> str:
+    if scope == "global":
+        return revision
+    role = store.get_role(conn, scope)
+    if role is None:
+        raise KeyError(f"Unknown role: {scope}")
+    worktree = role["worktree"]
+    if not worktree:
+        raise ValueError(f"role {scope} has no worktree for stable commit resolution")
+    result = subprocess.run(
+        ["git", "-C", worktree, "rev-parse", "--verify", f"{revision}^{{commit}}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "revision not found").strip()
+        raise ValueError(f"cannot resolve stable commit {revision!r} for role {scope}: {details}")
+    return result.stdout.strip()
 
 
 def cmd_stable_sync(args: argparse.Namespace, store: Store, conn) -> int:

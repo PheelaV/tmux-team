@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
 
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Start tmux-team against the prepared scenario")
     bootstrap_parser.add_argument("--session", default=DEFAULT_SESSION)
+    bootstrap_parser.add_argument("--agent-runtime", choices=("codex", "acp"), default="codex")
+    bootstrap_parser.add_argument("--acp-tui-bin", default="toad")
+    bootstrap_parser.add_argument("--acp-agent-command", default="agent acp")
+    bootstrap_parser.add_argument("--acp-provider", default="cursor")
+    bootstrap_parser.add_argument("--defer-goal", action="store_true", help="Start roles without queuing the goal")
     bootstrap_parser.add_argument(
         "--role-yolo", action="store_true", help="Launch managed role panes in Codex YOLO mode"
     )
@@ -182,6 +187,10 @@ def setup(root: Path, args: argparse.Namespace) -> None:
 
 def bootstrap(root: Path, args: argparse.Namespace) -> None:
     metadata = load_metadata(root)
+    if args.agent_runtime == "acp":
+        write_acp_goal(root, metadata)
+    else:
+        write_goal(root, metadata)
     command = [
         "tmux-team",
         "bootstrap",
@@ -199,27 +208,71 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
         f"implementer={metadata['implementer_worktree']}",
         "--role-worktree",
         f"collector={metadata['collector_worktree']}",
-        "--role-reasoning-effort",
-        "orchestrator=high",
-        "--role-reasoning-effort",
-        "implementer=high",
-        "--role-reasoning-effort",
-        "collector=high",
-        "--goal-file",
-        str(root / "goal.md"),
     ]
-    if args.role_yolo:
+    if not args.defer_goal:
+        command.extend(["--goal-file", str(root / "goal.md")])
+    if args.agent_runtime == "acp":
+        command.extend(
+            [
+                "--agent-runtime",
+                "acp",
+                "--acp-tui-bin",
+                args.acp_tui_bin,
+                "--acp-agent-command",
+                args.acp_agent_command,
+                "--acp-provider",
+                args.acp_provider,
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "--role-reasoning-effort",
+                "orchestrator=high",
+                "--role-reasoning-effort",
+                "implementer=high",
+                "--role-reasoning-effort",
+                "collector=high",
+            ]
+        )
+    if args.role_yolo and args.agent_runtime == "codex":
         command.append("--role-yolo")
     if args.force_config:
         command.append("--force-config")
     run(command)
-    start_dashboard_pane(args.session, Path(metadata["project"]) / ".tmux-team" / "team.toml")
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    if args.agent_runtime == "acp":
+        verify_acp_demo_ready(args.session, config_path)
+    start_dashboard_pane(args.session, config_path)
     print("LIVE DEMO BOOTSTRAP STARTED")
     print(f"session: {args.session}")
+    print(f"runtime: {args.agent_runtime}")
     print("dashboard: tt-control split")
     print(f"attach: tmux attach -t {args.session}")
     print(f"project: {metadata['project']}")
+    if args.defer_goal:
+        print(f"deferred goal: {root / 'goal.md'}")
     print(f"verify later: {Path(__file__).name} --root {root} verify")
+
+
+def verify_acp_demo_ready(session: str, config_path: Path) -> None:
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    failure_markers = ("Traceback", "BadIdentifier", "ACP TUI role exited", "Not in allowlist")
+    for role in ROLES:
+        role_config = config["roles"][role]
+        pane = str(role_config["pane"])
+        status = run(
+            ["tmux-team", "--config", str(config_path), "acp", "status", role],
+            check=False,
+        )
+        if status.returncode != 0:
+            raise ScenarioError(f"ACP role {role} control socket is unhealthy:\n{status.stderr or status.stdout}")
+        capture = run(["tmux", "capture-pane", "-p", "-t", pane, "-S", "-120"], check=False)
+        if capture.returncode != 0:
+            raise ScenarioError(f"could not capture ACP role {role} pane {pane}: {capture.stderr}")
+        marker = next((value for value in failure_markers if value in capture.stdout), None)
+        if marker is not None:
+            raise ScenarioError(f"ACP role {role} failed readiness check ({marker}) in session {session}")
 
 
 def verify(root: Path) -> None:
@@ -233,6 +286,7 @@ def verify(root: Path) -> None:
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     roles = config.get("roles", {})
     operator = config.get("operator", {})
+    is_acp = all(roles.get(role, {}).get("mode") == "acp_tui" for role in ROLES)
     if not operator.get("pane"):
         raise ScenarioError("team.toml is missing operator pane recovery metadata")
     for role, key in (
@@ -244,7 +298,12 @@ def verify(root: Path) -> None:
         expected = Path(str(metadata[key])).resolve()
         if actual != expected:
             raise ScenarioError(f"{role} worktree mismatch: expected {expected}, got {actual}")
-        if roles[role].get("codex_reasoning_effort") != "high":
+        if is_acp:
+            if roles[role].get("notify_method") != "control-socket":
+                raise ScenarioError(f"{role} does not use ACP control-socket delivery")
+            if not roles[role].get("control_socket") or not roles[role].get("runtime_session_id"):
+                raise ScenarioError(f"{role} is missing ACP socket/session metadata")
+        elif roles[role].get("codex_reasoning_effort") != "high":
             raise ScenarioError(f"{role} did not preserve configured Codex reasoning effort")
     verify_tmux_truecolor(config)
 
@@ -297,13 +356,14 @@ def verify(root: Path) -> None:
             f"AND correlation_key = '{CORRELATION_KEYS['fix']}' AND message_kind = 'task'",
             1,
         )
-        require_sql_count_exact(
-            conn,
-            "messages",
-            "sender = 'orchestrator' AND recipient = 'implementer' "
-            f"AND correlation_key = '{CORRELATION_KEYS['post_resume']}' AND message_kind = 'task'",
-            1,
-        )
+        if not is_acp:
+            require_sql_count_exact(
+                conn,
+                "messages",
+                "sender = 'orchestrator' AND recipient = 'implementer' "
+                f"AND correlation_key = '{CORRELATION_KEYS['post_resume']}' AND message_kind = 'task'",
+                1,
+            )
         require_sql_count_exact(
             conn,
             "messages",
@@ -314,7 +374,7 @@ def verify(root: Path) -> None:
             conn,
             "messages",
             "sender = 'implementer' AND recipient = 'orchestrator' AND message_kind = 'completion_notice'",
-            2,
+            1 if is_acp else 2,
         )
         require_sql_count(
             conn,
@@ -329,13 +389,14 @@ def verify(root: Path) -> None:
             f"AND correlation_key = '{WATCHDOG_PRESSURE_CORRELATION}'",
             1,
         )
-        require_sql_count_exact(
-            conn,
-            "messages",
-            "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
-            f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
-            1,
-        )
+        if not is_acp:
+            require_sql_count_exact(
+                conn,
+                "messages",
+                "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
+                f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
+                1,
+            )
         require_sql_count_exact(conn, "messages", "state != 'completed'", 0)
         require_sql_count_exact(
             conn,
@@ -344,20 +405,31 @@ def verify(root: Path) -> None:
             1,
         )
         require_sql_count_exact(conn, "obligations", "status IN ('active', 'blocked')", 0)
-        require_sql_count_range(conn, "obligations", "status IN ('done', 'failed', 'cancelled')", minimum=2, maximum=4)
-        require_sql_count(conn, "events", "type = 'obligation.updated'", 2)
-        require_sql_count(conn, "events", "type = 'obligation.completed'", 2)
-        require_sql_count(conn, "events", "type = 'watchdog.runner_ran'", 2)
-        require_sql_count(conn, "events", "type = 'watchdog.runner_updated' AND ref_id = 'live-resume'", 1)
-        require_sql_count(
-            conn, "events", "type = 'watchdog.runner_upserted' AND actor = 'resume' AND ref_id = 'live-resume'", 1
+        require_sql_count_range(
+            conn,
+            "obligations",
+            "status IN ('done', 'failed', 'cancelled')",
+            minimum=1 if is_acp else 2,
+            maximum=2 if is_acp else 4,
         )
-        require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
-        require_sql_count(conn, "events", "type = 'team.sleep.snapshot'", 1)
-        require_sql_count(conn, "events", "type = 'team.sleep.teardown'", 1)
-        require_sql_count(conn, "events", "type = 'team.resume'", 1)
+        require_sql_count(conn, "events", "type = 'obligation.updated'", 1 if is_acp else 2)
+        require_sql_count(conn, "events", "type = 'obligation.completed'", 1 if is_acp else 2)
+        require_sql_count(conn, "events", "type = 'watchdog.runner_ran'", 1 if is_acp else 2)
+        if not is_acp:
+            require_sql_count(conn, "events", "type = 'watchdog.runner_updated' AND ref_id = 'live-resume'", 1)
+            require_sql_count(
+                conn,
+                "events",
+                "type = 'watchdog.runner_upserted' AND actor = 'resume' AND ref_id = 'live-resume'",
+                1,
+            )
+            require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
+            require_sql_count(conn, "events", "type = 'team.sleep.snapshot'", 1)
+            require_sql_count(conn, "events", "type = 'team.sleep.teardown'", 1)
+            require_sql_count(conn, "events", "type = 'team.resume'", 1)
         require_sql_count(conn, "events", "type = 'stable.approved'", 1)
-        require_sql_count_exact(conn, "watchdog_runners", "name = 'live-resume' AND state = 'stopped'", 1)
+        if not is_acp:
+            require_sql_count_exact(conn, "watchdog_runners", "name = 'live-resume' AND state = 'stopped'", 1)
     finally:
         conn.close()
 
@@ -375,6 +447,7 @@ def verify(root: Path) -> None:
         raise ScenarioError(f"non-orchestrator milestone roles found: {non_orchestrator_milestone_roles}")
 
     print("LIVE DEMO VERIFY OK")
+    print(f"runtime: {'acp' if is_acp else 'codex'}")
     print(f"collector_head: {collector_head}")
     print(f"implementer_head: {implementer_head}")
     print(f"target_test: {TARGET_TEST}")
@@ -630,6 +703,64 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     Boundaries:
     - Do not edit the tmux-team source checkout that launched this demo.
     - Do not mark success from chat alone; success requires the real test command to pass.
+    - Do not route work to tt-control.
+    """
+    (root / "goal.md").write_text(textwrap.dedent(goal), encoding="utf-8")
+
+
+def write_acp_goal(root: Path, metadata: dict[str, Any]) -> None:
+    goal = f"""\
+    Live tmux-team ACP demo objective.
+
+    Treat this as a real bugfix in a public repository snapshot, not as a scripted fixture. Do not inspect the tmux-team live-demo setup script or generated scenario metadata as a diagnostic shortcut. Work only from the target repository, tests, runtime state, and role messages.
+
+    Target repository:
+    - URL: {metadata["repo_url"]}
+    - Ref: {metadata["repo_ref"]}
+    - Base commit: {metadata["base_commit"]}
+
+    Role worktrees:
+    - orchestrator: {metadata["project"]}
+    - implementer: {metadata["implementer_worktree"]}
+    - collector: {metadata["collector_worktree"]}
+
+    Target behavior:
+    A seeded regression causes tmux-team inbox claiming to violate urgent-first priority ordering. Diagnose and fix it from tests and code, then verify the fix from the collector worktree.
+
+    Required team flow:
+    1. Orchestrator records a start milestone and starts one obligation for demo verification with a short next-update window.
+    2. Orchestrator runs operator show, status --verbose, dashboard --once --no-pane-preview, pane list --all, watchdog, memory show, and acp status for every role before dispatching. Confirm the role runtime is ACP, provider is cursor, and each role has a control socket and runtime session id.
+    3. After the obligation becomes overdue, orchestrator runs `tmux-team watchdog run --once --name {WATCHDOG_PRESSURE_NAME} --delivery control-socket --notify-role orchestrator --description "Live ACP demo pressure check" --goal "Escalate overdue demo obligations"`. Claim and complete the resulting watchdog message after reconciling the obligation.
+    4. Orchestrator broadcasts one notice-only checkpoint to implementer and collector.
+    5. Orchestrator sends collector exactly one baseline task with --correlation-key {CORRELATION_KEYS["baseline"]}. Collector identifies the minimal failing test and reports evidence with --reply-to-sender.
+    6. Orchestrator updates the obligation after accepting collector evidence.
+    7. Orchestrator sends implementer exactly one fix task with --correlation-key {CORRELATION_KEYS["fix"]}. Implementer fixes production code in its own worktree, runs the targeted test, commits, and replies with the commit SHA.
+    8. Orchestrator inspects relation state with inbox list --verbose and one role pane with pane capture --lines and --offset.
+    9. Orchestrator approves the implementer commit with stable approve <sha> --role {STABLE_SCOPE}.
+    10. Orchestrator sends collector exactly one verification task with --correlation-key {CORRELATION_KEYS["verification"]}. Collector syncs the approved stable commit and reruns the targeted test in its own worktree.
+    11. Orchestrator completes the obligation, records a passing-test milestone, checks status/watchdog/acp status, and broadcasts a final notice excluding orchestrator.
+    12. After reviewing completion notices, close them so the final inbox contains no unfinished work.
+
+    Correlation discipline:
+    - Reuse the exact correlation key for retries and follow-ups in one logical thread.
+    - Inspect existing message state before sending follow-up work.
+    - Do not use --allow-duplicate.
+
+    Useful target test command:
+    uv run --with-editable . python -m unittest {TARGET_TEST}
+
+    Success criteria:
+    - The target test fails before the fix and passes afterward.
+    - Implementer produces a real commit; collector verifies that same commit in its own worktree.
+    - Role communication uses durable inbox messages and completion replies.
+    - ACP role wakes use the private control socket, not tmux stdin.
+    - The run exercises status, dashboard, inbox relations, pane inspection, watchdog control-socket pressure, obligations, milestones, stable approve/sync, completion replies, and notice broadcasts.
+    - Non-orchestrator roles do not write milestones.
+
+    Boundaries:
+    - Do not call sleep or resume; ACP sleep/resume is intentionally unsupported and the operator tests fail-safe rejection separately.
+    - Do not edit the tmux-team source checkout that launched this demo.
+    - Do not mark success from chat alone; the real test must pass.
     - Do not route work to tt-control.
     """
     (root / "goal.md").write_text(textwrap.dedent(goal), encoding="utf-8")

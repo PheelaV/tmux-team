@@ -17,8 +17,10 @@ from tmux_team.bootstrap import (
     BootstrapError,
     RoleBinding,
     configure_session_truecolor,
+    control_plane_shell_command,
     default_session_name,
     prepare_role_worktrees,
+    resolve_tool_executable,
     role_startup_prompt,
     write_role_env_files,
 )
@@ -83,6 +85,13 @@ requires_stable_commit = true
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
         self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
+
+    def test_shell_control_plane_starts_persistent_bound_shell_directly(self) -> None:
+        command = control_plane_shell_command("codex", self.root, self.config, "shell")
+
+        self.assertIn(f"TMUX_TEAM_CONFIG={self.config}", command)
+        self.assertIn('"${SHELL:-/bin/sh}" -il', command)
+        self.assertNotIn("exited with status", command)
 
     def test_runtime_dir_uses_cli_then_env_then_config(self) -> None:
         env_runtime = self.root / "env-runtime"
@@ -2906,6 +2915,20 @@ can_notify = ["orchestrator"]
                 self.assertIn(expected_error, err)
 
     def test_orchestrator_can_approve_stable_commit_by_default(self) -> None:
+        worktree = self.root / "collector"
+        subprocess.run(["git", "-C", str(worktree), "init", "--quiet"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"], check=True)
+        (worktree / "result.txt").write_text("verified\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "result.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "--quiet", "-m", "verified"], check=True)
+        full_sha = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
         code, out, err = self.run_main(
             "--config",
             str(self.config),
@@ -2913,7 +2936,7 @@ can_notify = ["orchestrator"]
             "orchestrator",
             "stable",
             "approve",
-            "abc123",
+            full_sha[:7],
             "--role",
             "collector",
             "--by",
@@ -2923,11 +2946,11 @@ can_notify = ["orchestrator"]
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("collector: abc123 approved_by=orchestrator", out)
+        self.assertIn(f"collector: {full_sha} approved_by=orchestrator", out)
 
         code, out, err = self.run_cli("stable", "current", "--role", "collector")
         self.assertEqual(code, 0, err)
-        self.assertIn("collector: abc123 approved_by=orchestrator", out)
+        self.assertIn(f"collector: {full_sha} approved_by=orchestrator", out)
         self.assertIn("note=ready for verification", out)
 
     def test_policy_mode_permissive_is_cli_breakglass(self) -> None:
@@ -3082,6 +3105,29 @@ can_notify = ["orchestrator"]
         code, out, err = self.run_cli("stable", "current", "--role", "collector")
         self.assertEqual(code, 0, err)
         self.assertIn("global: abc123", out)
+
+    def test_role_stable_approval_stores_canonical_commit(self) -> None:
+        worktree = self.root / "collector"
+        subprocess.run(["git", "-C", str(worktree), "init", "--quiet"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"], check=True)
+        (worktree / "result.txt").write_text("verified\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "result.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "--quiet", "-m", "verified"], check=True)
+        full_sha = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        code, out, err = self.run_cli("stable", "approve", full_sha[:7], "--role", "collector", "--by", "tester")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(full_sha, out)
+        code, out, err = self.run_cli("stable", "current", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn(full_sha, out)
 
     def test_display_message_notification_never_types_into_pane(self) -> None:
         fake_dir, log_path = self.write_fake_tmux("0\t0\tcodex\n")
@@ -3261,6 +3307,7 @@ can_notify = ["orchestrator"]
         self.assertIn("tmux new-window -t tt-acp -n tt-agents", out)
         self.assertIn("toad acp --project-dir", out)
         self.assertIn("--control-socket", out)
+        self.assertIn("--compact-ui", out)
         self.assertIn("orchestrator.sock", out)
         self.assertIn("implementer.sock", out)
         self.assertIn("agent --force acp", out)
@@ -3322,6 +3369,25 @@ can_notify = ["orchestrator"]
         self.assertIn("ACP TUI binary not found: definitely-missing-toad", err)
         self.assertIn("Python 3.14+", err)
         self.assertFalse(generated_config.exists())
+
+    def test_acp_tui_resolves_from_tool_environment_bin(self) -> None:
+        tool_bin = self.root / "tool" / "bin"
+        tool_bin.mkdir(parents=True)
+        python = tool_bin / "python3.14"
+        python.write_text("", encoding="utf-8")
+        toad = tool_bin / "toad"
+        toad.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        toad.chmod(0o755)
+
+        with (
+            patch("tmux_team.bootstrap.shutil.which", return_value=None),
+            patch("tmux_team.bootstrap.sys.executable", str(python)),
+        ):
+            resolved = resolve_tool_executable("toad")
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertTrue(Path(resolved).samefile(toad))
 
     def test_bootstrap_dry_run_can_disable_truecolor(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"

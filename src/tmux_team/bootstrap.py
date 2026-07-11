@@ -6,6 +6,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -87,6 +88,23 @@ class BootstrapError(RuntimeError):
     pass
 
 
+def resolve_tool_executable(command: str) -> str | None:
+    resolved = shutil.which(command)
+    if resolved is not None:
+        return resolved
+    if Path(command).name != command:
+        return None
+    launcher = shutil.which("tmux-team")
+    if launcher is not None:
+        sibling = Path(launcher).resolve().parent / command
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return str(sibling)
+    sibling = Path(sys.executable).parent / command
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return None
+
+
 def bootstrap_team(
     *,
     project_root: Path,
@@ -146,11 +164,14 @@ def bootstrap_team(
         raise BootstrapError(f"tmux binary not found: {tmux_bin}")
     if runtime.uses_app_server and shutil.which(codex_bin) is None and not dry_run:
         raise BootstrapError(f"codex binary not found: {codex_bin}")
-    if runtime.uses_control_socket and shutil.which(acp_tui_bin) is None and not dry_run:
-        raise BootstrapError(
-            f"ACP TUI binary not found: {acp_tui_bin}. "
-            "Install the tmux-team[acp] extra with Python 3.14+, or pass --acp-tui-bin."
-        )
+    if runtime.uses_control_socket and not dry_run:
+        resolved_acp_tui_bin = resolve_tool_executable(acp_tui_bin)
+        if resolved_acp_tui_bin is None:
+            raise BootstrapError(
+                f"ACP TUI binary not found: {acp_tui_bin}. "
+                "Install the tmux-team[acp] extra with Python 3.14+, or pass --acp-tui-bin."
+            )
+        acp_tui_bin = resolved_acp_tui_bin
     if runtime.uses_control_socket and not acp_agent_command.strip():
         raise BootstrapError("ACP agent command is required")
     if control_mode == "codex" and shutil.which(codex_bin) is None and not dry_run:
@@ -575,6 +596,8 @@ def start_acp_role_panes(
                     "coalesceKey": "tmux-team-startup",
                 },
             )
+            time.sleep(3.0)
+            status = wait_for_acp_tui(role_sockets[role], timeout=3.0)
         except ACPControlError as exc:
             raise BootstrapError(f"ACP TUI role {role!r} did not start: {exc}") from exc
         role_bindings[role] = RoleBinding(
@@ -1057,7 +1080,7 @@ def control_plane_session_command(
 
 def control_plane_shell_command(codex_bin: str, project_root: Path, config_path: Path, control_mode: str) -> str:
     if control_mode == "shell":
-        return keep_open_command('printf "[tmux-team] tt-control shell\\n"', DEFAULT_CONTROL_WINDOW)
+        return f'exec env {CONFIG_PATH_ENV}={shlex.quote(str(config_path))} "${{SHELL:-/bin/sh}}" -il'
     codex_args = [
         "env",
         f"{CONFIG_PATH_ENV}={config_path}",
@@ -1108,6 +1131,7 @@ def acp_role_shell_command(
         f"tmux-team: {role}",
         "--control-socket",
         control_socket,
+        "--compact-ui",
         acp_agent_command,
     ]
     env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *tui_args]
