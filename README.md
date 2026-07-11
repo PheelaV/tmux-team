@@ -99,6 +99,10 @@ agent status                 # Cursor example
 toad acp "agent acp"         # optional direct provider/TUI check
 ```
 
+Use `agent --force acp` only for explicitly autonomous Cursor roles. For constrained roles, configure a project-local
+`.cursor/cli.json` allowlist; tmux-team never edits the user's global provider policy. See
+[External ACP TUI Runtime](docs/acp-runtime.md) for permission and worktree guidance.
+
 Install the Codex plugin/skill from the public marketplace metadata:
 
 ```bash
@@ -234,6 +238,9 @@ but never durable task bodies or a full transcript. The replacement Toad
 process starts in the same tmux pane and receives a recovery prompt that points
 to the durable capsule and current worktree. Inspect current and previous
 provider sessions with `tmux-team runtime show <role>`.
+
+See [External ACP TUI Runtime](docs/acp-runtime.md) for installation, constrained permissions, delivery mechanics,
+provider handoffs, and current lifecycle limits.
 
 If role agents need to message each other without stopping at Codex approval prompts, launch managed role panes with an explicit role execution policy:
 

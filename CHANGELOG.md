@@ -22,6 +22,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Added `tmux-team runtime show/prepare/switch` for safe ACP provider/model
   session replacement through draining, bounded handoff capsules, recovery
   prompts, and append-only session lineage.
+- Moved ACP-only preflight, permission, and runtime-switch instructions into an on-demand skill reference so Codex-only
+  teams do not load that provider-specific context.
 
 Prototype limits:
 

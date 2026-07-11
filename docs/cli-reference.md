@@ -29,6 +29,9 @@ The ACP prototype uses visible Toad panes. Toad owns the arbitrary ACP command a
 unique role control socket only for readiness, status, compact prompts, and cancellation. The `cursor-acp` runtime,
 `--cursor-bin`, and `tmux-team cursor` forms are compatibility aliases. ACP sleep/resume is not implemented.
 Install the temporary `tmux-team[acp]` extra with Python 3.14; the base package remains Python 3.11+.
+Use a provider's explicit autonomous flag only when intended. For constrained Cursor roles, configure project-local
+`.cursor/cli.json` permissions including `Shell(command)` and `Shell(tmux-team)`; see
+[External ACP TUI Runtime](acp-runtime.md). tmux-team does not mutate global provider permission files.
 
 Use `init` only when you want a config/runtime scaffold without launching Codex role panes.
 

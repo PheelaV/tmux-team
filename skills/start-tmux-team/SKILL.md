@@ -11,7 +11,7 @@ Use `tmux-team` as the control plane for visible agent roles in tmux. The sessio
 
 Use this file for ordinary bootstrap, role startup, and day-to-day operation.
 
-Read `references/invariants.md` when changing tmux-team behavior, debugging delivery/layout/lifecycle/recovery, migrating an existing team, or resolving a conflict between runtime state and expectations. Read `references/team-shapes.md` only for non-default role shapes.
+Read `references/invariants.md` when changing tmux-team behavior, debugging delivery/layout/lifecycle/recovery, migrating an existing team, or resolving a conflict between runtime state and expectations. Read `references/team-shapes.md` only for non-default role shapes. Read `references/acp-runtime.md` before bootstrapping, operating, or switching an external ACP TUI runtime; Codex-only teams do not need it.
 
 For full command details, use the repo docs: `docs/cli-reference.md`, `docs/receiving-and-hooks.md`, `docs/live-demo.md`, and `docs/invariants.md`.
 
@@ -41,20 +41,8 @@ Start from the target project root:
 tmux-team bootstrap --project-root . --goal "USER_GOAL"
 ```
 
-For an explicitly requested external ACP TUI team, verify Python 3.14+, Toad, and the provider command first:
-
-```bash
-python3.14 --version
-toad --version
-agent status
-tmux-team bootstrap --project-root . --agent-runtime acp \
-  --acp-tui-bin toad --acp-agent-command "agent acp" --acp-provider cursor \
-  --goal "USER_GOAL"
-```
-
-ACP roles use visible Toad panes. Toad owns the arbitrary ACP child command and session; tmux-team wakes it through a
-private role control socket. The socket carries compact prompts, never durable task bodies. ACP sleep/resume is not
-implemented. Put provider-specific execution flags in `--acp-agent-command`; `--acp-provider` is metadata only.
+For an explicitly requested external ACP TUI team, read `references/acp-runtime.md`, complete its provider preflight,
+and use its bootstrap and permission guidance. Do not apply ACP setup to the default Codex runtime.
 
 Default roles:
 
@@ -112,8 +100,8 @@ Codex bootstrap creates or updates:
 - `.tmux-team/team.toml`, `team.sqlite`, pane metadata, env discovery files, and scratchpad memory;
 - the initial orchestrator inbox message and app-server wake when a goal is provided.
 
-ACP TUI bootstrap keeps `tt-control` and visible `tt-agents` panes, omits `tt-app-server`, waits for each role's
-`ping`/`status` handshake, and records its private control socket and runtime session ID in team config.
+ACP TUI bootstrap keeps `tt-control` and visible `tt-agents` panes and uses private role control sockets; the detailed
+runtime contract is in `references/acp-runtime.md`.
 
 After startup, report the tmux session, config path, app-server endpoint, role thread IDs, and attach command:
 
@@ -154,40 +142,12 @@ Do not reread the full skill on ordinary app-server wakes when the role contract
 
 App-server wakes are blunt interrupts. They say durable inbox work exists; the task body must be claimed from SQLite inbox state.
 
-### ACP Runtime Switch Contract
-
-An ACP provider/model switch that changes the provider session is a lifecycle
-boundary, not an ordinary wake.
-
-Before a switch:
-
-1. Stop claiming new work and let the operator put the role in `draining`.
-2. Reach an idle safe point; do not switch during a tool call, approval, or
-   partially applied mutation.
-3. Update scratchpad memory with the current task, decisions, blockers, owned
-   artifacts, and exact next action.
-4. Ensure active todos accurately distinguish completed, open, and superseded
-   work.
-5. Create a bounded handoff capsule with `tmux-team runtime prepare`; never put
-   task bodies, hidden reasoning, credentials, or a full transcript in it.
-
-After the new ACP session starts:
-
-1. Load this skill and the current role contract.
-2. Read scratchpad memory and the handoff capsule.
-3. Inspect Git status and diff directly.
-4. Recover active todos and run `tmux-team inbox next`.
-5. Verify the previous session's reported state against durable evidence before
-   editing or rerunning work.
-6. Continue from the recorded next action without repeating completed work.
-
-Same-session model/effort changes do not require a capsule when the ACP agent
-advertises and successfully applies a compatible config option. Do not claim
-that capability when the TUI control protocol cannot prove it.
+ACP provider replacement is a lifecycle boundary, not an ordinary wake. Follow the prepare/switch/recovery contract in
+`references/acp-runtime.md`.
 
 Role loop on startup or wake:
 
-1. Confirm the tmux-team role contract is loaded; after context reset, run `tmux-team codex session-context`.
+1. Confirm the tmux-team role contract is loaded; after a Codex context reset, run `tmux-team codex session-context`.
 2. Run `tmux-team memory show` before claiming work.
 3. Run `tmux-team inbox next`.
 4. If no message exists, park without writing routine idle memory.
