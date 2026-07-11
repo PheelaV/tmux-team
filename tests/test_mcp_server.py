@@ -5,6 +5,7 @@ import shlex
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from io import StringIO
 from pathlib import Path
 
@@ -53,7 +54,7 @@ notify_method = "app-server-turn"
 
     def test_tool_lifecycle_uses_store_without_mcp_dependency(self) -> None:
         store = self.store()
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             sent = call_tool(
                 store,
                 conn,
@@ -91,7 +92,7 @@ notify_method = "app-server-turn"
 
     def test_team_status_counts_stale_claimed_as_pending(self) -> None:
         store = self.store()
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             sent = call_tool(
                 store,
                 conn,
@@ -117,7 +118,7 @@ notify_method = "app-server-turn"
 
     def test_team_complete_can_reply_to_sender(self) -> None:
         store = self.store()
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             sent = call_tool(
                 store,
                 conn,
@@ -156,7 +157,7 @@ notify_method = "app-server-turn"
 
     def test_send_default_wake_uses_app_server_only_and_reports_missing_binding(self) -> None:
         store = self.store()
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             sent = call_tool(store, conn, "team_send", {"to": "orchestrator", "summary": "Wake", "body": "body"})
 
             self.assertEqual(sent["message"]["state"], "queued")
@@ -166,7 +167,7 @@ notify_method = "app-server-turn"
 
     def test_notify_rejects_tmux_send_keys_surface(self) -> None:
         store = self.store()
-        with store.connect() as conn, self.assertRaises(ToolCallError):
+        with closing(store.connect()) as conn, self.assertRaises(ToolCallError):
             call_tool(store, conn, "team_notify", {"role": "orchestrator", "method": "send-keys"})
 
     def test_team_send_uses_project_extension_hooks(self) -> None:
@@ -200,7 +201,7 @@ print(json.dumps({"ok": True, "patch": {"message": message}}))
         )
 
         store = self.store()
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             sent = call_tool(store, conn, "team_send", {"to": "orchestrator", "summary": "Wake", "wake": False})
 
             self.assertEqual(sent["message"]["recipient"], "implementer")
@@ -212,7 +213,7 @@ print(json.dumps({"ok": True, "patch": {"message": message}}))
         self.assertIn("team_wake", tool_names)
 
         store = self.store()
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             input_stream = StringIO(
                 json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
                 + "\n"

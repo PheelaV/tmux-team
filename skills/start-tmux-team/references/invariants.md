@@ -6,10 +6,12 @@ Follow these constraints when changing or debugging tmux-team behavior. Ordinary
 
 The Codex session that invokes the skill is the operator control session.
 
-- Name the launcher/operator tmux window `tt-control`.
+- Name the runtime-matched operator-agent window `tt-control`: Codex for Codex teams, Toad for ACP teams.
 - Do not treat `tt-control` as a managed role.
 - Do not route `tmux-team send` work to `tt-control` unless the operator explicitly adds it as a role.
 - Record operator recovery metadata in `[operator]` when available. `operator.pane` and `operator.codex_thread_id` help recovery, but they do not make the control pane a managed role.
+- Resolve canonical ACP providers locally: Cursor `agent acp`, Codex `codex-acp`, Claude `claude-agent-acp`, and Pool `pool acp`.
+  Require an explicit command for any other provider; never invent an ACP URL or alter global provider policy.
 
 ## App Server
 
@@ -18,6 +20,9 @@ The app-server is isolated infrastructure.
 - Keep it in its own tmux window named `tt-app-server`.
 - Do not group it with role agents.
 - Use it for app-server `turn/start` wake delivery.
+
+Experimental ACP TUI roles do not create `tt-app-server`. Their visible Toad pane owns the configured ACP child and
+private control socket.
 
 ## Role Layout
 
@@ -45,18 +50,22 @@ When roles already have separate git worktrees, bootstrap must preserve them wit
 
 ## Delivery
 
-Never use tmux stdin as the production wake path for Codex roles.
+Never use tmux stdin as the production wake path for managed agent roles.
 
 - Do not paste task bodies into panes.
 - Do not use `tmux send-keys` for normal Codex wake.
 - Use app-server `turn/start`.
+- Experimental ACP roles use a private Unix socket into the visible Toad TUI, which queues `session/prompt`.
+- Each ACP role has a unique socket; bootstrap must complete a versioned `ping`/`status` handshake before sending the
+  startup prompt.
 - Wake prompts should be blunt interrupts; do not restate the skill, scratchpad rules, or ack/complete syntax in every wake turn.
 - App-server wake prompts may include compact metadata for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. They must not include the task body.
 - If an urgent message is pending, the app-server wake must tell the role to stop at the current safe point and claim the urgent message before continuing other work.
 - Durable task content must be claimed from the tmux-team inbox.
 - A role handles work as: `inbox next -> ack -> do work -> complete --reply-to-sender -> inbox next` until there is no pending work. Startup prompts should include explicit `--role <role>` commands; short commands are allowed only when role discovery works.
+- After dispatching delegated work, the sender must end its turn and rely on the configured wake transport. It must not poll `inbox next` or sleep in a polling loop while waiting; doing so can race and delay the queued completion wake.
 - Only `inbox next` proves the role has no claimable work. `inbox list --state pending` is the matching read-only supervision view and includes queued, notified, retrying, and expired claimed work; narrower state filters are diagnostic only.
-- Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command.
+- Use `--reply-to-sender` when completing work delegated by another managed role, so the sender is woken without a second hand-written send command. Do not send the same result again as a new task.
 - Completion notices are not team-level reconciliation by themselves. If a non-orchestrator role receives a completion notice with material impact on the team goal, stable commit, blocker state, external run state, or operator-visible result, it must send or complete a concise upward report to `orchestrator`.
 - Completion can carry detail with `--body` or `--body-file`; keep `--summary` concise.
 - Role panes are bound to team config and role; do not put full config paths in normal wake instructions.
@@ -86,7 +95,45 @@ tmux-team pane capture collector --lines 120 --offset 40
 
 Every Codex role spawned by bootstrap must have the `start-tmux-team` skill available in the active `CODEX_HOME`. The skill may not be loaded into the current turn context until triggered, so wake prompts still include a compact role wake signal.
 
+Every experimental ACP role must have the same skill available in the provider's active skill location. Its pane is
+the external Toad TUI, which owns the ACP child and session. ACP exact resume must prove `session/load` capability and
+session identity; handoff resume must be explicitly selected.
+
 Do not reload the full skill on every ordinary app-server wake. Use the loaded tmux-team role contract version and role loop when present. Use `tmux-team codex session-context` after startup/resume/clear/compact recovery, explicit operator request, or contract/version mismatch.
+
+## ACP Runtime Handoffs
+
+A provider/model change that creates a new ACP session must preserve continuity
+through durable tmux-team state and a bounded handoff capsule.
+
+- Provider session IDs are replaceable execution identifiers, not role identity.
+- Refuse a switch while the role TUI is busy or asking unless the operator
+  explicitly requests cooperative cancellation and the role reaches idle.
+- Put the role in `draining` before replacing its ACP TUI process.
+- The source role must update scratchpad memory and active todos before handoff.
+- Capsules may include message IDs, summaries, todo state, scratchpad excerpts,
+  Git state, decisions, blockers, and next action.
+- Capsules must not include inbox task bodies, credentials, hidden reasoning, or
+  full transcripts.
+- A new session must read the skill, memory, capsule, Git state, active todos,
+  and inbox before continuing.
+- Record previous/new provider session provenance in append-only lineage state.
+- A failed switch leaves the role draining; never silently loop through fresh
+  sessions.
+
+## ACP Same-Session Configuration
+
+- Operate only on live `acp_tui` roles with a control socket. Discover option
+  IDs, categories, types, current values, and select choices from Toad.
+- Configuration changes require idle, non-quiesced state and one stable session
+  ID. Send repeated changes sequentially and verify every full response.
+- Store every confirmed current value in `acp_config`; derive model, effort, and
+  mode from the first matching ACP category. Keep other categories only in the
+  complete map.
+- Record each confirmed change in JSONL lineage and SQLite. Preserve prior
+  successes if a later change fails; never claim rollback.
+- Same-session changes create neither handoff capsules nor replacement
+  sessions.
 
 ## Role Memory
 
@@ -94,6 +141,7 @@ Every managed role has a scratchpad memory file declared by config.
 
 - Bootstrap must create the scratchpad if it is missing.
 - A newly spawned role must be instructed to read this skill, read memory with an explicit `--role <role>` command, then claim inbox work or park.
+- `compact` and `guided` startup profiles must both require loading this skill and these invariants. They vary repeated prompt detail only and must not fork behavior by provider/model name.
 - Codex `SessionStart` hooks for `startup|resume|clear|compact` should inject `tmux-team codex session-context` output after resets. This restores the same role contract version as startup; it is not a new task and does not replace the inbox.
 - A role must run `tmux-team memory show --role <role>` before claiming pending inbox work unless role discovery is known to work.
 - Use memory for durable context: long-lived goals, constraints, decisions, blockers, handoff notes, current worktree/commit/dirty state, running jobs, owned artifacts, stable inputs, and next action.

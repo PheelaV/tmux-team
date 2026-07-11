@@ -14,6 +14,25 @@ tmux-team bootstrap --project-root . --agent-layout separate-windows
 tmux-team bootstrap --project-root . --no-truecolor
 ```
 
+Experimental external ACP TUI roles use the same layout and durable inbox:
+
+```bash
+tmux-team bootstrap --project-root . --agent-runtime acp \
+  --acp-tui-bin toad --acp-provider cursor \
+  --goal "Inspect the failing test."
+tmux-team acp status orchestrator
+tmux-team acp wake orchestrator
+tmux-team acp cancel orchestrator
+```
+
+The ACP prototype uses visible Toad panes. Toad owns the arbitrary ACP command and its session; tmux-team uses a
+unique role control socket for readiness, status, compact prompts, cancellation, and advertised session
+configuration. ACP sleep/resume supports explicit `exact` and `handoff` policies.
+Install the temporary `tmux-team[acp]` extra with Python 3.14; the base package remains Python 3.11+.
+Use a provider's explicit autonomous flag only when intended. For constrained Cursor roles, configure project-local
+`.cursor/cli.json` permissions including `Shell(command)` and `Shell(tmux-team)`; see
+[External ACP TUI Runtime](acp-runtime.md). tmux-team does not mutate global provider permission files.
+
 Use `init` only when you want a config/runtime scaffold without launching Codex role panes.
 
 ```bash
@@ -253,6 +272,90 @@ tmux-team send --to implementer --summary "..." --body-file task.md --notify-met
 
 `app-server-turn` submits a real Codex turn to the role's thread. The pane stays the live Codex UI, but `tmux-team` never types into the pane.
 
+ACP TUI delivery uses `control-socket`: `tmux-team send` writes the durable task to SQLite, sends a compact wake to
+the role's private Unix socket, and Toad queues an ACP `session/prompt`. The task body is never sent through the
+socket. Urgent wakes are marked urgent and repeated inbox wakes use `coalesceKey="inbox"`.
+
+## ACP Same-Session Configuration
+
+List every option advertised by a live ACP role:
+
+```bash
+tmux-team runtime options implementer
+```
+
+The output includes each option ID, category, type, current value, and select
+choices. Unknown categories and grouped choices remain visible.
+
+Change one or more advertised options without starting a new session:
+
+```bash
+tmux-team runtime configure implementer \
+  --set '<config-id>=<advertised-value>' \
+  --set '<boolean-id>=true'
+```
+
+`runtime configure` requires an idle, non-quiesced Toad session and uses the
+role-state-change authorization policy. It accepts only exact advertised
+select values and lowercase `true` or `false` for booleans. Changes are sent
+sequentially. Each returned complete option list is authoritative, must retain
+the same session ID, and must confirm the requested value. Confirmed state is
+persisted in `acp_config`; the first `model`, `thought_level`, and `mode`
+categories also update `acp_model`, `acp_effort`, and `acp_mode`. A later
+failure preserves earlier confirmed changes and their audit events; no rollback
+or new session is claimed.
+
+These commands require Toad's `configOptions`/`setConfig` control actions. The
+temporary `tmux-team[acp]` extra pins the compatible feature branch.
+
+## ACP Runtime Handoffs
+
+Inspect the current provider session and lineage:
+
+```bash
+tmux-team runtime show implementer
+```
+
+At an idle safe point, create a provider-neutral handoff capsule and put the
+role into draining:
+
+```bash
+tmux-team runtime prepare implementer \
+  --summary "Parser fix is implemented; focused test passes; run the full parser suite next." \
+  --body-file result.md
+```
+
+Replace the ACP provider/model session in the same visible pane:
+
+```bash
+tmux-team runtime switch implementer \
+  --acp-agent-command 'claude-agent-acp' \
+  --provider claude \
+  --model sonnet \
+  --effort high \
+  --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md
+```
+
+Canonical `cursor`, `codex`, `claude`, and `pool` providers default to `agent acp`, `codex-acp`,
+`claude-agent-acp`, and `pool acp`.
+
+Startup guidance can be selected team-wide with `--instruction-profile compact|guided` and overridden per role with
+`--role-instruction-profile ROLE=PROFILE`. Both profiles mandate loading the same `start-tmux-team` skill and invariants;
+the profile changes repeated prompt detail, not the operating contract. Resume accepts the same switches as overrides.
+Provider-specific flags belong inside `--acp-agent-command`; `--model` and
+`--effort` record provider-neutral provenance for the new session. Use
+`--dry-run` to inspect the `tmux respawn-pane` command without mutation. An
+active turn is refused by default; `--cancel-active` requests cooperative
+cancellation and still requires the TUI to reach idle.
+
+Only the latest capsule emitted by `runtime prepare` for that role is accepted. Its digest and source session must
+still match; arbitrary, edited, stale, or cross-role files are rejected. Optional handoff bodies are capped at 16,000
+characters. Before pane replacement, Toad's control socket atomically quiesces new external prompts; an idle status
+check alone is not treated as a safe boundary.
+
+The switch creates a new provider conversation. Use `runtime configure`, not a
+handoff, for options advertised by the current session.
+
 ## Runtime State
 
 Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the configured runtime directory and includes:
@@ -262,6 +365,8 @@ Config lives at `.tmux-team/team.toml` by default. Runtime state lives in the co
 - `milestones.jsonl` for append-only operator milestones;
 - `messages/*.md` for message bodies;
 - `sleeps/*.toml` for operator-facing sleep/restart snapshots.
+- `handoffs/<role>/*.md` and `handoffs/<role>/lineage.jsonl` for bounded ACP
+  runtime-switch continuity and provenance.
 
 Persistent storage defaults to `.tmux-team/runtime`. Override it with `--runtime-dir`, `TMUX_TEAM_HOME`, or `[team].runtime_dir` in `.tmux-team/team.toml`; that is also the precedence order.
 
@@ -272,9 +377,17 @@ Use `sleep` to snapshot and stop managed role, app-server, and watchdog windows 
 ```bash
 tmux-team sleep
 tmux-team sleep --dry-run
+tmux-team sleep --acp-resume-policy exact
 ```
 
 Use `resume` to restore from `.tmux-team/runtime/sleeps/latest.toml` or a chosen snapshot. If no graceful sleep snapshot exists, `resume` builds a recovery snapshot from durable `team.toml` and SQLite runtime state when the role thread ids, app-server endpoints, worktrees, and running watchdog rows are available.
+
+For ACP, `exact` requires saved and currently advertised `session/load` capability and verifies the restored session
+ID. `handoff` is an explicit fresh-session recovery from the saved capsule. Override only intentionally:
+
+```bash
+tmux-team resume --acp-resume-policy handoff
+```
 
 ```bash
 tmux-team resume

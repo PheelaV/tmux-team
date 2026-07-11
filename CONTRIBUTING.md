@@ -4,7 +4,7 @@ Use the checkout for local development:
 
 ```bash
 make install-dev
-make install-skill
+make install-skill SKILL_PROVIDERS=codex
 ```
 
 Run the default local checks before committing:

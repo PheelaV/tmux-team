@@ -8,7 +8,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -16,9 +16,14 @@ from unittest.mock import patch
 from tmux_team.bootstrap import (
     BootstrapError,
     RoleBinding,
+    acp_control_shell_command,
+    apply_acp_initial_config,
+    codex_control_shell_command,
     configure_session_truecolor,
     default_session_name,
     prepare_role_worktrees,
+    render_team_config,
+    resolve_tool_executable,
     role_startup_prompt,
     write_role_env_files,
 )
@@ -28,6 +33,7 @@ from tmux_team.dashboard import (
     DashboardSnapshot,
     collect_dashboard_snapshot,
     dashboard_codex_chips,
+    dashboard_runtime_chips,
     format_alert_line,
     format_milestone_line,
     format_plain_alert_line,
@@ -82,6 +88,80 @@ requires_stable_commit = true
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
         self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
+
+    def test_acp_config_records_negotiated_resume_capability(self) -> None:
+        rendered = render_team_config(
+            "test",
+            str(self.root / "runtime"),
+            "",
+            {
+                "orchestrator": RoleBinding(
+                    thread_id="",
+                    pane="%1",
+                    worktree=self.root,
+                    session_id="saved-session",
+                    control_socket=str(self.root / "runtime" / "orchestrator.sock"),
+                    resume_supported=True,
+                )
+            },
+            agent_runtime="acp",
+        )
+
+        data = tomllib.loads(rendered)
+        self.assertTrue(data["roles"]["orchestrator"]["acp_resume_supported"])
+
+    def test_control_plane_uses_runtime_agent_without_role_binding(self) -> None:
+        command = codex_control_shell_command("codex", self.root, self.config)
+
+        self.assertIn(f"TMUX_TEAM_CONFIG={self.config}", command)
+        self.assertIn("tmux-team operator control agent", command)
+        self.assertIn("exited with status", command)
+
+        acp_command = acp_control_shell_command(
+            "toad",
+            "agent acp",
+            self.root,
+            self.config,
+            self.root / "runtime" / "acp" / "tt-control.sock",
+        )
+        self.assertIn("tmux-team control", acp_command)
+        self.assertIn("tt-control.sock", acp_command)
+        self.assertNotIn("TMUX_TEAM_ROLE", acp_command)
+
+    def test_acp_initial_config_is_confirmed_before_startup_prompt(self) -> None:
+        def options(model: str, effort: str, fast: bool) -> list[dict[str, object]]:
+            return [
+                {"id": "model", "type": "select", "category": "model", "currentValue": model},
+                {
+                    "id": "reasoning_effort",
+                    "type": "select",
+                    "category": "thought_level",
+                    "currentValue": effort,
+                },
+                {"id": "fast-mode", "type": "boolean", "category": "model_config", "currentValue": fast},
+            ]
+
+        responses = [
+            {"sessionId": "session-1", "configOptions": options("sol", "high", True)},
+            {"sessionId": "session-1", "configOptions": options("terra", "high", True)},
+            {"sessionId": "session-1", "configOptions": options("terra", "medium", True)},
+            {"sessionId": "session-1", "configOptions": options("terra", "medium", False)},
+        ]
+        with patch("tmux_team.bootstrap.send_control_request", side_effect=responses) as request:
+            snapshot = apply_acp_initial_config(
+                self.root / "role.sock",
+                "session-1",
+                ("model=terra", "reasoning_effort=medium", "fast-mode=false"),
+            )
+
+        self.assertEqual(
+            [call.args[1]["action"] for call in request.call_args_list],
+            ["configOptions", "setConfig", "setConfig", "setConfig"],
+        )
+        self.assertIs(request.call_args_list[-1].args[1]["value"], False)
+        self.assertEqual(snapshot["model"], "terra")
+        self.assertEqual(snapshot["effort"], "medium")
+        self.assertEqual(dict(snapshot["values"])["fast-mode"], False)
 
     def test_runtime_dir_uses_cli_then_env_then_config(self) -> None:
         env_runtime = self.root / "env-runtime"
@@ -622,7 +702,7 @@ runtime_dir = "{other_runtime}"
 
     def test_dashboard_role_filter_scopes_watchdogs_and_notification_alerts(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.upsert_watchdog_runner(
                 conn,
                 name="collector-pressure",
@@ -675,7 +755,7 @@ runtime_dir = "{other_runtime}"
 
     def test_dashboard_notification_alerts_move_stale_items_to_history(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.record_notification(
                 conn,
                 None,
@@ -710,7 +790,7 @@ runtime_dir = "{other_runtime}"
 
     def test_dashboard_role_filter_includes_implicit_orchestrator_watchdog_target(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.upsert_watchdog_runner(
                 conn,
                 name="team-pressure",
@@ -757,6 +837,16 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(chips, "yolo e:high m:gpt-5.5 p:team-role cfg:2")
         self.assertNotIn("fast", chips)
         self.assertEqual(dashboard_codex_chips({}), "-")
+
+    def test_dashboard_runtime_chips_distinguish_acp_and_codex(self) -> None:
+        self.assertEqual(
+            dashboard_runtime_chips("acp_tui", {"acp_provider": "cursor"}),
+            "acp cursor",
+        )
+        self.assertEqual(
+            dashboard_runtime_chips("app_server_remote_tui", {"codex_model": "gpt-5.5"}),
+            "codex m:gpt-5.5",
+        )
 
     def test_dashboard_concise_rows_keep_key_state_without_full_detail(self) -> None:
         obligation = {
@@ -805,7 +895,7 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             snapshot = collect_dashboard_snapshot(store, conn, role_filter="collector", include_pane_preview=False)
 
         self.assertEqual(len(snapshot.memories), 1)
@@ -923,7 +1013,7 @@ runtime_dir = "{other_runtime}"
         self.assertEqual(code, 0, err)
         notified_id = out.split()[0]
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             conn.execute("UPDATE messages SET state = 'notified' WHERE id = ?", (notified_id,))
             conn.commit()
 
@@ -1220,7 +1310,7 @@ runtime_dir = "{other_runtime}"
         self.assertIn("pressure_skipped: active message", out)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             count = conn.execute(
                 """
                 SELECT COUNT(*) FROM messages
@@ -1404,13 +1494,13 @@ exit 9
 
     def test_watchdog_interval_sleep_wakes_on_interval_update(self) -> None:
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.upsert_watchdog_runner(conn, name="default", state="running", interval_seconds=60)
 
             result: list[bool] = []
 
             def wait_for_interval() -> None:
-                with store.connect() as thread_conn:
+                with closing(store.connect()) as thread_conn:
                     result.append(sleep_watchdog_interval(store, thread_conn, name="default", interval_seconds=60))
 
             thread = threading.Thread(
@@ -1531,7 +1621,7 @@ exit 9
         self.assertIn("summary=waiting for verifier", out)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             count = conn.execute("SELECT COUNT(*) AS n FROM obligations WHERE id = 'watch_legacy'").fetchone()["n"]
         self.assertEqual(count, 1)
 
@@ -1625,7 +1715,7 @@ exit 9
         obligation_id = out.split()[0]
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             conn.execute(
                 "UPDATE obligations SET next_update_at = ? WHERE id = ?",
                 ("2000-01-01T00:00:00+00:00", obligation_id),
@@ -1740,7 +1830,7 @@ exit 9
         self.assertIn("safe_to_close=no", out)
 
         store = Store(load_config(self.config))
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             row = store.record_watchdog_runner_run(
                 conn,
                 name="default",
@@ -2895,6 +2985,20 @@ can_notify = ["orchestrator"]
                 self.assertIn(expected_error, err)
 
     def test_orchestrator_can_approve_stable_commit_by_default(self) -> None:
+        worktree = self.root / "collector"
+        subprocess.run(["git", "-C", str(worktree), "init", "--quiet"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"], check=True)
+        (worktree / "result.txt").write_text("verified\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "result.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "--quiet", "-m", "verified"], check=True)
+        full_sha = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
         code, out, err = self.run_main(
             "--config",
             str(self.config),
@@ -2902,7 +3006,7 @@ can_notify = ["orchestrator"]
             "orchestrator",
             "stable",
             "approve",
-            "abc123",
+            full_sha[:7],
             "--role",
             "collector",
             "--by",
@@ -2912,11 +3016,11 @@ can_notify = ["orchestrator"]
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("collector: abc123 approved_by=orchestrator", out)
+        self.assertIn(f"collector: {full_sha} approved_by=orchestrator", out)
 
         code, out, err = self.run_cli("stable", "current", "--role", "collector")
         self.assertEqual(code, 0, err)
-        self.assertIn("collector: abc123 approved_by=orchestrator", out)
+        self.assertIn(f"collector: {full_sha} approved_by=orchestrator", out)
         self.assertIn("note=ready for verification", out)
 
     def test_policy_mode_permissive_is_cli_breakglass(self) -> None:
@@ -3072,6 +3176,29 @@ can_notify = ["orchestrator"]
         self.assertEqual(code, 0, err)
         self.assertIn("global: abc123", out)
 
+    def test_role_stable_approval_stores_canonical_commit(self) -> None:
+        worktree = self.root / "collector"
+        subprocess.run(["git", "-C", str(worktree), "init", "--quiet"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"], check=True)
+        (worktree / "result.txt").write_text("verified\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "result.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "--quiet", "-m", "verified"], check=True)
+        full_sha = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        code, out, err = self.run_cli("stable", "approve", full_sha[:7], "--role", "collector", "--by", "tester")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(full_sha, out)
+        code, out, err = self.run_cli("stable", "current", "--role", "collector")
+        self.assertEqual(code, 0, err)
+        self.assertIn(full_sha, out)
+
     def test_display_message_notification_never_types_into_pane(self) -> None:
         fake_dir, log_path = self.write_fake_tmux("0\t0\tcodex\n")
 
@@ -3166,6 +3293,17 @@ can_notify = ["orchestrator"]
         self.assertIn("bounded gated handoff", prompt)
         self.assertIn("approve/cancel/update follow-up", prompt)
 
+    def test_compact_startup_prompt_keeps_mandatory_skill_and_role_loop(self) -> None:
+        compact = role_startup_prompt("collector", agent_runtime="acp", instruction_profile="compact")
+        guided = role_startup_prompt("collector", agent_runtime="acp", instruction_profile="guided")
+
+        self.assertIn("instruction profile: compact", compact)
+        self.assertIn("skill load is mandatory", compact)
+        self.assertIn("tmux-team memory show --role collector", compact)
+        self.assertIn("tmux-team inbox next --role collector", compact)
+        self.assertIn("do not poll or invent work", compact)
+        self.assertLess(len(compact), len(guided))
+
     def test_bootstrap_dry_run_plans_visible_remote_tui_team(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"
 
@@ -3213,8 +3351,141 @@ can_notify = ["orchestrator"]
         self.assertIn('scratchpad = ".tmux-team/memory/orchestrator.md"', out)
         self.assertIn('mode = "app_server_remote_tui"', out)
         self.assertIn('notify_method = "app-server-turn"', out)
+        self.assertIn("runtime: codex", out)
+        self.assertNotIn("toad acp", out)
+        self.assertNotIn("control_socket", out)
         self.assertIn("session: tt-bootstrap", out)
         self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_plans_visible_acp_tui_team(self) -> None:
+        generated_config = self.root / ".tmux-team" / "acp-generated.toml"
+
+        code, out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--runtime-dir",
+            ".tmux-team/runtime",
+            "--session",
+            "tt-acp",
+            "--roles",
+            "orchestrator,implementer",
+            "--agent-runtime",
+            "acp",
+            "--acp-tui-bin",
+            "toad",
+            "--acp-agent-command",
+            "agent --force acp",
+            "--acp-provider",
+            "cursor",
+            "--instruction-profile",
+            "compact",
+            "--role-instruction-profile",
+            "implementer=guided",
+            "--dry-run",
+        )
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("tmux new-session -d -s tt-acp -n tt-control", out)
+        self.assertIn("tmux-team control", out)
+        self.assertIn("tt-control.sock", out)
+        self.assertIn("tmux new-window -t tt-acp -n tt-agents", out)
+        self.assertIn("toad acp --project-dir", out)
+        self.assertIn("--control-socket", out)
+        self.assertIn("--compact-ui", out)
+        self.assertIn("orchestrator.sock", out)
+        self.assertIn("implementer.sock", out)
+        self.assertIn("agent --force acp", out)
+        self.assertNotIn("tt-app-server", out)
+        self.assertNotIn("codex app-server", out)
+        self.assertIn('mode = "acp_tui"', out)
+        self.assertIn('notify_method = "control-socket"', out)
+        self.assertIn("[operator]", out)
+        self.assertIn('agent_runtime = "acp"', out)
+        self.assertIn('runtime_session_id = "dry-session-orchestrator"', out)
+        self.assertIn('acp_provider = "cursor"', out)
+        self.assertIn('[roles.orchestrator]\nstate = "active"', out)
+        self.assertIn('instruction_profile = "compact"', out)
+        self.assertIn('instruction_profile = "guided"', out)
+        self.assertIn("runtime: acp", out)
+        self.assertIn("orchestrator: session_id=dry-session-orchestrator", out)
+        self.assertFalse(generated_config.exists())
+
+    def test_bootstrap_dry_run_uses_canonical_provider_presets(self) -> None:
+        for provider, command in (
+            ("codex", "codex-acp"),
+            ("claude", "claude-agent-acp"),
+            ("pool", "pool acp"),
+        ):
+            with self.subTest(provider=provider):
+                code, out, err = self.run_main(
+                    "bootstrap",
+                    "--project-root",
+                    str(self.root),
+                    "--config",
+                    str(self.root / f"{provider}.toml"),
+                    "--session",
+                    f"tt-{provider}",
+                    "--roles",
+                    "orchestrator",
+                    "--agent-runtime",
+                    "acp",
+                    "--acp-provider",
+                    provider,
+                    "--dry-run",
+                )
+
+                self.assertEqual(code, 0, err)
+                self.assertIn("--compact-ui", out)
+                self.assertIn(f'acp_provider = "{provider}"', out)
+                self.assertIn(f'acp_agent_command = "{command}"', out)
+
+    def test_bootstrap_acp_reports_missing_toad_before_creating_state(self) -> None:
+        generated_config = self.root / ".tmux-team" / "missing-toad.toml"
+
+        code, _out, err = self.run_main(
+            "bootstrap",
+            "--project-root",
+            str(self.root),
+            "--config",
+            str(generated_config),
+            "--session",
+            "tt-acp",
+            "--roles",
+            "orchestrator",
+            "--agent-runtime",
+            "acp",
+            "--tmux-bin",
+            "/usr/bin/true",
+            "--acp-tui-bin",
+            "definitely-missing-toad",
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("ACP TUI binary not found: definitely-missing-toad", err)
+        self.assertIn("Python 3.14+", err)
+        self.assertFalse(generated_config.exists())
+
+    def test_acp_tui_resolves_from_tool_environment_bin(self) -> None:
+        tool_bin = self.root / "tool" / "bin"
+        tool_bin.mkdir(parents=True)
+        python = tool_bin / "python3.14"
+        python.write_text("", encoding="utf-8")
+        toad = tool_bin / "toad"
+        toad.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        toad.chmod(0o755)
+
+        with (
+            patch("tmux_team.bootstrap.shutil.which", return_value=None),
+            patch("tmux_team.bootstrap.sys.executable", str(python)),
+        ):
+            resolved = resolve_tool_executable("toad")
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertTrue(Path(resolved).samefile(toad))
 
     def test_bootstrap_dry_run_can_disable_truecolor(self) -> None:
         generated_config = self.root / ".tmux-team" / "generated.toml"
@@ -3571,11 +3842,44 @@ exit 0
         self.assertIn("tmux kill-window -t tt:tt-app-server", out)
         self.assertFalse((self.root / "runtime" / "sleeps" / "latest.toml").exists())
 
+    def test_sleep_dry_run_plans_exact_acp_resume_snapshot(self) -> None:
+        acp_config = self.root / ".tmux-team" / "acp-team.toml"
+        worktree = self.root / "acp-worktree"
+        worktree.mkdir()
+        acp_config.write_text(
+            f"""[team]
+name = "acp-team"
+runtime_dir = "{self.root / "acp-runtime"}"
+
+[roles.orchestrator]
+mode = "acp_tui"
+state = "active"
+pane = "tt:tt-agents.0"
+worktree = "{worktree}"
+notify_method = "control-socket"
+control_socket = "{self.root / "acp-runtime" / "acp" / "orchestrator.sock"}"
+acp_tui_bin = "toad"
+acp_agent_command = "agent acp"
+acp_provider = "cursor"
+runtime_session_id = "saved-session"
+acp_resume_supported = true
+""",
+            encoding="utf-8",
+        )
+
+        code, out, err = self.run_main("--config", str(acp_config), "sleep", "--dry-run")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("snapshot: (dry-run)", out)
+        self.assertIn("roles: 1", out)
+        self.assertIn("tmux kill-window -t tt:tt-agents", out)
+        self.assertFalse((self.root / "acp-runtime" / "sleeps" / "latest.toml").exists())
+
     def test_sleep_snapshots_and_tears_down_managed_windows(self) -> None:
         self.write_remote_tui_config()
         config = load_config(self.config)
         store = Store(config)
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.sync_roles(conn, config.roles.values())
             store.upsert_watchdog_runner(
                 conn,
@@ -3630,8 +3934,8 @@ exit 0
 
         self.assertEqual(code, 0, err)
         self.assertIn("operator: pane=%0 codex_thread_id=thread-operator", out)
-        self.assertIn("codex: yolo=yes model=gpt-5.5 effort=xhigh fast=unknown", out)
-        self.assertIn("codex: profile=implementer-profile config_overrides=1 fast=unknown", out)
+        self.assertIn("agent: runtime=codex yolo=yes model=gpt-5.5 effort=xhigh fast=unknown", out)
+        self.assertIn("agent: runtime=codex profile=implementer-profile config_overrides=1 fast=unknown", out)
 
     def test_resume_dry_run_plans_codex_resume_from_sleep_snapshot(self) -> None:
         self.write_remote_tui_config()
@@ -3738,7 +4042,7 @@ exit 9
         self.write_remote_tui_config()
         config = load_config(self.config)
         store = Store(config)
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             store.sync_roles(conn, config.roles.values())
             store.upsert_watchdog_runner(
                 conn,

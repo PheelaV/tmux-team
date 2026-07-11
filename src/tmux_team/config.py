@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import os
+import tempfile
 import tomllib
+from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -185,22 +189,101 @@ def write_default_config(path: Path, name: str, runtime_dir: str | None) -> None
 
 def write_operator_config(path: Path, operator: OperatorConfig) -> None:
     path = path.expanduser().resolve()
+    with _config_update_lock(path):
+        data = _read_config_data(path)
+        operator_data: dict[str, Any] = dict(operator.capabilities)
+        if operator.pane:
+            operator_data["pane"] = operator.pane
+        if operator.codex_thread_id:
+            operator_data["codex_thread_id"] = operator.codex_thread_id
+        if operator_data:
+            data["operator"] = operator_data
+        else:
+            data.pop("operator", None)
+        _write_config_data_atomic(path, data)
+
+
+def update_role_capabilities(path: Path, role: str, updates: Mapping[str, Any | None]) -> None:
+    path = path.expanduser().resolve()
+    with _config_update_lock(path):
+        data = _read_config_data(path)
+        roles = data.get("roles")
+        if not isinstance(roles, dict) or not isinstance(roles.get(role), dict):
+            raise ConfigError(f"Unknown role: {role}")
+        structural_keys = {"mode", "state", "pane", "worktree", "scratchpad", "policy"}
+        invalid = structural_keys.intersection(updates)
+        if invalid:
+            raise ConfigError(f"Not a role capability: {sorted(invalid)[0]}")
+        role_data = roles[role]
+        for key, value in updates.items():
+            if value is None:
+                role_data.pop(key, None)
+            else:
+                role_data[key] = value
+
+        _write_config_data_atomic(path, data)
+
+
+def update_role_runtime_binding(
+    path: Path,
+    role: str,
+    *,
+    pane: str,
+    state: str,
+    capabilities: Mapping[str, Any | None],
+) -> None:
+    path = path.expanduser().resolve()
+    with _config_update_lock(path):
+        data = _read_config_data(path)
+        roles = data.get("roles")
+        if not isinstance(roles, dict) or not isinstance(roles.get(role), dict):
+            raise ConfigError(f"Unknown role: {role}")
+        role_data = roles[role]
+        role_data["pane"] = pane
+        role_data["state"] = state
+        for key, value in capabilities.items():
+            if value is None:
+                role_data.pop(key, None)
+            else:
+                role_data[key] = value
+        _write_config_data_atomic(path, data)
+
+
+@contextmanager
+def _config_update_lock(path: Path):
+    lock_path = path.with_name(f"{path.name}.lock")
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _read_config_data(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigError(f"Config file does not exist: {path}")
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
-    operator_data: dict[str, Any] = dict(operator.capabilities)
-    if operator.pane:
-        operator_data["pane"] = operator.pane
-    if operator.codex_thread_id:
-        operator_data["codex_thread_id"] = operator.codex_thread_id
-    if operator_data:
-        data["operator"] = operator_data
-    else:
-        data.pop("operator", None)
-    path.write_text(tomli_w.dumps(data), encoding="utf-8")
+
+
+def _write_config_data_atomic(path: Path, data: dict[str, Any]) -> None:
+    mode = path.stat().st_mode & 0o777
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            temporary_name = handle.name
+            handle.write(tomli_w.dumps(data))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+    finally:
+        if temporary_name:
+            Path(temporary_name).unlink(missing_ok=True)
 
 
 def resolve_runtime_dir(project_root: Path, value: Path | str | None) -> Path:

@@ -3,13 +3,21 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
 from .config import TeamConfig, role_scratchpad_path
-from .display import format_seconds_duration, role_capabilities, watchdog_runner_display_state
+from .display import (
+    format_age,
+    format_seconds_duration,
+    milestone_subject_label,
+    role_capabilities,
+    row_value,
+    watchdog_runner_display_state,
+)
 from .store import (
     OBLIGATION_VISIBLE_STATES,
     STALE_CLAIMED_STATE,
@@ -24,7 +32,7 @@ class DashboardDependencyError(RuntimeError):
     pass
 
 
-ROLE_TABLE_HEADERS = ("role", "state", "pane", "pend", "clmd", "ack", "stale", "todo", "codex", "active")
+ROLE_TABLE_HEADERS = ("role", "state", "pane", "pend", "clmd", "ack", "stale", "todo", "runtime", "active")
 
 
 @dataclass(frozen=True)
@@ -128,7 +136,7 @@ def collect_dashboard_snapshot(
                 "completed": role_counts.get("completed", 0),
                 "open_todos": open_todos,
                 "active_summary": str(active_summary),
-                "codex_settings": dashboard_codex_chips(capabilities),
+                "runtime_settings": dashboard_runtime_chips(str(role["mode"]), capabilities),
             }
         )
 
@@ -349,6 +357,17 @@ def dashboard_codex_chips(capabilities: dict[str, object]) -> str:
     elif config_overrides:
         chips.append("cfg")
     return " ".join(chips) if chips else "-"
+
+
+def dashboard_runtime_chips(mode: str, capabilities: dict[str, object]) -> str:
+    if mode == "acp_tui" or capabilities.get("control_socket"):
+        chips = ["acp"]
+        provider = capabilities.get("acp_provider")
+        if provider:
+            chips.append(str(provider))
+        return " ".join(chips)
+    codex = dashboard_codex_chips(capabilities)
+    return "codex" if codex == "-" else f"codex {codex}"
 
 
 def render_dashboard_snapshot(snapshot: DashboardSnapshot, *, provenance: bool = False) -> str:
@@ -719,7 +738,7 @@ def run_textual_dashboard(
         def refresh_dashboard(self) -> None:
             self.persist_dashboard_preferences()
             store = Store(config)
-            with store.connect() as conn:
+            with closing(store.connect()) as conn:
                 snapshot = collect_dashboard_snapshot(
                     store,
                     conn,
@@ -1011,7 +1030,7 @@ def role_table_rows(snapshot: DashboardSnapshot, *, codex_limit: int, active_lim
             row_text(row, "acknowledged"),
             row_text(row, "stale_claimed"),
             row_text(row, "open_todos"),
-            truncate(row_text(row, "codex_settings"), codex_limit),
+            truncate(row_text(row, "runtime_settings"), codex_limit),
             truncate(row_text(row, "active_summary"), active_limit),
         )
 
@@ -1034,7 +1053,7 @@ def textual_role_table_rows(
             row_text(row, "acknowledged"),
             row_text(row, "stale_claimed"),
             row_text(row, "open_todos"),
-            truncate(row_text(row, "codex_settings"), codex_limit),
+            truncate(row_text(row, "runtime_settings"), codex_limit),
             truncate(row_text(row, "active_summary"), active_limit),
         )
 
@@ -1377,15 +1396,6 @@ def format_milestone_line(
     )
 
 
-def milestone_subject_label(row: dict) -> str:
-    if row.get("scope") == "team":
-        return "team"
-    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
-    if subject_roles:
-        return ",".join(subject_roles)
-    return str(row.get("role") or "-")
-
-
 def format_table(headers: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> list[str]:
     materialized = [tuple(str(cell) for cell in row) for row in rows]
     widths = [len(header) for header in headers]
@@ -1402,20 +1412,6 @@ def format_table(headers: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> l
             "  " + "  ".join(truncate(cell, widths[index]).ljust(widths[index]) for index, cell in enumerate(row))
         )
     return lines
-
-
-def format_age(created_at: str) -> str:
-    age = datetime.now(UTC) - parse_utc_datetime(created_at)
-    seconds = max(0, int(age.total_seconds()))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 48:
-        return f"{hours}h"
-    return f"{hours // 24}d"
 
 
 def is_overdue(value: str | None) -> bool:
@@ -1468,10 +1464,3 @@ def row_strings(row: dict[str, object], key: str) -> tuple[str, ...]:
 
 def indent_lines(rows: Iterable[str], prefix: str) -> list[str]:
     return [f"{prefix}{row}" for row in rows]
-
-
-def row_value(row, key: str, default=None):
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return default

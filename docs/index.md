@@ -15,6 +15,7 @@ Start here for operator-facing tmux-team docs. The `kb/` directory is agent-faci
 
 - [Invariants](invariants.md): product constraints that bootstrap, delivery, and lifecycle changes must preserve.
 - [CLI Reference](cli-reference.md): structured command map for operators.
+- [External ACP TUI Runtime](acp-runtime.md): Toad/provider setup, permissions, control-socket delivery, and runtime handoffs.
 - [Receiving and Hooks](receiving-and-hooks.md): inbox flow, wake methods, and the current extension hook surface.
 - [Extensions](extensions.md): project-local executable hook contract for humans.
 - [Live Demo](live-demo.md): repeatable public-snapshot demo scenario for real Codex teams.

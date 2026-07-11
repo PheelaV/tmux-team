@@ -16,6 +16,36 @@ def format_seconds_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def format_age(created_at: str) -> str:
+    age = datetime.now(UTC) - parse_utc_datetime(created_at)
+    seconds = max(0, int(age.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def milestone_subject_label(row: dict) -> str:
+    if row.get("scope") == "team":
+        return "team"
+    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
+    if subject_roles:
+        return ",".join(subject_roles)
+    return str(row.get("role") or "-")
+
+
+def row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 def role_capabilities(row) -> dict[str, object]:
     try:
         data = json.loads(row["capabilities_json"] or "{}")
@@ -43,6 +73,22 @@ def codex_settings_summary(capabilities: dict[str, object]) -> str:
         parts.append("config_overrides=1")
     launch = " ".join(parts) if parts else "launch=unknown"
     return f"{launch} fast=unknown"
+
+
+def role_runtime_summary(mode: str, capabilities: dict[str, object]) -> str:
+    if mode == "acp_tui" or capabilities.get("control_socket"):
+        parts = ["runtime=acp"]
+        provider = capabilities.get("acp_provider")
+        if provider:
+            parts.append(f"provider={provider}")
+        tui = capabilities.get("acp_tui_bin")
+        if tui:
+            parts.append(f"tui={tui}")
+        session_id = capabilities.get("runtime_session_id")
+        if session_id:
+            parts.append(f"session={str(session_id)[:12]}")
+        return " ".join(parts)
+    return f"runtime=codex {codex_settings_summary(capabilities)}"
 
 
 def watchdog_runner_display_state(row, stale_grace_seconds: int) -> str:

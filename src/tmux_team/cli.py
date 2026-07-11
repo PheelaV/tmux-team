@@ -10,16 +10,20 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__
+from .acp_providers import resolve_acp_provider
+from .acp_tui import ACPControlError, control_socket_path, send_control_request
 from .bootstrap import (
     AGENT_LAYOUTS,
-    CONTROL_MODES,
+    AGENT_RUNTIMES,
     DEFAULT_AGENT_LAYOUT,
     DEFAULT_AGENTS_WINDOW,
     DEFAULT_CONTROL_WINDOW,
+    INSTRUCTION_PROFILES,
     ROLE_CONTRACT_VERSION,
     ROLE_PANE_OPTION,
     BootstrapError,
@@ -29,6 +33,7 @@ from .bootstrap import (
     detect_current_tmux_pane_id,
     detect_current_tmux_session,
     free_local_endpoint,
+    normalize_instruction_profile,
     parse_roles,
 )
 from .config import (
@@ -52,15 +57,28 @@ from .dashboard import (
     run_textual_dashboard,
 )
 from .display import (
-    codex_settings_summary,
+    format_age,
     format_seconds_duration,
+    milestone_subject_label,
     role_capabilities,
+    role_runtime_summary,
+    row_value,
     watchdog_runner_display_state,
 )
 from .extensions.manifest import ExtensionError, inspect_extensions
 from .extensions.runner import HookDenied, HookError
 from .lifecycle import LifecycleError, resume_team, sleep_team
 from .policy import PolicyContext, authorize, normalize_policy_mode
+from .runtime_switch import (
+    RuntimeSwitchError,
+    configure_runtime_options,
+    format_runtime_options,
+    prepare_runtime_handoff,
+    read_handoff_body,
+    runtime_options,
+    runtime_show,
+    switch_runtime,
+)
 from .service import TeamService
 from .store import (
     MESSAGE_STATE_FILTERS,
@@ -113,13 +131,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy_context = build_policy_context(args, config)
         apply_actor_defaults(args, policy_context)
         authorize_cli_command(args, config, policy_context)
-    except (BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError, KeyError) as exc:
+    except (ACPControlError, BootstrapError, ConfigError, ExtensionError, PermissionError, ValueError, KeyError) as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
     store = Store(config)
     try:
-        with store.connect() as conn:
+        with closing(store.connect()) as conn:
             if args.command == "config":
                 return cmd_config(args, config)
             if args.command == "status":
@@ -148,6 +166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_obligation(args, store, conn)
             if args.command == "role":
                 return cmd_role(args, store, conn)
+            if args.command == "runtime":
+                return cmd_runtime(args, store, conn)
             if args.command == "pane":
                 return cmd_pane(args, store, conn)
             if args.command == "notify":
@@ -160,14 +180,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return cmd_resume(args, store, conn, config)
             if args.command == "codex":
                 return cmd_codex(args, store, service, conn)
+            if args.command == "acp":
+                return cmd_acp(args, store, service, conn)
             if args.command == "stable":
                 return cmd_stable(args, store, conn)
     except (
         ConfigError,
+        ACPControlError,
         ExtensionError,
         HookDenied,
         HookError,
         LifecycleError,
+        RuntimeSwitchError,
         ValueError,
         KeyError,
         PermissionError,
@@ -271,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
     ext_sub.add_parser("list", help="List discovered extensions")
     ext_sub.add_parser("doctor", help="Validate extension manifests")
 
-    bootstrap = subparsers.add_parser("bootstrap", help="Start a pane-resident Codex team in tmux")
+    bootstrap = subparsers.add_parser("bootstrap", help="Start a pane-resident agent team in tmux")
     bootstrap.add_argument("--project-root", default=".", help="Project root for the team")
     bootstrap.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Config path to create")
     bootstrap.add_argument(
@@ -293,6 +317,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Existing or desired app-server endpoint; default picks a free local ws:// port",
     )
     bootstrap.add_argument("--codex-bin", default="codex")
+    bootstrap.add_argument("--acp-tui-bin", default="toad")
+    bootstrap.add_argument(
+        "--acp-agent-command",
+        default=None,
+        help="ACP stdio command; defaults from --acp-provider for cursor, codex, claude, or pool",
+    )
+    bootstrap.add_argument(
+        "--acp-provider",
+        help="Provider preset/provenance: cursor, codex, claude, pool, or a custom label with an explicit command",
+    )
+    bootstrap.add_argument(
+        "--acp-initial-config",
+        action="append",
+        default=[],
+        metavar="ID=VALUE",
+        help="Set and confirm an advertised ACP option before the first startup prompt; repeatable",
+    )
+    bootstrap.add_argument(
+        "--agent-runtime",
+        default="codex",
+        choices=AGENT_RUNTIMES,
+        help="Managed role runtime: codex (default) or an external ACP TUI",
+    )
     bootstrap.add_argument("--tmux-bin", default="tmux")
     bootstrap.add_argument(
         "--agent-layout",
@@ -302,12 +349,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap.add_argument(
         "--control-window", default=DEFAULT_CONTROL_WINDOW, help="Name for the launcher/operator window"
-    )
-    bootstrap.add_argument(
-        "--control-mode",
-        default="auto",
-        choices=CONTROL_MODES,
-        help="tt-control startup mode: auto reuses an existing tmux launcher or starts Codex; shell starts a plain shell",
     )
     bootstrap.add_argument("--agents-window", default=DEFAULT_AGENTS_WINDOW, help="Window name for grouped agent panes")
     bootstrap.add_argument(
@@ -347,6 +388,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ROLE=KEY=VALUE",
         help="Pass a Codex -c key=value override to one role; repeatable",
+    )
+    bootstrap.add_argument(
+        "--instruction-profile",
+        choices=INSTRUCTION_PROFILES,
+        default="guided",
+        help="Startup instruction verbosity for all roles; default: guided",
+    )
+    bootstrap.add_argument(
+        "--role-instruction-profile",
+        action="append",
+        default=[],
+        metavar="ROLE=PROFILE",
+        help="Override compact/guided startup instructions for one role; repeatable",
     )
     bootstrap.add_argument(
         "--role-worktree",
@@ -418,7 +472,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument(
         "--notify-method",
         default="auto",
-        help="Notification method: auto, display-message, send-keys, or app-server-turn",
+        help="Notification method: auto, display-message, send-keys, app-server-turn, or control-socket",
     )
 
     broadcast = subparsers.add_parser("broadcast", help="Queue one message per recipient role")
@@ -448,7 +502,7 @@ def build_parser() -> argparse.ArgumentParser:
     broadcast.add_argument(
         "--notify-method",
         default="auto",
-        help="Notification method: auto, display-message, send-keys, or app-server-turn",
+        help="Notification method: auto, display-message, send-keys, app-server-turn, or control-socket",
     )
 
     inbox = subparsers.add_parser("inbox", help="Work with role inboxes")
@@ -632,6 +686,42 @@ def build_parser() -> argparse.ArgumentParser:
         role_state = role_sub.add_parser(state_command, help=f"Set role state to {state}")
         role_state.add_argument("role")
 
+    runtime = subparsers.add_parser("runtime", help="Inspect or configure a role runtime")
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_show_parser = runtime_sub.add_parser("show", help="Show role runtime metadata")
+    runtime_show_parser.add_argument("role")
+    runtime_options_parser = runtime_sub.add_parser("options", help="Show live ACP session config options")
+    runtime_options_parser.add_argument("role")
+    runtime_configure = runtime_sub.add_parser("configure", help="Change live ACP session config options")
+    runtime_configure.add_argument("role")
+    runtime_configure.add_argument(
+        "--set",
+        dest="assignments",
+        action="append",
+        required=True,
+        metavar="CONFIG_ID=VALUE",
+        help="Set an advertised option; repeat for multiple changes",
+    )
+    runtime_prepare = runtime_sub.add_parser("prepare", help="Write a provider-neutral handoff capsule")
+    runtime_prepare.add_argument("role")
+    runtime_prepare.add_argument("--summary", required=True, help="Operator handoff summary")
+    runtime_prepare.add_argument("--body-file", help="Optional Markdown handoff body")
+    runtime_switch = runtime_sub.add_parser("switch", help="Replace an ACP TUI role in its existing pane")
+    runtime_switch.add_argument("role")
+    runtime_switch.add_argument(
+        "--acp-agent-command",
+        help="New ACP provider command; defaults from --provider for cursor, codex, claude, or pool",
+    )
+    runtime_switch.add_argument("--provider", help="New provider preset/provenance")
+    runtime_switch.add_argument("--model", help="New model metadata")
+    runtime_switch.add_argument("--effort", help="New effort metadata")
+    runtime_switch.add_argument("--handoff-file", required=True, help="Existing handoff capsule path")
+    runtime_switch.add_argument(
+        "--cancel-active", action="store_true", help="Cancel an active ACP turn before switching"
+    )
+    runtime_switch.add_argument("--tmux-bin", default="tmux")
+    runtime_switch.add_argument("--dry-run", action="store_true")
+
     pane = subparsers.add_parser("pane", help="Inspect managed role tmux panes")
     pane_sub = pane.add_subparsers(dest="pane_command", required=True)
     pane_list = pane_sub.add_parser("list", help="List managed role panes")
@@ -755,6 +845,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not mark active/draining roles paused after snapshotting",
     )
+    sleep.add_argument(
+        "--acp-resume-policy",
+        choices=("exact", "handoff"),
+        default="exact",
+        help="ACP snapshot policy: require exact session/load support or explicitly use a fresh handoff session",
+    )
 
     resume = subparsers.add_parser("resume", help="Resume managed panes from a tmux-team sleep snapshot")
     resume.add_argument("--snapshot", help="Sleep snapshot path; defaults to runtime sleeps/latest.toml")
@@ -775,6 +871,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--role-model", action="append", default=[], metavar="ROLE=MODEL")
     resume.add_argument("--role-reasoning-effort", action="append", default=[], metavar="ROLE=EFFORT")
     resume.add_argument("--role-codex-config", action="append", default=[], metavar="ROLE=KEY=VALUE")
+    resume.add_argument("--instruction-profile", choices=INSTRUCTION_PROFILES, default=None)
+    resume.add_argument("--role-instruction-profile", action="append", default=[], metavar="ROLE=PROFILE")
     resume.add_argument("--no-start-app-server", action="store_true", help="Use an already-running app-server endpoint")
     resume.add_argument("--no-reactivate-roles", action="store_true", help="Do not set resumed roles active")
     resume.add_argument(
@@ -783,6 +881,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not set tmux truecolor options on the restored session",
     )
     resume.add_argument("--dry-run", action="store_true", help="Print planned tmux commands without executing")
+    resume.add_argument(
+        "--acp-resume-policy",
+        choices=("exact", "handoff"),
+        help="Override the saved ACP resume policy; fallback is never automatic",
+    )
 
     codex = subparsers.add_parser("codex", help="Manage Codex app-server role bindings")
     codex_sub = codex.add_subparsers(dest="codex_command", required=True)
@@ -803,6 +906,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum scratchpad characters to include; 0 omits scratchpad content",
     )
 
+    add_acp_control_parser(subparsers, "acp", "Inspect and control external ACP TUI roles")
+
     stable = subparsers.add_parser("stable", help="Manage stable commit approvals")
     stable_sub = stable.add_subparsers(dest="stable_command", required=True)
     stable_approve = stable_sub.add_parser("approve", help="Approve a stable commit")
@@ -817,6 +922,21 @@ def build_parser() -> argparse.ArgumentParser:
     stable_sync.add_argument("--apply", action="store_true", help="Run git checkout --detach")
 
     return parser
+
+
+def add_acp_control_parser(
+    subparsers: argparse._SubParsersAction,
+    name: str,
+    help_text: str,
+) -> None:
+    parser = subparsers.add_parser(name, help=help_text)
+    commands = parser.add_subparsers(dest="acp_command", required=True)
+    wake = commands.add_parser("wake", help="Wake a role through its configured control socket")
+    wake.add_argument("role")
+    status = commands.add_parser("status", help="Show the ACP TUI control-socket status")
+    status.add_argument("role")
+    cancel = commands.add_parser("cancel", help="Request cancellation of the active ACP turn")
+    cancel.add_argument("role")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -839,10 +959,13 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         role_worktrees = parse_role_worktrees(args.role_worktree)
         role_scratchpads = parse_role_paths(args.role_memory, "--role-memory")
         role_launch_options = parse_role_launch_options(
+            roles=roles,
             role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
             role_models=parse_assignments(args.role_model, "--role-model"),
             role_reasoning_efforts=parse_assignments(args.role_reasoning_effort, "--role-reasoning-effort"),
             role_config_overrides=parse_role_config_overrides(args.role_codex_config),
+            instruction_profile=args.instruction_profile,
+            role_instruction_profiles=parse_assignments(args.role_instruction_profile, "--role-instruction-profile"),
         )
         shared_worktrees = parse_role_groups(args.allow_shared_worktree)
         allow_dirty_roles = frozenset(args.allow_dirty_role)
@@ -866,7 +989,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             start_app_server=not args.no_start_app_server,
             agent_layout=args.agent_layout,
             control_window=args.control_window,
-            control_mode=args.control_mode,
             agents_window=args.agents_window,
             role_yolo=args.role_yolo,
             role_profile=args.role_profile,
@@ -879,17 +1001,28 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             allow_dirty_roles=allow_dirty_roles,
             enable_truecolor=not args.no_truecolor,
             dry_run=args.dry_run,
+            agent_runtime=args.agent_runtime,
+            acp_tui_bin=args.acp_tui_bin,
+            acp_agent_command=args.acp_agent_command,
+            acp_provider=args.acp_provider,
+            acp_initial_config=tuple(args.acp_initial_config),
         )
     except BootstrapError as exc:
         print(f"tmux-team: {exc}", file=sys.stderr)
         return 2
 
     print(f"session: {result.session}")
-    print(f"endpoint: {result.endpoint}")
+    print(f"runtime: {result.agent_runtime}")
+    if result.agent_runtime == "codex":
+        print(f"endpoint: {result.endpoint}")
     print(f"config: {result.config_path}")
     print("roles:")
-    for role, thread_id in result.role_threads.items():
-        print(f"  {role}: thread_id={thread_id}")
+    if result.agent_runtime == "acp":
+        for role, session_id in result.role_sessions.items():
+            print(f"  {role}: session_id={session_id}")
+    else:
+        for role, thread_id in result.role_threads.items():
+            print(f"  {role}: thread_id={thread_id}")
     return 0
 
 
@@ -931,20 +1064,38 @@ def parse_role_config_overrides(values: Sequence[str]) -> dict[str, tuple[str, .
 
 def parse_role_launch_options(
     *,
+    roles: tuple[str, ...] = (),
     role_profiles: dict[str, str],
     role_models: dict[str, str],
     role_reasoning_efforts: dict[str, str],
     role_config_overrides: dict[str, tuple[str, ...]],
+    instruction_profile: str | None = None,
+    role_instruction_profiles: dict[str, str] | None = None,
 ) -> dict[str, RoleLaunchOptions]:
-    roles = set(role_profiles) | set(role_models) | set(role_reasoning_efforts) | set(role_config_overrides)
+    role_instruction_profiles = role_instruction_profiles or {}
+    if instruction_profile is not None:
+        instruction_profile = normalize_instruction_profile(instruction_profile)
+    normalized_role_profiles = {
+        role: normalize_instruction_profile(profile) for role, profile in role_instruction_profiles.items()
+    }
+    selected_roles = (
+        set(role_profiles)
+        | set(role_models)
+        | set(role_reasoning_efforts)
+        | set(role_config_overrides)
+        | set(normalized_role_profiles)
+    )
+    if instruction_profile is not None:
+        selected_roles.update(roles)
     return {
         role: RoleLaunchOptions(
             model=role_models.get(role),
             reasoning_effort=role_reasoning_efforts.get(role),
             profile=role_profiles.get(role),
             config_overrides=role_config_overrides.get(role, ()),
+            instruction_profile=normalized_role_profiles.get(role, instruction_profile),
         )
-        for role in roles
+        for role in selected_roles
     }
 
 
@@ -1132,6 +1283,14 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
         authorize(config, policy_context, "role.state.change", role=args.role)
         return
 
+    if args.command == "runtime" and args.runtime_command in (
+        "configure",
+        "prepare",
+        "switch",
+    ):
+        authorize(config, policy_context, "role.state.change", role=args.role)
+        return
+
     if args.command == "pane" and args.pane_command == "capture":
         authorize(config, policy_context, "pane.capture", role=args.role)
         return
@@ -1172,6 +1331,10 @@ def authorize_cli_command(args: argparse.Namespace, config, policy_context: Poli
 
     if args.command == "codex" and args.codex_command == "session-context":
         authorize(config, policy_context, "memory.read", role=args.role)
+        return
+
+    if args.command == "acp" and args.acp_command in ("wake", "cancel"):
+        authorize(config, policy_context, "role.notify", role=args.role, method="control-socket")
         return
 
     if args.command == "stable" and args.stable_command == "approve":
@@ -1216,7 +1379,7 @@ def cmd_status(args: argparse.Namespace, store: Store, conn) -> int:
             f"pending={pending} stale_claimed={stale_claimed} claimed={claimed} ack={acknowledged} done={completed}"
         )
         if args.verbose:
-            print(f"    codex: {codex_settings_summary(role_capabilities(role))}")
+            print(f"    agent: {role_runtime_summary(str(role['mode']), role_capabilities(role))}")
             rows = store.list_active_messages(conn, role=role["name"], limit=args.active_limit)
             if not rows:
                 print("    active: none")
@@ -1797,6 +1960,65 @@ def cmd_role(args: argparse.Namespace, store: Store, conn) -> int:
     return 0
 
 
+def cmd_runtime(args: argparse.Namespace, store: Store, conn) -> int:
+    if args.runtime_command == "show":
+        print(runtime_show(store, conn, args.role), end="")
+        return 0
+    if args.runtime_command == "options":
+        print(format_runtime_options(runtime_options(store, conn, args.role)), end="")
+        return 0
+    if args.runtime_command == "configure":
+        result = configure_runtime_options(
+            store,
+            conn,
+            args.role,
+            args.assignments,
+            actor=args.actor or "operator",
+        )
+        print(f"{args.role} session_id={result.session_id} configured={len(result.changes)}")
+        return 0
+    if args.runtime_command == "prepare":
+        body = None
+        if args.body_file:
+            body = read_handoff_body(Path(args.body_file))
+        path = prepare_runtime_handoff(
+            store,
+            conn,
+            args.role,
+            summary=args.summary,
+            body=body,
+            actor=args.actor or "operator",
+        )
+        print(path)
+        return 0
+    if args.runtime_command == "switch":
+        acp_agent_command, provider = resolve_acp_provider(args.provider, args.acp_agent_command)
+        result = switch_runtime(
+            store,
+            conn,
+            args.role,
+            acp_agent_command=acp_agent_command,
+            provider=provider,
+            model=args.model,
+            effort=args.effort,
+            handoff_file=Path(args.handoff_file),
+            cancel_active=args.cancel_active,
+            tmux_bin=args.tmux_bin,
+            dry_run=args.dry_run,
+            actor=args.actor or "operator",
+        )
+        print(f"command: {format_command(result.tmux_command)}")
+        if result.dry_run:
+            print("dry-run: no role, tmux, config, prompt, or lineage state changed")
+        else:
+            print(
+                f"{args.role} session_id={result.new_session_id} "
+                f"previous_session_id={result.old_session_id or '-'} handoff={result.handoff_file}"
+            )
+        return 0
+    return 2
+
+
 def cmd_pane(args: argparse.Namespace, store: Store, conn) -> int:
     if args.pane_command == "list":
         return cmd_pane_list(args, store, conn)
@@ -2066,7 +2288,7 @@ def deliver_watchdog_pressure(
     description: str | None,
     goal: str | None,
 ) -> str:
-    if not findings or not watchdog_delivery_enabled(delivery_method):
+    if not findings or delivery_method.strip().lower() in ("", "none", "report-only"):
         return ""
     recipient = watchdog_notify_target(service.store, conn, scope_role=scope_role, notify_role=notify_role)
     correlation_key = watchdog_pressure_correlation_key(name, scope_role, recipient)
@@ -2114,10 +2336,6 @@ def deliver_watchdog_pressure(
         else:
             line = f"{line} notify_failed={result.notification.details}"
     return line
-
-
-def watchdog_delivery_enabled(delivery_method: str) -> bool:
-    return delivery_method.strip().lower() not in ("", "none", "report-only")
 
 
 def watchdog_notify_target(store: Store, conn, *, scope_role: str | None, notify_role: str | None) -> str:
@@ -2554,6 +2772,7 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
         force=args.force,
         kill_session=args.kill_session,
         pause_roles=not args.no_pause_roles,
+        acp_resume_policy=args.acp_resume_policy,
     )
     print(f"sleep_id: {result.sleep_id}")
     print(f"session: {result.session or '-'}")
@@ -2590,10 +2809,13 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
 
 def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     role_launch_options = parse_role_launch_options(
+        roles=tuple(config.roles),
         role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
         role_models=parse_assignments(args.role_model, "--role-model"),
         role_reasoning_efforts=parse_assignments(args.role_reasoning_effort, "--role-reasoning-effort"),
         role_config_overrides=parse_role_config_overrides(args.role_codex_config),
+        instruction_profile=args.instruction_profile,
+        role_instruction_profiles=parse_assignments(args.role_instruction_profile, "--role-instruction-profile"),
     )
     result = resume_team(
         config,
@@ -2609,6 +2831,7 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
         role_yolo=args.role_yolo,
         role_profile=args.role_profile,
         role_launch_options=role_launch_options,
+        acp_resume_policy=args.acp_resume_policy,
         start_app_server=not args.no_start_app_server,
         reactivate_roles=not args.no_reactivate_roles,
         enable_truecolor=not args.no_truecolor,
@@ -2616,16 +2839,19 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     )
     print(f"snapshot: {result.snapshot_path}")
     print(f"session: {result.session}")
-    print(f"endpoint: {result.endpoint}")
+    print(f"runtime: {result.agent_runtime}")
+    print(f"endpoint: {result.endpoint or '-'}")
     print(f"roles: {result.role_count}")
     print(f"watchdogs: {len(result.watchdog_panes)}")
     print(f"reactivated_roles: {'yes' if result.reactivated_roles else 'no'}")
-    restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
-    print(f"codex_launch_settings: restored={restored} fast=unknown")
-    print("role_threads:")
+    if result.agent_runtime == "codex":
+        restored = ",".join(result.restored_launch_roles) if result.restored_launch_roles else "-"
+        print(f"codex_launch_settings: restored={restored} fast=unknown")
+    print("role_sessions:" if result.agent_runtime == "acp" else "role_threads:")
     for role, thread_id in result.role_threads.items():
         pane = result.role_panes.get(role) or "-"
-        print(f"  {role}: thread_id={thread_id} pane={pane}")
+        identity_label = "session_id" if result.agent_runtime == "acp" else "thread_id"
+        print(f"  {role}: {identity_label}={thread_id} pane={pane}")
     if result.watchdog_panes:
         print("watchdog_panes:")
         for name, pane in result.watchdog_panes.items():
@@ -2639,6 +2865,42 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
     if args.dry_run:
         print("dry-run: no tmux panes created and no config/runtime state updated")
     return 0
+
+
+def cmd_acp(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
+    role = store.get_role(conn, args.role)
+    if role is None:
+        raise KeyError(f"Unknown role: {args.role}")
+    socket_value = store.resolve_role_control_socket(role)
+    if not socket_value:
+        socket_path = control_socket_path(store.runtime_dir, args.role)
+        raise ACPControlError(f"role {args.role!r} has no ACP TUI control-socket binding (expected {socket_path})")
+    socket_path = Path(str(socket_value))
+
+    if args.acp_command == "wake":
+        result = service.notify_role(conn, args.role, "control-socket", actor=args.actor)
+        if result.ok:
+            print(result.details)
+            return 0
+        print(result.details, file=sys.stderr)
+        return 1
+
+    if args.acp_command == "cancel":
+        response = send_control_request(socket_path, {"action": "cancel"})
+        print(f"{args.role} cancellation_requested={str(response.get('submitted', False)).lower()}")
+        return 0
+
+    if args.acp_command in ("status", "show"):
+        response = send_control_request(socket_path, {"action": "status"})
+        print(
+            f"{args.role} acp-tui socket={socket_path} state={response.get('state', 'unknown')} "
+            f"session_id={response.get('sessionId') or '-'} pid={response.get('pid', 'unknown')} "
+            f"queue_depth={response.get('queueDepth', 'unknown')} "
+            f"resume_supported={str(response.get('resumeSupported', False)).lower()}"
+        )
+        return 0
+
+    return 2
 
 
 def cmd_codex(args: argparse.Namespace, store: Store, service: TeamService, conn) -> int:
@@ -2761,14 +3023,15 @@ def scratchpad_excerpt(path: Path, max_chars: int) -> str:
 def cmd_stable(args: argparse.Namespace, store: Store, conn) -> int:
     if args.stable_command == "approve":
         approved_by = args.by or os.environ.get("USER") or getpass.getuser()
+        commit_sha = canonical_role_commit(store, conn, args.role, args.commit)
         store.approve_stable_commit(
             conn,
             scope=args.role,
-            commit_sha=args.commit,
+            commit_sha=commit_sha,
             approved_by=approved_by,
             note=args.note,
         )
-        print(f"{args.role}: {args.commit} approved_by={approved_by}")
+        print(f"{args.role}: {commit_sha} approved_by={approved_by}")
         return 0
 
     if args.stable_command == "current":
@@ -2791,6 +3054,28 @@ def cmd_stable(args: argparse.Namespace, store: Store, conn) -> int:
         return cmd_stable_sync(args, store, conn)
 
     return 2
+
+
+def canonical_role_commit(store: Store, conn, scope: str, revision: str) -> str:
+    if scope == "global":
+        return revision
+    role = store.get_role(conn, scope)
+    if role is None:
+        raise KeyError(f"Unknown role: {scope}")
+    worktree = role["worktree"]
+    if not worktree:
+        raise ValueError(f"role {scope} has no worktree for stable commit resolution")
+    result = subprocess.run(
+        ["git", "-C", worktree, "rev-parse", "--verify", f"{revision}^{{commit}}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "revision not found").strip()
+        raise ValueError(f"cannot resolve stable commit {revision!r} for role {scope}: {details}")
+    return result.stdout.strip()
 
 
 def cmd_stable_sync(args: argparse.Namespace, store: Store, conn) -> int:
@@ -2976,16 +3261,6 @@ def format_milestone(row: dict) -> str:
         first_line = body.splitlines()[0]
         line += f"\n  {first_line}"
     return line
-
-
-def milestone_subject_label(row: dict) -> str:
-    scope = row.get("scope")
-    if scope == "team":
-        return "team"
-    subject_roles = tuple(str(role) for role in row.get("subject_roles") or ())
-    if subject_roles:
-        return ",".join(subject_roles)
-    return str(row.get("role") or "-")
 
 
 def watchdog_findings(
@@ -3227,20 +3502,6 @@ def obligation_one_line(row) -> str:
     return " ".join(parts)
 
 
-def format_age(created_at: str) -> str:
-    age = datetime.now(UTC) - parse_utc_datetime(created_at)
-    seconds = max(0, int(age.total_seconds()))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 48:
-        return f"{hours}h"
-    return f"{hours // 24}d"
-
-
 def claimed_unacked_warning(row, threshold_seconds: int | None) -> bool:
     if threshold_seconds is None:
         return False
@@ -3389,13 +3650,6 @@ def pane_summary_prompt(*, role: str, pane: str, text: str) -> str:
         f"{text.rstrip()}\n"
         "```\n"
     )
-
-
-def row_value(row, key: str, default=None):
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return default
 
 
 def print_stable_row(row) -> None:

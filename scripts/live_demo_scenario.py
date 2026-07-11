@@ -9,9 +9,12 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
+
+from tmux_team.acp_tui import send_control_request
 
 DEFAULT_ROOT = Path("/tmp/tmux-team-live-demo")
 DEFAULT_SESSION = "tt-live-demo"
@@ -46,6 +49,8 @@ def main() -> int:
             setup(root, args)
         elif args.command == "bootstrap":
             bootstrap(root, args)
+        elif args.command == "start-goal":
+            start_goal(root)
         elif args.command == "verify":
             verify(root)
         elif args.command == "sleep":
@@ -78,10 +83,32 @@ def parse_args() -> argparse.Namespace:
 
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Start tmux-team against the prepared scenario")
     bootstrap_parser.add_argument("--session", default=DEFAULT_SESSION)
+    bootstrap_parser.add_argument("--agent-runtime", choices=("codex", "acp"), default="codex")
+    bootstrap_parser.add_argument("--acp-tui-bin", default="toad")
+    bootstrap_parser.add_argument("--acp-agent-command", default="agent acp")
+    bootstrap_parser.add_argument("--acp-provider", default="cursor")
+    bootstrap_parser.add_argument("--acp-model", default="")
+    bootstrap_parser.add_argument("--acp-effort", default="")
+    bootstrap_parser.add_argument("--acp-fast", choices=("true", "false"), default="")
+    bootstrap_parser.add_argument(
+        "--acp-startup-timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait for provider startup prompts to become idle",
+    )
+    bootstrap_parser.add_argument(
+        "--instruction-profile",
+        choices=("compact", "guided"),
+        default="guided",
+        help="Role startup instruction verbosity",
+    )
+    bootstrap_parser.add_argument("--defer-goal", action="store_true", help="Start roles without queuing the goal")
     bootstrap_parser.add_argument(
         "--role-yolo", action="store_true", help="Launch managed role panes in Codex YOLO mode"
     )
     bootstrap_parser.add_argument("--force-config", action="store_true", help="Replace an existing team.toml")
+
+    subparsers.add_parser("start-goal", help="Submit the prepared goal after an attach-before-run bootstrap")
 
     subparsers.add_parser("verify", help="Verify the live run reached real target success")
     subparsers.add_parser("sleep", help="Operator phase: sleep the running live-demo team")
@@ -182,6 +209,11 @@ def setup(root: Path, args: argparse.Namespace) -> None:
 
 def bootstrap(root: Path, args: argparse.Namespace) -> None:
     metadata = load_metadata(root)
+    if args.agent_runtime == "acp":
+        prepare_acp_demo_provider(metadata, args.acp_provider)
+        write_acp_goal(root, metadata, args.acp_provider)
+    else:
+        write_goal(root, metadata)
     command = [
         "tmux-team",
         "bootstrap",
@@ -199,27 +231,266 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
         f"implementer={metadata['implementer_worktree']}",
         "--role-worktree",
         f"collector={metadata['collector_worktree']}",
-        "--role-reasoning-effort",
-        "orchestrator=high",
-        "--role-reasoning-effort",
-        "implementer=high",
-        "--role-reasoning-effort",
-        "collector=high",
-        "--goal-file",
-        str(root / "goal.md"),
     ]
-    if args.role_yolo:
+    if not args.defer_goal:
+        command.extend(["--goal-file", str(root / "goal.md")])
+    if args.agent_runtime == "acp":
+        initial_config = acp_demo_initial_config(
+            args.acp_provider,
+            args.acp_model,
+            args.acp_effort,
+            args.acp_fast,
+        )
+        command.extend(
+            [
+                "--agent-runtime",
+                "acp",
+                "--acp-tui-bin",
+                args.acp_tui_bin,
+                "--acp-agent-command",
+                args.acp_agent_command,
+                "--acp-provider",
+                args.acp_provider,
+                "--instruction-profile",
+                args.instruction_profile,
+            ]
+        )
+        for assignment in initial_config:
+            command.extend(["--acp-initial-config", assignment])
+    else:
+        command.extend(
+            [
+                "--role-reasoning-effort",
+                "orchestrator=high",
+                "--role-reasoning-effort",
+                "implementer=high",
+                "--role-reasoning-effort",
+                "collector=high",
+            ]
+        )
+    if args.role_yolo and args.agent_runtime == "codex":
         command.append("--role-yolo")
     if args.force_config:
         command.append("--force-config")
     run(command)
-    start_dashboard_pane(args.session, Path(metadata["project"]) / ".tmux-team" / "team.toml")
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    if args.agent_runtime == "acp":
+        verify_acp_demo_ready(args.session, config_path)
+        if args.acp_model:
+            verify_acp_demo_model(config_path, args.acp_model, timeout=args.acp_startup_timeout)
+        verify_acp_demo_categories(config_path, args.acp_effort, args.acp_fast)
+    start_dashboard_pane(args.session, config_path)
     print("LIVE DEMO BOOTSTRAP STARTED")
     print(f"session: {args.session}")
+    print(f"runtime: {args.agent_runtime}")
     print("dashboard: tt-control split")
     print(f"attach: tmux attach -t {args.session}")
     print(f"project: {metadata['project']}")
+    if args.defer_goal:
+        print(f"deferred goal: {root / 'goal.md'}")
+        print(f"start goal: {Path(__file__).name} --root {root} start-goal")
     print(f"verify later: {Path(__file__).name} --root {root} verify")
+
+
+def start_goal(root: Path) -> None:
+    metadata = load_metadata(root)
+    goal_path = root / "goal.md"
+    config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    if not goal_path.is_file():
+        raise ScenarioError(f"prepared goal is missing: {goal_path}")
+    if not config_path.is_file():
+        raise ScenarioError(f"live demo team is not bootstrapped: {config_path}")
+    result = run(
+        [
+            "tmux-team",
+            "--config",
+            str(config_path),
+            "send",
+            "--from",
+            "operator",
+            "--to",
+            "orchestrator",
+            "--priority",
+            "high",
+            "--summary",
+            "Execute the prepared live demo scenario",
+            "--body-file",
+            str(goal_path),
+            "--correlation-key",
+            "live-demo-goal",
+        ]
+    )
+    print("LIVE DEMO GOAL STARTED")
+    print(result.stdout.strip())
+
+
+def verify_acp_demo_ready(session: str, config_path: Path) -> None:
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    failure_markers = ("Traceback", "BadIdentifier", "ACP TUI role exited", "Not in allowlist")
+    verify_acp_control_ready(session, config, failure_markers)
+    for role in ROLES:
+        role_config = config["roles"][role]
+        pane = str(role_config["pane"])
+        status = run(
+            ["tmux-team", "--config", str(config_path), "acp", "status", role],
+            check=False,
+        )
+        if status.returncode != 0:
+            raise ScenarioError(f"ACP role {role} control socket is unhealthy:\n{status.stderr or status.stdout}")
+        capture = run(["tmux", "capture-pane", "-p", "-t", pane, "-S", "-120"], check=False)
+        if capture.returncode != 0:
+            raise ScenarioError(f"could not capture ACP role {role} pane {pane}: {capture.stderr}")
+        marker = next((value for value in failure_markers if value in capture.stdout), None)
+        if marker is not None:
+            raise ScenarioError(f"ACP role {role} failed readiness check ({marker}) in session {session}")
+
+
+def verify_acp_control_ready(session: str, config: dict[str, Any], failure_markers: tuple[str, ...]) -> None:
+    operator = config.get("operator", {})
+    pane = str(operator.get("pane") or "")
+    socket_value = operator.get("control_socket")
+    session_id = operator.get("runtime_session_id")
+    if operator.get("agent_runtime") != "acp" or not pane or not socket_value or not session_id:
+        raise ScenarioError("ACP operator metadata is incomplete")
+    pane_state = run(["tmux", "display-message", "-p", "-t", pane, "#{pane_dead}"], check=False)
+    if pane_state.returncode != 0 or pane_state.stdout.strip() != "0":
+        raise ScenarioError(f"ACP control pane {pane} is not alive in session {session}")
+    status = send_control_request(Path(str(socket_value)), {"action": "status", "sessionId": str(session_id)})
+    if status.get("sessionId") != session_id:
+        raise ScenarioError("ACP control socket reported a different session")
+    capture = run(["tmux", "capture-pane", "-p", "-t", pane, "-S", "-120"], check=False)
+    marker = next((value for value in failure_markers if value in capture.stdout), None)
+    if capture.returncode != 0 or marker is not None:
+        raise ScenarioError(f"ACP control agent failed readiness check ({marker or 'capture failed'})")
+
+
+def verify_acp_demo_model(config_path: Path, model: str, *, timeout: float = 180.0) -> None:
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    for role in ROLES:
+        role_config = config.get("roles", {}).get(role, {})
+        wait_for_acp_session_idle(
+            Path(str(role_config.get("control_socket") or "")),
+            str(role_config.get("runtime_session_id") or ""),
+            f"role {role}",
+            timeout=timeout,
+        )
+        confirmed_model = acp_session_model(
+            Path(str(role_config.get("control_socket") or "")),
+            str(role_config.get("runtime_session_id") or ""),
+        )
+        if confirmed_model != model:
+            raise ScenarioError(f"ACP role {role} did not start with model {model!r}: {confirmed_model!r}")
+
+    operator = config.get("operator", {})
+    socket_value = operator.get("control_socket")
+    session_id = operator.get("runtime_session_id")
+    if not socket_value or not session_id:
+        raise ScenarioError("ACP operator is missing control-socket session metadata")
+    wait_for_acp_session_idle(Path(str(socket_value)), str(session_id), "operator", timeout=timeout)
+    confirmed_model = acp_session_model(Path(str(socket_value)), str(session_id))
+    if confirmed_model != model:
+        raise ScenarioError(f"ACP operator did not start with model {model!r}: {confirmed_model!r}")
+    print(f"ACP demo model: {model}")
+
+
+def acp_demo_initial_config(provider: str, model: str, effort: str, fast: str) -> tuple[str, ...]:
+    if not model:
+        raise ScenarioError("ACP live demo requires an explicit model")
+    assignments = [] if provider == "pool" else [f"model={model}"]
+    mode_values = {"codex": "agent-full-access", "claude": "bypassPermissions", "pool": "always-allow"}
+    if provider in mode_values:
+        assignments.append(f"mode={mode_values[provider]}")
+    if effort:
+        effort_ids = {"codex": "reasoning_effort", "claude": "effort"}
+        config_id = effort_ids.get(provider)
+        if config_id is None:
+            raise ScenarioError(f"ACP provider {provider!r} has no demo effort-option mapping")
+        assignments.append(f"{config_id}={effort}")
+    if fast:
+        fast_ids = {"codex": "fast-mode"}
+        config_id = fast_ids.get(provider)
+        if config_id is None:
+            raise ScenarioError(f"ACP provider {provider!r} has no demo fast-option mapping")
+        assignments.append(f"{config_id}={fast}")
+    return tuple(assignments)
+
+
+def verify_acp_demo_categories(config_path: Path, effort: str, fast: str) -> None:
+    if not effort and not fast:
+        return
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    sessions = [config.get("operator", {}), *(config.get("roles", {}).get(role, {}) for role in ROLES)]
+    for index, session in enumerate(sessions):
+        socket_value = session.get("control_socket")
+        session_id = session.get("runtime_session_id")
+        if not socket_value or not session_id:
+            raise ScenarioError("ACP demo session is missing config metadata")
+        response = send_control_request(
+            Path(str(socket_value)), {"action": "configOptions", "sessionId": str(session_id)}
+        )
+        options = response.get("configOptions", [])
+        label = "operator" if index == 0 else ROLES[index - 1]
+        if effort and acp_category_value(options, "thought_level") != effort:
+            raise ScenarioError(f"ACP {label} did not confirm effort {effort!r}")
+        if fast:
+            expected_fast = fast == "true"
+            if acp_category_value(options, "model_config") != expected_fast:
+                raise ScenarioError(f"ACP {label} did not confirm fast={fast}")
+
+
+def acp_category_value(options: object, category: str) -> object:
+    if not isinstance(options, list):
+        return None
+    option = next((item for item in options if isinstance(item, dict) and item.get("category") == category), None)
+    return option.get("currentValue") if option is not None else None
+
+
+def prepare_acp_demo_provider(metadata: dict[str, str], provider: str) -> None:
+    if provider != "claude":
+        return
+    settings = json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}, indent=2) + "\n"
+    worktrees = (metadata["project"], metadata["implementer_worktree"], metadata["collector_worktree"])
+    for worktree_value in worktrees:
+        worktree = Path(worktree_value)
+        path = worktree / ".claude" / "settings.local.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(settings, encoding="utf-8")
+
+    exclude_path = Path(git_output(Path(metadata["project"]), "rev-parse", "--git-path", "info/exclude"))
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    entry = ".claude/settings.local.json"
+    if entry not in existing.splitlines():
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        exclude_path.write_text(existing + separator + entry + "\n", encoding="utf-8")
+
+
+def acp_session_model(socket_path: Path, session_id: str) -> str:
+    response = send_control_request(socket_path, {"action": "configOptions", "sessionId": session_id})
+    if response.get("sessionId") != session_id:
+        raise ScenarioError("ACP config-options response reported a different session")
+    for option in response.get("configOptions", []):
+        if isinstance(option, dict) and option.get("id") == "model":
+            return str(option.get("currentValue") or "")
+    raise ScenarioError("ACP session does not advertise a model config option")
+
+
+def wait_for_acp_session_idle(socket_path: Path, session_id: str, label: str, timeout: float = 60.0) -> None:
+    if not str(socket_path) or not session_id:
+        raise ScenarioError(f"ACP {label} is missing control-socket session metadata")
+    deadline = time.monotonic() + timeout
+    last_state = "unknown"
+    while time.monotonic() < deadline:
+        status = send_control_request(socket_path, {"action": "status", "sessionId": session_id})
+        if status.get("sessionId") != session_id:
+            raise ScenarioError(f"ACP {label} control socket reported a different session")
+        last_state = str(status.get("state") or "unknown")
+        if last_state == "idle":
+            return
+        if last_state == "failed":
+            break
+        time.sleep(0.2)
+    raise ScenarioError(f"ACP {label} did not become idle within {timeout:g}s (state={last_state})")
 
 
 def verify(root: Path) -> None:
@@ -233,8 +504,11 @@ def verify(root: Path) -> None:
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     roles = config.get("roles", {})
     operator = config.get("operator", {})
+    is_acp = all(roles.get(role, {}).get("mode") == "acp_tui" for role in ROLES)
     if not operator.get("pane"):
         raise ScenarioError("team.toml is missing operator pane recovery metadata")
+    if is_acp:
+        verify_acp_control_ready("configured session", config, ("Traceback", "ACP TUI role exited"))
     for role, key in (
         ("orchestrator", "project"),
         ("implementer", "implementer_worktree"),
@@ -244,7 +518,14 @@ def verify(root: Path) -> None:
         expected = Path(str(metadata[key])).resolve()
         if actual != expected:
             raise ScenarioError(f"{role} worktree mismatch: expected {expected}, got {actual}")
-        if roles[role].get("codex_reasoning_effort") != "high":
+        if is_acp:
+            if roles[role].get("notify_method") != "control-socket":
+                raise ScenarioError(f"{role} does not use ACP control-socket delivery")
+            if not roles[role].get("control_socket") or not roles[role].get("runtime_session_id"):
+                raise ScenarioError(f"{role} is missing ACP socket/session metadata")
+            if roles[role].get("acp_resume_supported") is not True:
+                raise ScenarioError(f"{role} does not advertise ACP exact resume support")
+        elif roles[role].get("codex_reasoning_effort") != "high":
             raise ScenarioError(f"{role} did not preserve configured Codex reasoning effort")
     verify_tmux_truecolor(config)
 
@@ -273,12 +554,6 @@ def verify(root: Path) -> None:
         require_sql_count_exact(
             conn,
             "messages",
-            "sender = 'orchestrator' AND recipient = 'collector' AND message_kind = 'task'",
-            2,
-        )
-        require_sql_count_exact(
-            conn,
-            "messages",
             "sender = 'orchestrator' AND recipient = 'collector' "
             f"AND correlation_key = '{CORRELATION_KEYS['baseline']}' AND message_kind = 'task'",
             1,
@@ -297,13 +572,14 @@ def verify(root: Path) -> None:
             f"AND correlation_key = '{CORRELATION_KEYS['fix']}' AND message_kind = 'task'",
             1,
         )
-        require_sql_count_exact(
-            conn,
-            "messages",
-            "sender = 'orchestrator' AND recipient = 'implementer' "
-            f"AND correlation_key = '{CORRELATION_KEYS['post_resume']}' AND message_kind = 'task'",
-            1,
-        )
+        if not is_acp:
+            require_sql_count_exact(
+                conn,
+                "messages",
+                "sender = 'orchestrator' AND recipient = 'implementer' "
+                f"AND correlation_key = '{CORRELATION_KEYS['post_resume']}' AND message_kind = 'task'",
+                1,
+            )
         require_sql_count_exact(
             conn,
             "messages",
@@ -314,7 +590,7 @@ def verify(root: Path) -> None:
             conn,
             "messages",
             "sender = 'implementer' AND recipient = 'orchestrator' AND message_kind = 'completion_notice'",
-            2,
+            1 if is_acp else 2,
         )
         require_sql_count(
             conn,
@@ -329,13 +605,14 @@ def verify(root: Path) -> None:
             f"AND correlation_key = '{WATCHDOG_PRESSURE_CORRELATION}'",
             1,
         )
-        require_sql_count_exact(
-            conn,
-            "messages",
-            "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
-            f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
-            1,
-        )
+        if not is_acp:
+            require_sql_count_exact(
+                conn,
+                "messages",
+                "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
+                f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
+                1,
+            )
         require_sql_count_exact(conn, "messages", "state != 'completed'", 0)
         require_sql_count_exact(
             conn,
@@ -344,22 +621,44 @@ def verify(root: Path) -> None:
             1,
         )
         require_sql_count_exact(conn, "obligations", "status IN ('active', 'blocked')", 0)
-        require_sql_count_range(conn, "obligations", "status IN ('done', 'failed', 'cancelled')", minimum=2, maximum=4)
-        require_sql_count(conn, "events", "type = 'obligation.updated'", 2)
-        require_sql_count(conn, "events", "type = 'obligation.completed'", 2)
-        require_sql_count(conn, "events", "type = 'watchdog.runner_ran'", 2)
-        require_sql_count(conn, "events", "type = 'watchdog.runner_updated' AND ref_id = 'live-resume'", 1)
-        require_sql_count(
-            conn, "events", "type = 'watchdog.runner_upserted' AND actor = 'resume' AND ref_id = 'live-resume'", 1
+        require_sql_count_range(
+            conn,
+            "obligations",
+            "status IN ('done', 'failed', 'cancelled')",
+            minimum=1 if is_acp else 2,
+            maximum=2 if is_acp else 4,
         )
-        require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
+        require_sql_count(conn, "events", "type = 'obligation.updated'", 1 if is_acp else 2)
+        require_sql_count(conn, "events", "type = 'obligation.completed'", 1 if is_acp else 2)
+        require_sql_count(conn, "events", "type = 'watchdog.runner_ran'", 1 if is_acp else 2)
+        if not is_acp:
+            require_sql_count(conn, "events", "type = 'watchdog.runner_updated' AND ref_id = 'live-resume'", 1)
+            require_sql_count(
+                conn,
+                "events",
+                "type = 'watchdog.runner_upserted' AND actor = 'resume' AND ref_id = 'live-resume'",
+                1,
+            )
+            require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
         require_sql_count(conn, "events", "type = 'team.sleep.snapshot'", 1)
         require_sql_count(conn, "events", "type = 'team.sleep.teardown'", 1)
         require_sql_count(conn, "events", "type = 'team.resume'", 1)
         require_sql_count(conn, "events", "type = 'stable.approved'", 1)
-        require_sql_count_exact(conn, "watchdog_runners", "name = 'live-resume' AND state = 'stopped'", 1)
+        if not is_acp:
+            require_sql_count_exact(conn, "watchdog_runners", "name = 'live-resume' AND state = 'stopped'", 1)
     finally:
         conn.close()
+
+    if is_acp:
+        snapshot_path = project / ".tmux-team" / "runtime" / "sleeps" / "latest.toml"
+        if not snapshot_path.exists():
+            raise ScenarioError(f"missing ACP sleep snapshot: {snapshot_path}")
+        snapshot = tomllib.loads(snapshot_path.read_text(encoding="utf-8"))
+        for role in ROLES:
+            saved = snapshot.get("roles", {}).get(role, {}).get("acp", {}).get("session_id")
+            resumed = roles[role].get("runtime_session_id")
+            if not saved or saved != resumed:
+                raise ScenarioError(f"{role} ACP exact resume mismatch: saved={saved or '-'} resumed={resumed or '-'}")
 
     milestones = project / ".tmux-team" / "runtime" / "milestones.jsonl"
     if not milestones.exists():
@@ -375,6 +674,7 @@ def verify(root: Path) -> None:
         raise ScenarioError(f"non-orchestrator milestone roles found: {non_orchestrator_milestone_roles}")
 
     print("LIVE DEMO VERIFY OK")
+    print(f"runtime: {'acp' if is_acp else 'codex'}")
     print(f"collector_head: {collector_head}")
     print(f"implementer_head: {implementer_head}")
     print(f"target_test: {TARGET_TEST}")
@@ -443,12 +743,15 @@ def resume_team(root: Path, args: argparse.Namespace) -> None:
     metadata = load_metadata(root)
     config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
     command = ["tmux-team", "--config", str(config_path), "resume"]
-    if args.role_yolo:
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    is_acp = all(role.get("mode") == "acp_tui" for role in config.get("roles", {}).values())
+    if args.role_yolo and not is_acp:
         command.append("--role-yolo")
     run(command)
     print("LIVE DEMO RESUME OK")
     print(f"config: {config_path}")
-    print("nudge watchdog next: make live-demo-watchdog-now")
+    if not is_acp:
+        print("nudge watchdog next: make live-demo-watchdog-now")
 
 
 def nudge_resumed_watchdog(root: Path) -> None:
@@ -630,6 +933,68 @@ def write_goal(root: Path, metadata: dict[str, Any]) -> None:
     Boundaries:
     - Do not edit the tmux-team source checkout that launched this demo.
     - Do not mark success from chat alone; success requires the real test command to pass.
+    - Do not route work to tt-control.
+    """
+    (root / "goal.md").write_text(textwrap.dedent(goal), encoding="utf-8")
+
+
+def write_acp_goal(root: Path, metadata: dict[str, Any], provider: str) -> None:
+    goal = f"""\
+    Live tmux-team ACP demo objective.
+
+    Treat this as a real bugfix in a public repository snapshot, not as a scripted fixture. Do not inspect the tmux-team live-demo setup script or generated scenario metadata as a diagnostic shortcut. Work only from the target repository, tests, runtime state, and role messages.
+
+    Target repository:
+    - URL: {metadata["repo_url"]}
+    - Ref: {metadata["repo_ref"]}
+    - Base commit: {metadata["base_commit"]}
+
+    Role worktrees:
+    - orchestrator: {metadata["project"]}
+    - implementer: {metadata["implementer_worktree"]}
+    - collector: {metadata["collector_worktree"]}
+
+    Target behavior:
+    A seeded regression causes tmux-team inbox claiming to violate urgent-first priority ordering. Diagnose and fix it from tests and code, then verify the fix from the collector worktree.
+
+    Required team flow:
+    1. Orchestrator records a start milestone and starts one obligation for demo verification with `--next-update-in 10s`.
+    2. Orchestrator runs operator show, status --verbose, dashboard --once --no-pane-preview, pane list --all, watchdog, memory show, and acp status for every role before dispatching. Confirm the role runtime is ACP, provider is {provider}, and each role has a control socket and runtime session id.
+    3. Wait at least 12 seconds, then confirm the obligation is overdue before running `tmux-team watchdog run --once --name {WATCHDOG_PRESSURE_NAME} --delivery control-socket --notify-role orchestrator --description "Live ACP demo pressure check" --goal "Escalate overdue demo obligations"`. Do not run the watchdog early. Claim and complete the resulting watchdog message after reconciling the obligation.
+    4. Orchestrator broadcasts one notice-only checkpoint to implementer and collector using `broadcast --notice --only implementer,collector`.
+    5. Orchestrator sends collector exactly one baseline task with --correlation-key {CORRELATION_KEYS["baseline"]}. Collector identifies the minimal failing test and reports evidence with --reply-to-sender.
+    6. Orchestrator updates the obligation after accepting collector evidence.
+    7. Orchestrator sends implementer exactly one fix task with --correlation-key {CORRELATION_KEYS["fix"]}. Implementer fixes production code in its own worktree, runs the targeted test, commits, and replies with the commit SHA.
+    8. Orchestrator inspects relation state with inbox list --verbose and one role pane with pane capture --lines and --offset.
+    9. Orchestrator approves the implementer commit with stable approve <sha> --role {STABLE_SCOPE}.
+    10. Orchestrator sends collector exactly one verification task with --correlation-key {CORRELATION_KEYS["verification"]}. Collector syncs the approved stable commit and reruns the targeted test in its own worktree.
+    11. Orchestrator completes the obligation, records a passing-test milestone, checks status/watchdog/acp status, and broadcasts a final notice using `broadcast --notice --exclude orchestrator`.
+    12. After reviewing completion notices, close them so the final inbox contains no unfinished work.
+
+    Correlation discipline:
+    - Reuse the exact correlation key for retries and follow-ups in one logical thread.
+    - Inspect existing message state before sending follow-up work.
+    - Do not use --allow-duplicate.
+    - After dispatching delegated work, end the turn and rely on the control-socket wake. Do not poll `inbox next` or sleep in a polling loop.
+    - Workers return each delegated result once with `inbox complete --reply-to-sender`; do not send the same result as a separate task.
+    - For role tasks, omit `--notify-method`; recipient configuration selects control-socket delivery. The explicit `--delivery control-socket` above applies only to the watchdog command.
+
+    Useful target test command:
+    uv run --with-editable . python -m unittest {TARGET_TEST}
+
+    Success criteria:
+    - The target test fails before the fix and passes afterward.
+    - Implementer produces a real commit; collector verifies that same commit in its own worktree.
+    - Role communication uses durable inbox messages and completion replies.
+    - ACP role wakes use the private control socket, not tmux stdin.
+    - The run exercises status, dashboard, inbox relations, pane inspection, watchdog control-socket pressure, obligations, milestones, stable approve/sync, completion replies, and notice broadcasts.
+    - Non-orchestrator roles do not write milestones.
+    - After role work completes, the operator exact-sleeps and resumes the team; every provider session ID matches the snapshot.
+
+    Boundaries:
+    - The orchestrator must not call sleep/resume itself; the operator triggers exact recovery after role work completes.
+    - Do not edit the tmux-team source checkout that launched this demo.
+    - Do not mark success from chat alone; the real test must pass.
     - Do not route work to tt-control.
     """
     (root / "goal.md").write_text(textwrap.dedent(goal), encoding="utf-8")

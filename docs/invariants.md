@@ -6,7 +6,7 @@ These are product constraints, not implementation suggestions.
 
 The Codex session that starts `tmux-team bootstrap` is the operator control session.
 
-- Bootstrap names its tmux window `tt-control`.
+- Bootstrap names its runtime-matched operator-agent window `tt-control`: Codex for Codex teams, Toad for ACP teams.
 - It is not a managed role agent.
 - It is not a delivery target for `tmux-team send`.
 - It remains available for the human operator to inspect, intervene, resize the team, and run control commands.
@@ -22,6 +22,9 @@ Codex app-server is infrastructure and stays isolated.
 - It is the wake transport for Codex roles through app-server `turn/start`.
 - If it exits, the pane stays open so the operator can inspect the failure.
 
+Experimental ACP TUI roles do not create `tt-app-server`. Each visible Toad pane owns its configured ACP child and
+accepts wake requests over a private runtime Unix socket.
+
 ## Role Agents
 
 Role agents remain visible in tmux.
@@ -30,7 +33,14 @@ Role agents remain visible in tmux.
 - Each role has a live Codex TUI pane.
 - Each spawned Codex role must have the `start-tmux-team` skill available in its active `CODEX_HOME`.
 - Each role receives wake turns through Codex app-server, not through tmux keystrokes.
+
+For ACP teams, canonical provider presets resolve locally: Cursor to `agent acp`, Codex to `codex-acp`, and Claude to
+`claude-agent-acp`, and Pool `pool acp`. Unknown providers require an explicit stdio command. Provider authentication and permission policy
+remain external to tmux-team; bootstrap must not modify global provider settings.
 - The durable task body lives in the `tmux-team` inbox, not in pane text.
+
+For the experimental ACP runtime, the visible pane is the external Toad TUI. It must remain visible and
+interruptible, and the ACP child must remain owned by that TUI rather than becoming hidden team infrastructure.
 
 The default role set is:
 
@@ -81,6 +91,7 @@ Each role has a scratchpad memory file declared in config.
 
 - Bootstrap creates missing scratchpads before role Codex panes start.
 - A newly spawned role receives a startup prompt to load the `start-tmux-team` skill, read memory, then claim inbox work or park. It reads invariants only when changing behavior, debugging delivery/layout/lifecycle/recovery, migrating a team, or resolving a state conflict.
+- Skill loading is mandatory in both `compact` and `guided` instruction profiles. Profiles change startup-prompt verbosity only; they must not fork the skill, role contract, or invariants by provider/model name.
 - Scratchpad memory preserves long-term goals across context compression, sleep/resume, and pane restarts.
 - Scratchpad memory is also an observability surface for the role, other agents, and the human overseer.
 - Keep the latest and most important state at the top.
@@ -91,6 +102,44 @@ Each role has a scratchpad memory file declared in config.
 - If inbox instructions conflict with scratchpad boundaries, stop and ask the orchestrator.
 - Reset safety is mechanical: use Codex `SessionStart` hooks for `startup|resume|clear|compact` to inject `tmux-team codex session-context` output. The hook restores the same role contract as the startup prompt; it is not a competing task or replacement for inbox work.
 - The role contract has a version marker. Ordinary app-server wakes should not cause full skill rereads when the current contract version and role loop are already loaded; reread the full skill on startup, resume after sleep, SessionStart recovery, explicit operator request, or contract/version mismatch.
+
+## ACP Runtime Handoffs
+
+ACP provider sessions are replaceable execution segments. The tmux-team role,
+SQLite work state, scratchpad, todos, worktree, and handoff capsule provide
+continuity.
+
+- Same-session configuration is limited to live `acp_tui` roles with a control
+  socket. Read options from Toad; never maintain provider catalogs or hard-code
+  config IDs.
+- Configure only an idle, non-quiesced session and keep its session ID stable
+  across the initial options, status, and every sequential `setConfig`
+  response.
+- Treat each returned complete option list as authoritative. Persist all
+  confirmed current values in `acp_config`, derive model/effort/mode summaries
+  by category, and sync TOML with SQLite.
+- Record one `config_changed` lineage entry and
+  `role.runtime_config_changed` event per confirmed change. A later failure
+  preserves earlier confirmed state and events; same-session configuration
+  never creates a capsule, replacement session, or rollback claim.
+- Runtime switching is initially limited to visible `acp_tui` roles.
+- Refuse switching while the current TUI is busy or asking unless explicit
+  cooperative cancellation reaches an idle state.
+- Mark the role draining before checking final TUI quiescence so ordinary dispatch cannot start a new turn during replacement.
+- Use the TUI control-socket `quiesce` barrier before pane replacement; status polling alone cannot close the prompt race.
+- Accept only the latest role-scoped prepared capsule with an unchanged digest and matching source session.
+- Create a bounded handoff capsule before switching; never include inbox task
+  bodies, credentials, hidden reasoning, or the full transcript.
+- Reuse the existing pane and control-socket path for the replacement TUI.
+- Update only the selected role's runtime capability fields after the new TUI
+  reports ready.
+- Send a compact recovery prompt pointing to skill, memory, handoff, Git, todos,
+  and inbox state.
+- Append old/new provider session provenance to runtime lineage state.
+- Reactivate the role only after config, SQLite capabilities, lineage, and the
+  recovery prompt are updated.
+- Leave the role draining after failure; do not silently launch additional
+  replacement sessions.
 
 ## Milestone Log
 
@@ -157,7 +206,7 @@ The operator and orchestrator may inspect managed role panes.
 
 ## Delivery
 
-Never use tmux stdin as the production wake path for Codex roles.
+Never use tmux stdin as the production wake path for managed agent roles.
 
 - Do not paste task bodies into panes.
 - Do not use `tmux send-keys` to wake a pane that a human might be typing in.
@@ -176,13 +225,27 @@ SQLite inbox message
   -> role claims durable inbox item
 ```
 
+Experimental ACP TUI wake delivery is:
+
+```text
+SQLite inbox message
+  -> private role Unix socket
+  -> visible Toad TUI prompt queue
+  -> ACP session/prompt
+  -> role claims durable inbox item
+```
+
+The generic versioned control socket carries only the compact wake prompt. It must not carry the durable task body.
+Each role has a unique socket, and bootstrap must complete a `ping`/`status` readiness handshake before sending its
+startup prompt.
+
 `send-keys` is a debug/unsafe path only and must fail closed when tmux reports copy mode.
 
 Initial bootstrap goals are orchestrator inputs only. `--goal` and `--goal-file` create the initial operator-to-orchestrator message; they are not role startup prompts. Keep them to objective, boundaries, and success criteria, then let the orchestrator send scoped role messages.
 
 `tmux-team broadcast` is a convenience wrapper around durable send. It must create separate messages per recipient so every role has independent claim, ack, completion, and reply state. It must not create a shared message that multiple roles compete to claim. Recipient shaping must use either `--only` or `--exclude`, not both.
 
-`tmux-team broadcast --notice` is the exception for announcements. It must record one durable `message_kind='notice'` row per recipient, keep those rows out of pending inbox work, and wake roles with notice-only wording when notification is requested.
+`tmux-team broadcast --notice` is the exception for announcements. It must record one durable `message_kind='notice'` row per recipient, keep those rows out of pending inbox work, and wake roles with notice-only wording when notification is requested. ACP notice coalescing keys are message-specific so distinct announcements cannot replace each other.
 
 ## Completion Tracking
 
@@ -202,6 +265,8 @@ Message completion is durable state. Conversational completion replies are expli
 - Use `--summary` for the concise result and optional `--body` or `--body-file` for evidence, test output, or handoff detail.
 - Roles should use `--reply-to-sender` when completing delegated work from another managed role.
 - `--reply-to-sender` queues a concise completion message back to the original sender and wakes it through the normal notification path.
+- A delegated result must use that completion reply once; do not also send the same result as a new task.
+- After dispatch, end the current turn and rely on wake delivery. Shell-polling `inbox next` can claim a completion before its queued wake is delivered, creating a redundant empty turn and delaying exact sleep.
 - Completion replies must be stored as `message_kind='completion_notice'`.
 - `tmux-team inbox complete-replies --role ROLE` may bulk-complete claimed or acknowledged completion notices only; it must not close unread queued/notified notices.
 - Material completion notices must not terminate at an intermediate non-orchestrator role. If a delegated result affects the team goal, stable commit, blocker state, external run state, or operator-visible outcome, the recipient must reconcile upward to `orchestrator` with a concise durable message or by completing the still-active orchestrator-owned task.
@@ -244,7 +309,8 @@ Watchdog checks are local supervision, not autonomous orchestration.
 
 The config and runtime store are the source of truth.
 
-- `.tmux-team/team.toml` records role names, pane targets, app-server endpoint, and Codex thread IDs.
+- `.tmux-team/team.toml` records role names, pane targets, runtime-specific app-server or control-socket bindings,
+  and provider metadata.
 - Operator-facing team, role, and lifecycle configuration is TOML.
 - `team.sqlite` records messages, todos, notifications, role state, obligations, events, and stable commits.
 - Tmux is the view/control surface, not the durable state store.
@@ -264,11 +330,17 @@ If a role pane target changes, config must change with it.
 
 `tmux-team sleep` and `tmux-team resume` are the lifecycle boundary for tearing down and restoring a visible team.
 
-- It snapshots role state, pane targets, tmux session/window/pane IDs, app-server thread bindings, running watchdog runners, operator mapping metadata, and configured Codex launch settings before teardown.
+- It snapshots role state, pane targets, tmux session/window/pane IDs, runtime-specific session bindings, running watchdog runners, operator mapping metadata, and configured launch settings before teardown.
 - It writes the snapshot as TOML under `.tmux-team/runtime/sleeps/`.
 - It tears down managed role, app-server, and watchdog windows by default and leaves `tt-control` alive.
 - It marks active/draining roles paused by default so stale bindings do not keep accepting work.
 - Resume reads the latest or specified sleep snapshot, recreates the app-server, role, and running watchdog panes, and launches roles with `codex resume <saved-session>` using the saved Codex thread/session ids and known launch settings.
+- ACP `exact` resume requires negotiated `session/load` support, starts Toad with the saved provider session ID, and
+  verifies the returned ID before reactivating or waking pending work.
+- ACP `handoff` resume is an explicit operator choice that starts a fresh provider session and injects the saved
+  memory/capsule recovery prompt. Never silently fall back from `exact` to `handoff`.
+- ACP sleep drains and atomically quiesces every role before snapshot/teardown; any pre-teardown failure unquiesces
+  roles and restores their prior state.
 - Resume restores configured model, reasoning effort, profile, raw Codex config overrides, and YOLO mode when present. TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown and must be verified manually if important.
 - Bootstrap and resume set tmux truecolor options on the managed session by default. They should use `tmux-256color`, prefer RGB terminal features when supported, set `COLORTERM=truecolor`, and keep `--no-truecolor` as the opt-out for unusual terminal stacks.
 - Resume must update config/runtime pane and app-server bindings after recreating panes.

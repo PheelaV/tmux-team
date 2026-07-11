@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tmux-team"
-version = "0.4.2"
+version = "0.5.0"
 description = "Minimal tmux-backed control plane for persistent agent teams."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 dashboard = [
   "textual>=0.89",
+]
+acp = [
+  "batrachian-toad @ git+https://github.com/PheelaV/toad.git@feature/acp-config-options ; python_version >= '3.14'",
 ]
 dev = [
   "ruff>=0.8",

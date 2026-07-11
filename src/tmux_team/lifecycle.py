@@ -11,16 +11,19 @@ from typing import Any
 
 import tomli_w
 
+from .acp_tui import ACPControlError, control_socket_path, send_control_request, wait_for_acp_tui
 from .bootstrap import (
     DEFAULT_AGENTS_WINDOW,
     RoleBinding,
     RoleLaunchOptions,
+    acp_role_spawn_command,
     app_server_tmux_commands,
     configure_agent_window,
     configure_session_truecolor,
     label_role_pane,
     normalize_agent_layout,
     prepare_grouped_agent_window,
+    resolve_tool_executable,
     role_resume_spawn_command,
     select_tiled_layout_commands,
     session_truecolor_tmux_commands,
@@ -28,8 +31,9 @@ from .bootstrap import (
     write_role_env_files,
     write_team_config,
 )
-from .config import OperatorConfig, TeamConfig, load_config
+from .config import OperatorConfig, TeamConfig, load_config, update_role_runtime_binding
 from .display import format_seconds_duration
+from .runtime_switch import prepare_runtime_handoff, recovery_prompt
 from .store import Store, utc_now
 from .watchdog_runner import (
     watchdog_layout_command,
@@ -41,6 +45,7 @@ from .watchdog_runner import (
 APP_SERVER_WINDOW = "tt-app-server"
 CONTROL_PLANE_WINDOW = "tt-control"
 SLEEP_SCHEMA_VERSION = 1
+ACP_RESUME_POLICIES = ("exact", "handoff")
 
 
 class LifecycleError(RuntimeError):
@@ -77,7 +82,8 @@ class SleepResult:
 class ResumeResult:
     snapshot_path: Path
     session: str
-    endpoint: str
+    endpoint: str | None
+    agent_runtime: str
     commands: list[list[str]]
     role_count: int
     role_panes: dict[str, str]
@@ -98,9 +104,11 @@ def sleep_team(
     force: bool = False,
     kill_session: bool = False,
     pause_roles: bool = True,
+    acp_resume_policy: str = "exact",
 ) -> SleepResult:
     if not config.roles:
         raise LifecycleError("no roles configured")
+    agent_runtime = configured_agent_runtime(config)
 
     if shutil.which(tmux_bin) is None and not dry_run:
         raise LifecycleError(f"tmux binary not found: {tmux_bin}")
@@ -116,37 +124,56 @@ def sleep_team(
         resolved_session,
         dry_run=dry_run,
         force=force,
+        include_app_server=agent_runtime == "codex",
     )
     commands = teardown_commands(tmux_bin, resolved_session, managed_windows, kill_session=kill_session)
-    snapshot = build_sleep_snapshot(
-        sleep_id=sleep_id,
-        config=config,
-        store=store,
-        conn=conn,
-        session=resolved_session,
-        role_targets=role_targets,
-        watchdog_targets=watchdog_targets,
-        managed_windows=managed_windows,
-        commands=commands,
-        kill_session=kill_session,
-        pause_roles=pause_roles,
-        dry_run=dry_run,
-        tmux_bin=tmux_bin,
-    )
-
+    acp_sleep_metadata: dict[str, dict[str, Any]] = {}
+    if agent_runtime == "acp":
+        acp_sleep_metadata = prepare_acp_roles_for_sleep(
+            config,
+            store,
+            conn,
+            policy=normalize_acp_resume_policy(acp_resume_policy),
+            dry_run=dry_run,
+        )
     snapshot_path: Path | None = None
     latest_path: Path | None = None
-    if not dry_run:
-        snapshot_path, latest_path = write_sleep_snapshot(store.runtime_dir, sleep_id, snapshot)
-        store.record_event(
-            conn,
-            "team.sleep.snapshot",
-            "operator",
-            sleep_id,
-            {"snapshot_path": str(snapshot_path), "session": resolved_session, "role_count": len(config.roles)},
+    try:
+        snapshot = build_sleep_snapshot(
+            sleep_id=sleep_id,
+            config=config,
+            store=store,
+            conn=conn,
+            session=resolved_session,
+            role_targets=role_targets,
+            watchdog_targets=watchdog_targets,
+            managed_windows=managed_windows,
+            commands=commands,
+            kill_session=kill_session,
+            pause_roles=pause_roles,
+            dry_run=dry_run,
+            tmux_bin=tmux_bin,
+            acp_sleep_metadata=acp_sleep_metadata,
         )
-        if pause_roles:
-            pause_active_roles(store, conn)
+        if not dry_run:
+            snapshot_path, latest_path = write_sleep_snapshot(store.runtime_dir, sleep_id, snapshot)
+            store.record_event(
+                conn,
+                "team.sleep.snapshot",
+                "operator",
+                sleep_id,
+                {"snapshot_path": str(snapshot_path), "session": resolved_session, "role_count": len(config.roles)},
+            )
+            if pause_roles:
+                pause_active_roles(store, conn)
+    except Exception:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
+        if latest_path is not None:
+            latest_path.unlink(missing_ok=True)
+        if agent_runtime == "acp" and not dry_run:
+            rollback_acp_sleep_preparation(store, conn, acp_sleep_metadata)
+        raise
 
     for command in commands:
         if dry_run:
@@ -193,6 +220,7 @@ def resume_team(
     role_yolo: bool = False,
     role_profile: str | None = None,
     role_launch_options: dict[str, RoleLaunchOptions] | None = None,
+    acp_resume_policy: str | None = None,
     start_app_server: bool = True,
     reactivate_roles: bool = True,
     dry_run: bool = False,
@@ -202,8 +230,6 @@ def resume_team(
         raise LifecycleError("resume requires a config file")
     if shutil.which(tmux_bin) is None and not dry_run:
         raise LifecycleError(f"tmux binary not found: {tmux_bin}")
-    if shutil.which(codex_bin) is None and not dry_run:
-        raise LifecycleError(f"codex binary not found: {codex_bin}")
 
     requested_snapshot = (snapshot_path or store.runtime_dir / "sleeps" / "latest.toml").expanduser()
     snapshot_path, snapshot = load_resume_snapshot(
@@ -217,6 +243,26 @@ def resume_team(
         dry_run=dry_run,
     )
     validate_sleep_snapshot(snapshot)
+
+    snapshot_runtime = snapshot_agent_runtime(snapshot)
+    if snapshot_runtime == "acp":
+        return resume_acp_team(
+            config,
+            store,
+            conn,
+            snapshot_path=snapshot_path,
+            snapshot=snapshot,
+            tmux_bin=tmux_bin,
+            session=session,
+            agent_layout=agent_layout,
+            agents_window=agents_window,
+            reactivate_roles=reactivate_roles,
+            dry_run=dry_run,
+            enable_truecolor=enable_truecolor,
+            requested_policy=acp_resume_policy,
+        )
+    if shutil.which(codex_bin) is None and not dry_run:
+        raise LifecycleError(f"codex binary not found: {codex_bin}")
 
     explicit_role_launch_options = role_launch_options or {}
     roles_data = snapshot["roles"]
@@ -278,6 +324,7 @@ def resume_team(
             snapshot_path=snapshot_path,
             session=session,
             endpoint=endpoint,
+            agent_runtime="codex",
             commands=commands,
             role_count=len(roles),
             role_panes={role: binding.pane for role, binding in role_bindings.items()},
@@ -346,7 +393,7 @@ def resume_team(
     )
     write_role_env_files(config.config_path, resumed_bindings)
 
-    resumed_config = load_resumed_config(config.config_path)
+    resumed_config = load_config(config.config_path)
     store.sync_roles(conn, resumed_config.roles.values())
     for role, binding in resumed_bindings.items():
         store.bind_role_app_server(conn, role, endpoint, binding.thread_id)
@@ -399,6 +446,7 @@ def resume_team(
         snapshot_path=snapshot_path,
         session=session,
         endpoint=endpoint,
+        agent_runtime="codex",
         commands=commands,
         role_count=len(roles),
         role_panes={role: binding.pane for role, binding in resumed_bindings.items()},
@@ -406,6 +454,254 @@ def resume_team(
         watchdog_panes=resumed_watchdog_panes,
         reactivated_roles=reactivate_roles,
         restored_launch_roles=tuple(sorted(role for role, options in role_launch_options.items() if options)),
+    )
+
+
+def resume_acp_team(
+    config: TeamConfig,
+    store: Store,
+    conn: sqlite3.Connection,
+    *,
+    snapshot_path: Path,
+    snapshot: dict[str, Any],
+    tmux_bin: str,
+    session: str | None,
+    agent_layout: str,
+    agents_window: str,
+    reactivate_roles: bool,
+    dry_run: bool,
+    enable_truecolor: bool,
+    requested_policy: str | None,
+) -> ResumeResult:
+    assert config.config_path is not None
+    roles = tuple(str(role) for role in snapshot["roles"])
+    if not roles:
+        raise LifecycleError("sleep snapshot has no roles")
+    policy_override = normalize_acp_resume_policy(requested_policy) if requested_policy else None
+    role_metadata: dict[str, dict[str, Any]] = {}
+    role_bindings: dict[str, RoleBinding] = {}
+    for role in roles:
+        role_data = snapshot["roles"][role]
+        if not isinstance(role_data, dict):
+            raise LifecycleError(f"invalid role entry in sleep snapshot: {role}")
+        worktree = role_data.get("worktree")
+        if not worktree:
+            raise LifecycleError(f"sleep snapshot role {role!r} has no worktree")
+        metadata = snapshot_acp_metadata(snapshot, config, role)
+        policy = policy_override or str(metadata.get("resume_policy") or "exact")
+        policy = normalize_acp_resume_policy(policy)
+        session_id = optional_string(metadata.get("session_id"))
+        if policy == "exact":
+            if not session_id:
+                raise LifecycleError(f"ACP exact resume for role {role!r} has no saved session ID")
+            if metadata.get("resume_supported") is not True:
+                raise LifecycleError(f"ACP exact resume for role {role!r} was not capability-verified")
+        elif not metadata.get("handoff_file"):
+            raise LifecycleError(f"ACP handoff resume for role {role!r} has no saved handoff capsule")
+        tui_bin = optional_string(metadata.get("acp_tui_bin"))
+        agent_command = optional_string(metadata.get("acp_agent_command"))
+        socket_value = optional_string(metadata.get("control_socket")) or str(
+            control_socket_path(config.runtime_dir, role)
+        )
+        if not tui_bin or not agent_command:
+            raise LifecycleError(f"ACP resume role {role!r} is missing Toad or agent-command metadata")
+        if not dry_run:
+            resolved_tui = resolve_tool_executable(tui_bin)
+            if resolved_tui is None:
+                raise LifecycleError(f"ACP TUI binary not found for role {role!r}: {tui_bin}")
+            tui_bin = resolved_tui
+        metadata.update(
+            {
+                "resume_policy": policy,
+                "session_id": session_id,
+                "control_socket": socket_value,
+                "acp_tui_bin": tui_bin,
+                "acp_agent_command": agent_command,
+            }
+        )
+        role_metadata[role] = metadata
+        role_bindings[role] = RoleBinding(
+            thread_id="",
+            pane=str(role_data.get("pane") or ""),
+            worktree=Path(str(worktree)).expanduser().resolve(),
+            session_id=session_id or "",
+            control_socket=socket_value,
+            resume_supported=bool(metadata.get("resume_supported")),
+        )
+
+    session = session or snapshot.get("tmux", {}).get("session") or config.name
+    agent_layout = normalize_agent_layout(agent_layout)
+    commands: list[list[str]] = []
+    if enable_truecolor:
+        commands.extend(session_truecolor_tmux_commands(tmux_bin, session))
+    commands.extend(
+        resume_acp_role_tmux_commands(
+            tmux_bin,
+            session,
+            config.config_path,
+            roles,
+            role_bindings,
+            role_metadata,
+            agent_layout,
+            agents_window,
+        )
+    )
+    watchdogs_data = snapshot_watchdog_runners(snapshot)
+    commands.extend(
+        resume_watchdog_tmux_commands(
+            tmux_bin,
+            session,
+            config.config_path,
+            config.project_root or Path.cwd(),
+            watchdogs_data,
+        )
+    )
+    if dry_run:
+        return ResumeResult(
+            snapshot_path=snapshot_path,
+            session=session,
+            endpoint=None,
+            agent_runtime="acp",
+            commands=commands,
+            role_count=len(roles),
+            role_panes={role: binding.pane for role, binding in role_bindings.items()},
+            role_threads={
+                role: str(role_metadata[role].get("session_id") or "")
+                if role_metadata[role]["resume_policy"] == "exact"
+                else ""
+                for role in roles
+            },
+            watchdog_panes={name: str(data.get("pane") or "") for name, data in watchdogs_data.items()},
+            reactivated_roles=reactivate_roles,
+            restored_launch_roles=(),
+        )
+
+    if enable_truecolor:
+        configure_session_truecolor(tmux_bin, session)
+    if agent_layout == "grouped":
+        prepare_grouped_agent_window(tmux_bin, session, agents_window)
+    resumed_bindings: dict[str, RoleBinding] = {}
+    for index, role in enumerate(roles):
+        binding = role_bindings[role]
+        metadata = role_metadata[role]
+        exact_session = binding.session_id if metadata["resume_policy"] == "exact" else None
+        command = acp_role_spawn_command(
+            tmux_bin,
+            str(metadata["acp_tui_bin"]),
+            str(metadata["acp_agent_command"]),
+            session,
+            binding.worktree,
+            config.config_path,
+            role,
+            binding.control_socket,
+            index,
+            agent_layout,
+            agents_window,
+            exact_session,
+            print_pane=True,
+        )
+        result = subprocess_run_lifecycle(command)
+        pane = result.stdout.strip() or binding.pane
+        if agent_layout == "grouped":
+            if index == 0:
+                configure_agent_window(tmux_bin, session, agents_window)
+            else:
+                for layout_command in select_tiled_layout_commands(tmux_bin, session, agents_window):
+                    subprocess_run_lifecycle(layout_command)
+        label_role_pane(tmux_bin, pane, role)
+        try:
+            status = wait_for_acp_tui(Path(binding.control_socket), timeout=30.0)
+        except ACPControlError as exc:
+            raise LifecycleError(f"ACP role {role!r} did not resume: {exc}") from exc
+        resumed_session = optional_string(status.get("sessionId"))
+        if metadata["resume_policy"] == "exact":
+            if resumed_session != binding.session_id:
+                raise LifecycleError(
+                    f"ACP exact resume session mismatch for role {role!r}: expected {binding.session_id!r}, "
+                    f"got {resumed_session or 'unknown'!r}"
+                )
+            if status.get("resumeSupported") is not True:
+                raise LifecycleError(f"ACP exact resume capability disappeared for role {role!r}")
+        elif not resumed_session:
+            raise LifecycleError(f"ACP handoff resume did not create a session for role {role!r}")
+        if metadata["resume_policy"] == "handoff":
+            handoff_path = Path(str(metadata["handoff_file"]))
+            send_control_request(
+                Path(binding.control_socket),
+                {
+                    "action": "prompt",
+                    "text": recovery_prompt(config, role, handoff_path),
+                    "priority": "normal",
+                    "coalesceKey": "sleep-handoff",
+                },
+            )
+        resumed_bindings[role] = RoleBinding(
+            thread_id="",
+            pane=pane,
+            worktree=binding.worktree,
+            session_id=resumed_session or "",
+            control_socket=binding.control_socket,
+            resume_supported=bool(status.get("resumeSupported")),
+        )
+        update_role_runtime_binding(
+            config.config_path,
+            role,
+            pane=pane,
+            state="active" if reactivate_roles else "paused",
+            capabilities={
+                "control_socket": binding.control_socket,
+                "runtime_session_id": resumed_session,
+                "acp_resume_supported": status.get("resumeSupported")
+                if isinstance(status.get("resumeSupported"), bool)
+                else None,
+                "last_handoff_file": metadata.get("handoff_file"),
+            },
+        )
+
+    write_role_env_files(config.config_path, resumed_bindings)
+    resumed_config = load_config(config.config_path)
+    store.config = resumed_config
+    store.sync_roles(conn, resumed_config.roles.values())
+    resumed_watchdog_panes = resume_watchdogs_from_snapshot(
+        store,
+        conn,
+        tmux_bin=tmux_bin,
+        session=session,
+        config_path=config.config_path,
+        project_root=config.project_root or Path.cwd(),
+        watchdogs_data=watchdogs_data,
+    )
+    if reactivate_roles:
+        for role in roles:
+            if store.pending_count(conn, role):
+                store.notify_role(conn, role, "control-socket")
+    store.record_event(
+        conn,
+        "team.resume",
+        "operator",
+        str(snapshot_path),
+        {
+            "session": session,
+            "agent_runtime": "acp",
+            "roles": list(roles),
+            "resume_policies": {role: role_metadata[role]["resume_policy"] for role in roles},
+            "watchdogs": list(watchdogs_data),
+            "reactivated": reactivate_roles,
+        },
+    )
+    conn.commit()
+    return ResumeResult(
+        snapshot_path=snapshot_path,
+        session=session,
+        endpoint=None,
+        agent_runtime="acp",
+        commands=commands,
+        role_count=len(roles),
+        role_panes={role: binding.pane for role, binding in resumed_bindings.items()},
+        role_threads={role: binding.session_id for role, binding in resumed_bindings.items()},
+        watchdog_panes=resumed_watchdog_panes,
+        reactivated_roles=reactivate_roles,
+        restored_launch_roles=(),
     )
 
 
@@ -524,6 +820,7 @@ def role_launch_options_from_capabilities(capabilities: dict[str, Any]) -> RoleL
         profile=optional_capability(capabilities, "codex_profile"),
         config_overrides=config_overrides,
         yolo=optional_bool_capability(capabilities, "codex_yolo"),
+        instruction_profile=optional_capability(capabilities, "instruction_profile"),
     )
 
 
@@ -542,6 +839,9 @@ def merge_role_launch_options(
             profile=override.profile if override.profile is not None else base.profile,
             config_overrides=override.config_overrides or base.config_overrides,
             yolo=override.yolo if override.yolo is not None else base.yolo,
+            instruction_profile=override.instruction_profile
+            if override.instruction_profile is not None
+            else base.instruction_profile,
         )
     return {role: options for role, options in merged.items() if options != RoleLaunchOptions()}
 
@@ -558,6 +858,154 @@ def optional_bool_capability(capabilities: dict[str, Any], key: str) -> bool | N
     if isinstance(value, bool):
         return value
     return None
+
+
+def normalize_acp_resume_policy(value: str) -> str:
+    policy = str(value).strip().lower()
+    if policy not in ACP_RESUME_POLICIES:
+        raise LifecycleError(f"invalid ACP resume policy {value!r}; expected one of: {', '.join(ACP_RESUME_POLICIES)}")
+    return policy
+
+
+def configured_agent_runtime(config: TeamConfig) -> str:
+    runtimes = {"acp" if role.mode == "acp_tui" else "codex" for role in config.roles.values()}
+    if len(runtimes) != 1:
+        raise LifecycleError("sleep/resume requires a homogeneous Codex or ACP role runtime")
+    return next(iter(runtimes))
+
+
+def prepare_acp_roles_for_sleep(
+    config: TeamConfig,
+    store: Store,
+    conn: sqlite3.Connection,
+    *,
+    policy: str,
+    dry_run: bool,
+) -> dict[str, dict[str, Any]]:
+    prepared: dict[str, dict[str, Any]] = {}
+    previous_states: dict[str, str] = {}
+    quiesced: list[tuple[str, Path, str]] = []
+
+    for role, role_config in config.roles.items():
+        capabilities = role_config.capabilities
+        session_id = optional_capability(capabilities, "runtime_session_id")
+        socket_value = optional_capability(capabilities, "control_socket")
+        tui_bin = optional_capability(capabilities, "acp_tui_bin")
+        agent_command = optional_capability(capabilities, "acp_agent_command")
+        if not session_id or not socket_value or not tui_bin or not agent_command:
+            raise LifecycleError(f"ACP role {role!r} is missing session, socket, TUI, or agent-command metadata")
+        if dry_run:
+            status = {
+                "state": "idle",
+                "sessionId": session_id,
+                "queueDepth": 0,
+                "resumeSupported": capabilities.get("acp_resume_supported"),
+            }
+        else:
+            try:
+                status = send_control_request(Path(socket_value), {"action": "status", "sessionId": session_id})
+            except ACPControlError as exc:
+                raise LifecycleError(f"could not inspect ACP role {role!r} before sleep: {exc}") from exc
+        _validate_acp_sleep_status(role, status, session_id=session_id, policy=policy)
+        role_row = store.get_role(conn, role)
+        previous_states[role] = str(role_row["state"] if role_row is not None else role_config.state)
+        prepared[role] = {
+            "resume_policy": policy,
+            "session_id": session_id,
+            "resume_supported": bool(status.get("resumeSupported")),
+            "control_socket": socket_value,
+            "acp_tui_bin": tui_bin,
+            "acp_agent_command": agent_command,
+            "provider": optional_capability(capabilities, "acp_provider"),
+            "model": optional_capability(capabilities, "acp_model"),
+            "effort": optional_capability(capabilities, "acp_effort"),
+            "original_state": previous_states[role],
+        }
+
+    if dry_run:
+        return prepared
+
+    try:
+        for role in config.roles:
+            if previous_states[role] != "draining":
+                store.set_role_state(conn, role, "draining", actor="sleep")
+        for role, metadata in prepared.items():
+            socket_path = Path(str(metadata["control_socket"]))
+            session_id = str(metadata["session_id"])
+            response = send_control_request(
+                socket_path,
+                {"action": "quiesce", "sessionId": session_id},
+            )
+            if response.get("acceptingPrompts") is False:
+                quiesced.append((role, socket_path, session_id))
+            _validate_acp_sleep_status(
+                role,
+                response,
+                session_id=session_id,
+                policy=policy,
+                require_resume_capability=False,
+            )
+            if response.get("acceptingPrompts") is not False:
+                raise LifecycleError(f"ACP role {role!r} did not confirm prompt quiescence")
+        for role, metadata in prepared.items():
+            handoff = prepare_runtime_handoff(
+                store,
+                conn,
+                role,
+                summary=f"Sleep checkpoint for exact or handoff ACP resume ({policy}).",
+                actor="sleep",
+            )
+            metadata["handoff_file"] = str(handoff)
+    except Exception:
+        rollback_acp_sleep_preparation(store, conn, prepared, quiesced=quiesced)
+        raise
+    return prepared
+
+
+def rollback_acp_sleep_preparation(
+    store: Store,
+    conn: sqlite3.Connection,
+    metadata: dict[str, dict[str, Any]],
+    *,
+    quiesced: list[tuple[str, Path, str]] | None = None,
+) -> None:
+    targets = quiesced or [
+        (role, Path(str(data["control_socket"])), str(data["session_id"])) for role, data in metadata.items()
+    ]
+    for _role, socket_path, session_id in reversed(targets):
+        try:
+            send_control_request(socket_path, {"action": "unquiesce", "sessionId": session_id})
+        except ACPControlError:
+            pass
+    for role, data in metadata.items():
+        state = str(data.get("original_state") or "active")
+        current = store.get_role(conn, role)
+        if current is not None and current["state"] != state:
+            store.set_role_state(conn, role, state, actor="sleep-rollback")
+
+
+def _validate_acp_sleep_status(
+    role: str,
+    status: dict[str, Any],
+    *,
+    session_id: str,
+    policy: str,
+    require_resume_capability: bool = True,
+) -> None:
+    state = str(status.get("state") or "unknown")
+    if state != "idle":
+        raise LifecycleError(f"ACP role {role!r} is not idle for sleep (state={state})")
+    queue_depth = int(status.get("queueDepth") or 0)
+    if queue_depth:
+        raise LifecycleError(f"ACP role {role!r} has {queue_depth} queued prompt(s)")
+    reported_session = optional_string(status.get("sessionId"))
+    if reported_session != session_id:
+        raise LifecycleError(
+            f"ACP role {role!r} session mismatch before sleep: expected {session_id!r}, "
+            f"got {reported_session or 'unknown'!r}"
+        )
+    if require_resume_capability and policy == "exact" and status.get("resumeSupported") is not True:
+        raise LifecycleError(f"ACP role {role!r} does not advertise exact session resume support")
 
 
 def operator_config_from_snapshot(snapshot: dict[str, Any], *, fallback: OperatorConfig) -> OperatorConfig:
@@ -580,6 +1028,39 @@ def first_snapshot_endpoint(snapshot: dict[str, Any]) -> str | None:
         if isinstance(app_server, dict) and app_server.get("endpoint"):
             return str(app_server["endpoint"])
     return None
+
+
+def snapshot_agent_runtime(snapshot: dict[str, Any]) -> str:
+    modes = {
+        "acp" if isinstance(data, dict) and data.get("mode") == "acp_tui" else "codex"
+        for data in snapshot.get("roles", {}).values()
+    }
+    if len(modes) != 1:
+        raise LifecycleError("sleep snapshot mixes Codex and ACP role runtimes")
+    return next(iter(modes))
+
+
+def snapshot_acp_metadata(snapshot: dict[str, Any], config: TeamConfig, role: str) -> dict[str, Any]:
+    role_data = snapshot.get("roles", {}).get(role)
+    if not isinstance(role_data, dict):
+        raise LifecycleError(f"invalid ACP role entry in sleep snapshot: {role}")
+    metadata = dict(role_data.get("acp")) if isinstance(role_data.get("acp"), dict) else {}
+    capabilities = snapshot_role_capabilities(snapshot, role)
+    config_role = config.roles.get(role)
+    if config_role is not None:
+        capabilities = config_role.capabilities | capabilities
+    defaults = {
+        "session_id": optional_capability(capabilities, "runtime_session_id"),
+        "resume_supported": optional_bool_capability(capabilities, "acp_resume_supported"),
+        "control_socket": optional_capability(capabilities, "control_socket"),
+        "acp_tui_bin": optional_capability(capabilities, "acp_tui_bin"),
+        "acp_agent_command": optional_capability(capabilities, "acp_agent_command"),
+        "provider": optional_capability(capabilities, "acp_provider"),
+        "model": optional_capability(capabilities, "acp_model"),
+        "effort": optional_capability(capabilities, "acp_effort"),
+        "handoff_file": optional_capability(capabilities, "last_handoff_file"),
+    }
+    return {key: value for key, value in defaults.items() if value is not None} | metadata
 
 
 def snapshot_role_bindings(snapshot: dict[str, Any]) -> dict[str, RoleBinding]:
@@ -668,6 +1149,97 @@ def resume_role_tmux_commands(
         if agent_layout == "grouped" and index > 0:
             commands.extend(select_tiled_layout_commands(tmux_bin, session, agents_window))
     return commands
+
+
+def resume_acp_role_tmux_commands(
+    tmux_bin: str,
+    session: str,
+    config_path: Path,
+    roles: tuple[str, ...],
+    role_bindings: dict[str, RoleBinding],
+    role_metadata: dict[str, dict[str, Any]],
+    agent_layout: str,
+    agents_window: str,
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for index, role in enumerate(roles):
+        binding = role_bindings[role]
+        metadata = role_metadata[role]
+        exact_session = binding.session_id if metadata["resume_policy"] == "exact" else None
+        commands.append(
+            acp_role_spawn_command(
+                tmux_bin,
+                str(metadata["acp_tui_bin"]),
+                str(metadata["acp_agent_command"]),
+                session,
+                binding.worktree,
+                config_path,
+                role,
+                binding.control_socket,
+                index,
+                agent_layout,
+                agents_window,
+                exact_session,
+            )
+        )
+        if agent_layout == "grouped" and index == 0:
+            commands.extend(
+                [
+                    [tmux_bin, "set-window-option", "-t", f"{session}:{agents_window}", "pane-border-status", "top"],
+                    [
+                        tmux_bin,
+                        "set-window-option",
+                        "-t",
+                        f"{session}:{agents_window}",
+                        "pane-border-format",
+                        "#{pane_index}: #{@tmux-team-role}",
+                    ],
+                ]
+            )
+        if agent_layout == "grouped" and index > 0:
+            commands.extend(select_tiled_layout_commands(tmux_bin, session, agents_window))
+    return commands
+
+
+def resume_watchdogs_from_snapshot(
+    store: Store,
+    conn: sqlite3.Connection,
+    *,
+    tmux_bin: str,
+    session: str,
+    config_path: Path,
+    project_root: Path,
+    watchdogs_data: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    panes: dict[str, str] = {}
+    window_present = bool(watchdogs_data) and tmux_window_exists(tmux_bin, session, watchdog_window_name())
+    for index, (name, data) in enumerate(watchdogs_data.items()):
+        pane = start_resumed_watchdog_runner(
+            tmux_bin,
+            session,
+            config_path,
+            project_root,
+            name,
+            data,
+            use_existing_window=window_present or index > 0,
+        )
+        window_present = True
+        panes[name] = pane
+        store.upsert_watchdog_runner(
+            conn,
+            name=name,
+            state=str(data.get("state") or "running"),
+            interval_seconds=int(data["interval_seconds"]),
+            scope_role=optional_string(data.get("scope_role")),
+            description=optional_string(data.get("description")),
+            goal=optional_string(data.get("goal")),
+            notify_role=optional_string(data.get("notify_role")),
+            delivery_method=str(data.get("delivery_method") or "report-only"),
+            pane=pane,
+            window=f"{session}:{watchdog_window_name()}",
+            actor="resume",
+        )
+    return panes
 
 
 def resume_watchdog_tmux_commands(
@@ -768,10 +1340,6 @@ def subprocess_run_lifecycle(command: list[str]) -> subprocess.CompletedProcess[
         details = (result.stderr or result.stdout or f"command exited {result.returncode}").strip()
         raise LifecycleError(f"command failed: {' '.join(command)}\n{details}")
     return result
-
-
-def load_resumed_config(config_path: Path) -> TeamConfig:
-    return load_config(config_path)
 
 
 def inspect_role_targets(config: TeamConfig, tmux_bin: str, *, dry_run: bool) -> dict[str, TmuxTarget]:
@@ -903,6 +1471,7 @@ def managed_window_targets(
     *,
     dry_run: bool,
     force: bool,
+    include_app_server: bool = True,
 ) -> list[dict[str, Any]]:
     windows: dict[str, dict[str, Any]] = {}
     for role, target in role_targets.items():
@@ -947,7 +1516,7 @@ def managed_window_targets(
         )
         entry.setdefault("watchdogs", []).append(name)
 
-    app_server = app_server_window_target(tmux_bin, session, dry_run=dry_run)
+    app_server = app_server_window_target(tmux_bin, session, dry_run=dry_run) if include_app_server else None
     if app_server is not None:
         key, value = app_server
         windows.setdefault(
@@ -1026,13 +1595,14 @@ def build_sleep_snapshot(
     pause_roles: bool,
     dry_run: bool,
     tmux_bin: str,
+    acp_sleep_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     roles: dict[str, Any] = {}
     for role_name, role_config in config.roles.items():
         role_row = store.get_role(conn, role_name)
         resolved = store.resolve_role_app_server(conn, role_name, role_row) if role_row is not None else None
         target = role_targets[role_name]
-        roles[role_name] = {
+        role_snapshot = {
             "mode": role_config.mode,
             "state": role_row["state"] if role_row is not None else role_config.state,
             "pane": role_config.pane,
@@ -1056,6 +1626,9 @@ def build_sleep_snapshot(
                 "details": target.details,
             },
         }
+        if acp_sleep_metadata and role_name in acp_sleep_metadata:
+            role_snapshot["acp"] = acp_sleep_metadata[role_name]
+        roles[role_name] = role_snapshot
     operator = build_operator_snapshot(config, tmux_bin=tmux_bin, session=session, dry_run=dry_run)
     watchdogs = build_watchdog_snapshot(store, conn, watchdog_targets)
 

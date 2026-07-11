@@ -2,6 +2,68 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## 0.5.0 - 2026-07-11
+
+- Added a minimal Codex/ACP runtime adapter boundary while keeping Codex as the default built-in runtime.
+- Added experimental `--agent-runtime acp` support that launches a visible external Toad TUI per role with an
+  arbitrary `--acp-agent-command`, unique private control socket, readiness/status handshake, and compact
+  control-socket wake delivery.
+- Added generic ACP config and `tmux-team acp status/wake/cancel` controls.
+- Added the temporary `tmux-team[acp]` package extra for the Toad control-socket branch. The extra requires Python
+  3.14; base tmux-team and Codex operation remain Python 3.11+.
+- Made completion replies, initial goals, and MCP sends use each recipient role's configured delivery method.
+- Added `make install-cursor-skill` for the shared `start-tmux-team` skill.
+- Added separate Codex and provider-agnostic ACP live-demo bootstrap paths over the same reproducible public fixture.
+- Made the real ACP live demo require explicit provider-usage opt-in and task-model selection before goal dispatch.
+- Made `tt-control` a runtime-matched operator agent: Codex for Codex teams and Toad/ACP for ACP teams, outside managed role routing.
+- Made ACP bootstrap discover Toad inside the tmux-team uv tool environment when dependency executables are not exposed on the user PATH.
+- Made managed Toad panes start with compact, reversible chrome and added a post-startup socket stabilization check so provider-triggered TUI crashes fail bootstrap instead of appearing healthy.
+- Made Toad compact mode keep the single-session tab bar hidden after session startup.
+- Made compact managed Toad panes use full-width content and runtime-neutral terminal titles.
+- Made role-scoped stable approvals resolve abbreviated Git revisions to canonical commit object IDs before persistence.
+- Added `tmux-team runtime show/prepare/switch` for safe ACP provider/model
+  session replacement through draining, bounded handoff capsules, recovery
+  prompts, and append-only session lineage.
+- Added `tmux-team runtime options/configure` for capability-driven,
+  same-session ACP configuration. Confirmed full option state is persisted in
+  TOML and SQLite, and each successful change records lineage without creating
+  a handoff or new provider session.
+- Closed SQLite connections deterministically in CLI, bootstrap, MCP, and
+  dashboard refresh paths instead of relying on process or garbage-collector cleanup.
+- Added ACP sleep/resume with exact `session/load` restoration, verified provider session identity, durable pending-work
+  re-wake, and explicit handoff fallback. Sleep quiescence rolls back safely before teardown on failure.
+- Moved ACP-only preflight, permission, and runtime-switch instructions into an on-demand skill reference so Codex-only
+  teams do not load that provider-specific context.
+- Updated package, CLI, plugin, and marketplace metadata for 0.5.0.
+- Added an explicit `live-demo-acp-start` step so operators can attach before releasing the deferred scenario goal.
+- Bound ACP runtime switches to the latest unchanged role/session handoff, serialized concurrent config updates,
+  atomically quiesced new external prompts, rejected non-empty provider queues, bounded handoff bodies, and preserved
+  distinct coalesced notices.
+- Made the ACP live goal validate the configured provider instead of assuming Cursor.
+- Added canonical Cursor, Codex, Claude, and Pool ACP provider presets with missing-executable install diagnostics; explicit
+  commands still support arbitrary stdio adapters. The ACP package extra installs Toad transport, not every provider
+  adapter; operators install only the adapters they select.
+- Added cost-gated Cursor/Codex/Claude orchestrated demo entry points over the same public fixture, exact-resume
+  lifecycle, and deterministic verifier, with explicit provider-specific model/effort and advertised fast-mode defaults.
+- Added repeatable `--acp-initial-config ID=VALUE`; bootstrap confirms these options after ACP session creation and
+  before the first startup prompt, preventing an unintended provider default from consuming the initial turn.
+- Made ACP demo startup readiness configurable with a conservative 180-second default for slower provider initialization
+  and first skill loading.
+- Clarified that dispatchers must end their turn and rely on wake delivery instead of polling the inbox, and that workers
+  return a delegated result once through `--reply-to-sender` rather than duplicating it as a new task.
+- Added persisted `compact` and `guided` startup instruction profiles with team defaults and per-role overrides. Both
+  profiles keep mandatory `start-tmux-team` skill/invariant loading; no profile is inferred from provider/model names.
+- Added provider-selectable skill installation with `make install-skill SKILL_PROVIDERS=...` for Codex, Cursor,
+  Claude, and Pool, plus documented Pool project-local `.poolside/skills/` / `.agents/skills/` alternatives.
+
+Prototype limits:
+
+- ACP roles require the temporary Toad config-options branch pinned by the
+  `tmux-team[acp]` extra. It provides the generic control socket, exact session
+  loading, and `configOptions`/`setConfig` actions.
+
+ACP runtime, layout, and notification values accept their documented canonical spellings only.
+
 ## 0.4.2 - 2026-07-10
 
 - Fixed notified inbox work becoming invisible to a plausible drain check: `inbox list --state pending` now matches the `status pending=N` definition and includes queued, notified, retrying, and expired claimed work.
