@@ -2,6 +2,13 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## Unreleased
+
+- Fixed native Codex bootstrap preflight so an enabled `tmux-team` Codex plugin satisfies skill availability; the
+  preflight previously recognized only the legacy skill copied directly into `CODEX_HOME/skills`.
+- Clarified that Codex must start a new thread after plugin installation and documented commands that verify both the
+  CLI and plugin halves of the installation.
+
 ## 0.5.0 - 2026-07-11
 
 - Added a minimal Codex/ACP runtime adapter boundary while keeping Codex as the default built-in runtime.

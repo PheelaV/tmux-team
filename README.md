@@ -164,6 +164,8 @@ codex plugin add tmux-team@tmux-team
 You can also add the marketplace from Codex and install through `/plugins install`.
 
 The plugin installs the `start-tmux-team` skill. The CLI is still installed separately with `uv` or `pipx`; the plugin does not mutate global Python tools.
+Start a new Codex thread after installing or updating the plugin so Codex loads the skill. Verify both halves of the
+installation with `tmux-team --version` and `codex plugin list`.
 
 If the skill says `tmux-team` is missing, install the CLI with one of the commands above and retry.
 

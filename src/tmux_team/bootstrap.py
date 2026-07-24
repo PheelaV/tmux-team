@@ -193,7 +193,7 @@ def bootstrap_team(
             suffix = f" {hint}" if hint else ""
             raise BootstrapError(f"ACP agent executable not found: {agent_executable}.{suffix}")
     if not dry_run and runtime.uses_app_server:
-        ensure_start_skill_available()
+        ensure_start_skill_available(codex_bin)
     role_worktree_paths, worktree_commands = prepare_role_worktrees(
         project_root,
         roles,
@@ -1473,14 +1473,45 @@ def orchestrator_unblock_first_guidance(role: str) -> str:
     )
 
 
-def ensure_start_skill_available() -> None:
+def ensure_start_skill_available(codex_bin: str = "codex") -> None:
     skill_path = codex_home() / "skills" / "start-tmux-team" / "SKILL.md"
     if skill_path.exists():
         return
+    if codex_plugin_skill_enabled(codex_bin):
+        return
     raise BootstrapError(
         "start-tmux-team Codex skill is not installed in CODEX_HOME. "
-        "Install it before bootstrapping role panes with `make install-skill` from a tmux-team "
-        f"checkout, or copy skills/start-tmux-team into {skill_path.parent}"
+        "Install the tmux-team Codex plugin with "
+        "`codex plugin marketplace add PheelaV/tmux-team --ref main` and "
+        "`codex plugin add tmux-team@tmux-team`, or install the legacy skill with "
+        f"`make install-skill` from a tmux-team checkout into {skill_path.parent}"
+    )
+
+
+def codex_plugin_skill_enabled(codex_bin: str = "codex") -> bool:
+    try:
+        result = subprocess.run(
+            [codex_bin, "plugin", "list", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    installed = payload.get("installed", []) if isinstance(payload, dict) else []
+    return any(
+        isinstance(plugin, dict)
+        and plugin.get("name") == "tmux-team"
+        and plugin.get("installed") is True
+        and plugin.get("enabled") is True
+        for plugin in installed
     )
 
 
