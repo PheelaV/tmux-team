@@ -164,6 +164,8 @@ codex plugin add tmux-team@tmux-team
 You can also add the marketplace from Codex and install through `/plugins install`.
 
 The plugin installs the `start-tmux-team` skill. The CLI is still installed separately with `uv` or `pipx`; the plugin does not mutate global Python tools.
+Start a new Codex thread after installing or updating the plugin so Codex loads the skill. Verify both halves of the
+installation with `tmux-team --version` and `codex plugin list`.
 
 If the skill says `tmux-team` is missing, install the CLI with one of the commands above and retry.
 
@@ -446,10 +448,13 @@ Deterministic fake-agent smoke test:
 make integration-test
 make bootstrap-layout-smoke-test
 make smoke-test
+make one-based-index-smoke-test
 make congestion-smoke-test
 ```
 
-`make integration-test` is the default local confidence suite. It runs Ruff, unit tests, the real tmux bootstrap/sleep layout smoke, the basic fake-agent workflow, and the congestion/multiple-message workflow.
+`make integration-test` is the default local confidence suite. It runs Ruff, unit tests, the real tmux
+bootstrap/sleep layout smoke, the basic fake-agent workflow, bootstrap and workflow checks on isolated tmux servers
+with one-based window and pane indexes, and the congestion/multiple-message workflow.
 
 Visible tmux run:
 

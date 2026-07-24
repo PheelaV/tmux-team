@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,9 +25,11 @@ def main() -> int:
     args = parse_args()
     root = Path(args.root).expanduser().resolve()
     session = args.session
+    tmux_bin = "tmux"
 
     try:
         reset_root(root, args.force)
+        tmux_bin = str(write_tmux_wrapper(root)) if args.one_based_tmux else "tmux"
         install_test_skill(root)
         fake_codex = write_fake_codex(root)
         patch_app_server_probes()
@@ -38,7 +41,7 @@ def main() -> int:
             roles=DEFAULT_ROLES,
             endpoint="ws://127.0.0.1:45555",
             codex_bin=str(fake_codex),
-            tmux_bin="tmux",
+            tmux_bin=tmux_bin,
             goal=None,
             force_config=True,
             start_app_server=True,
@@ -50,16 +53,21 @@ def main() -> int:
             dry_run=False,
         )
         config_path = root / "project" / ".tmux-team" / "team.toml"
-        verify_layout(session, config_path, result.role_panes)
+        if args.one_based_tmux:
+            verify_one_based_tmux(tmux_bin)
+        verify_layout(tmux_bin, session, config_path, result.role_panes)
         verify_scratchpads(config_path)
-        run_sleep(config_path, session)
-        verify_sleep(session, config_path)
+        run_sleep(tmux_bin, config_path, session)
+        verify_sleep(tmux_bin, session, config_path)
     except SmokeError as exc:
         print(f"bootstrap layout smoke failed: {exc}", file=sys.stderr)
         return 1
     finally:
         subprocess.run(
-            ["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+            [tmux_bin, "kill-session", "-t", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
         )
 
     print("")
@@ -77,6 +85,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session", default="tt-bootstrap-layout-itest")
     parser.add_argument("--root", default="/tmp/tmux-team-bootstrap-layout-itest")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--one-based-tmux",
+        action="store_true",
+        help="run against an isolated tmux server with one-based window and pane indexes",
+    )
     return parser.parse_args()
 
 
@@ -101,9 +114,30 @@ def install_test_skill(root: Path) -> None:
     os.environ["CODEX_HOME"] = str(codex_home)
 
 
+def write_tmux_wrapper(root: Path) -> Path:
+    tmux = shutil.which("tmux")
+    if not tmux:
+        raise SmokeError("tmux is not installed")
+    config = root / "tmux-one-based.conf"
+    config.write_text(
+        "set-option -g base-index 1\nset-window-option -g pane-base-index 1\nset-option -g renumber-windows on\n",
+        encoding="utf-8",
+    )
+    wrapper = root / "bin" / "tmux"
+    wrapper.parent.mkdir()
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(tmux)} -L tmux-team-bootstrap-one-based-{os.getpid()} "
+        f'-f {shlex.quote(str(config))} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def write_fake_codex(root: Path) -> Path:
     bin_dir = root / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     fake_codex = bin_dir / "codex"
     fake_codex.write_text(
         textwrap.dedent(
@@ -127,8 +161,18 @@ def patch_app_server_probes() -> None:
     bootstrap_mod.wait_for_new_loaded_thread = lambda endpoint, previous, timeout: f"thread-{len(previous) + 1}"
 
 
-def verify_layout(session: str, config_path: Path, role_panes: dict[str, str]) -> None:
-    windows = list_windows(session)
+def verify_one_based_tmux(tmux_bin: str) -> None:
+    window_index = run([tmux_bin, "show-options", "-gv", "base-index"]).stdout.strip()
+    pane_index = run([tmux_bin, "show-window-options", "-gv", "pane-base-index"]).stdout.strip()
+    if window_index != "1" or pane_index != "1":
+        raise SmokeError(
+            "isolated tmux server did not apply one-based indexes: "
+            f"base-index={window_index!r} pane-base-index={pane_index!r}"
+        )
+
+
+def verify_layout(tmux_bin: str, session: str, config_path: Path, role_panes: dict[str, str]) -> None:
+    windows = list_windows(tmux_bin, session)
     expected_windows = [
         bootstrap_mod.DEFAULT_CONTROL_WINDOW,
         bootstrap_mod.DEFAULT_APP_SERVER_WINDOW,
@@ -137,7 +181,7 @@ def verify_layout(session: str, config_path: Path, role_panes: dict[str, str]) -
     if windows != expected_windows:
         raise SmokeError(f"expected windows {expected_windows}, got {windows}")
 
-    panes = list_panes(session, bootstrap_mod.DEFAULT_AGENTS_WINDOW)
+    panes = list_panes(tmux_bin, session, bootstrap_mod.DEFAULT_AGENTS_WINDOW)
     role_labels = [pane["role"] for pane in panes]
     if role_labels != list(DEFAULT_ROLES):
         raise SmokeError(f"expected agent role labels {list(DEFAULT_ROLES)}, got {role_labels}")
@@ -173,7 +217,7 @@ def verify_scratchpads(config_path: Path) -> None:
             raise SmokeError(f"scratchpad seed missing required sections for {role}: {path}")
 
 
-def run_sleep(config_path: Path, session: str) -> None:
+def run_sleep(tmux_bin: str, config_path: Path, session: str) -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -184,6 +228,8 @@ def run_sleep(config_path: Path, session: str) -> None:
             "sleep",
             "--session",
             session,
+            "--tmux-bin",
+            tmux_bin,
         ],
         text=True,
         stdout=subprocess.PIPE,
@@ -196,8 +242,8 @@ def run_sleep(config_path: Path, session: str) -> None:
         raise SmokeError(f"sleep output did not report a snapshot:\n{result.stdout}")
 
 
-def verify_sleep(session: str, config_path: Path) -> None:
-    windows = list_windows(session)
+def verify_sleep(tmux_bin: str, session: str, config_path: Path) -> None:
+    windows = list_windows(tmux_bin, session)
     if windows != [bootstrap_mod.DEFAULT_CONTROL_WINDOW]:
         raise SmokeError(f"expected only {bootstrap_mod.DEFAULT_CONTROL_WINDOW} after sleep, got {windows}")
 
@@ -213,15 +259,15 @@ def verify_sleep(session: str, config_path: Path) -> None:
         raise SmokeError("sleep snapshot did not preserve orchestrator thread id")
 
 
-def list_windows(session: str) -> list[str]:
-    result = run(["tmux", "list-windows", "-t", session, "-F", "#{window_name}"])
+def list_windows(tmux_bin: str, session: str) -> list[str]:
+    result = run([tmux_bin, "list-windows", "-t", session, "-F", "#{window_name}"])
     return [line for line in result.stdout.splitlines() if line]
 
 
-def list_panes(session: str, window: str) -> list[dict[str, str]]:
+def list_panes(tmux_bin: str, session: str, window: str) -> list[dict[str, str]]:
     result = run(
         [
-            "tmux",
+            tmux_bin,
             "list-panes",
             "-t",
             f"{session}:{window}",

@@ -15,6 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 MARKER = ".tmux-team-sandbox"
+TMUX_COMMAND = ("tmux",)
 
 
 @dataclass(frozen=True)
@@ -31,15 +32,18 @@ def main() -> int:
     cleanup_session = False
     try:
         paths = reset_sandbox(Path(args.root).expanduser().resolve(), args.force)
+        configure_tmux(args, paths)
         write_project(paths, args.scenario)
-        write_config(paths, args.session)
 
         if args.spawn_session:
             cleanup_session = ensure_session(args.session, paths.root, replace=args.cleanup_session)
         else:
             require_session(args.session)
 
+        if args.one_based_tmux:
+            verify_one_based_tmux()
         ensure_layout(args.session, paths)
+        write_config(paths, args.session)
         run_flow(args.session, paths, args.timeout, args.scenario)
         verify(paths, args.scenario)
     except DemoError as exc:
@@ -65,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spawn-session", action="store_true", help="create the tmux session if needed")
     parser.add_argument("--cleanup-session", action="store_true", help="kill the spawned tmux session before exit")
     parser.add_argument("--force", action="store_true", help="replace an existing marked sandbox root")
+    parser.add_argument(
+        "--one-based-tmux",
+        action="store_true",
+        help="run against an isolated tmux server with one-based window and pane indexes",
+    )
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds to wait for each pane step")
     parser.add_argument("--scenario", choices=("basic", "congestion"), default="basic", help="smoke scenario")
     return parser.parse_args()
@@ -165,6 +174,7 @@ if __name__ == "__main__":
 
 
 def write_config(paths: Paths, session: str) -> None:
+    panes = {role: pane_target(session, role) for role in ("orchestrator", "collector", "implementer")}
     paths.config.write_text(
         f"""[team]
 name = "sandbox"
@@ -173,21 +183,21 @@ runtime_dir = "{paths.runtime}"
 [roles.orchestrator]
 mode = "human_visible"
 state = "active"
-pane = "{session}:orchestrator.0"
+pane = "{panes["orchestrator"]}"
 can_edit = false
 notify_method = "display-message"
 
 [roles.collector]
 mode = "human_visible"
 state = "active"
-pane = "{session}:collector.0"
+pane = "{panes["collector"]}"
 can_edit = false
 notify_method = "display-message"
 
 [roles.implementer]
 mode = "human_visible"
 state = "active"
-pane = "{session}:implementer.0"
+pane = "{panes["implementer"]}"
 can_edit = true
 notify_method = "display-message"
 """,
@@ -200,12 +210,12 @@ def ensure_session(session: str, cwd: Path, *, replace: bool) -> bool:
         if not replace:
             return False
         kill_session(session)
-    run(["tmux", "new-session", "-d", "-s", session, "-c", str(cwd)], check=True)
+    run(tmux_command("new-session", "-d", "-s", session, "-c", str(cwd)), check=True)
     return True
 
 
 def kill_session(session: str) -> None:
-    run(["tmux", "kill-session", "-t", session], check=False)
+    run(tmux_command("kill-session", "-t", session), check=False)
 
 
 def require_session(session: str) -> None:
@@ -223,13 +233,13 @@ def ensure_layout(session: str, paths: Paths) -> None:
     if "orchestrator" not in windows:
         if windows:
             first_index = sorted(windows.values())[0]
-            run(["tmux", "rename-window", "-t", f"{session}:{first_index}", "orchestrator"], check=True)
+            run(tmux_command("rename-window", "-t", f"{session}:{first_index}", "orchestrator"), check=True)
         else:
-            run(["tmux", "new-window", "-t", session, "-n", "orchestrator", "-c", str(paths.project)], check=True)
+            run(tmux_command("new-window", "-t", session, "-n", "orchestrator", "-c", str(paths.project)), check=True)
 
     for role in ("collector", "implementer"):
         if role not in list_windows(session):
-            run(["tmux", "new-window", "-t", session, "-n", role, "-c", str(paths.project)], check=True)
+            run(tmux_command("new-window", "-t", session, "-n", role, "-c", str(paths.project)), check=True)
 
     for role in ("orchestrator", "collector", "implementer"):
         send_keys(session, role, f"cd {shlex.quote(str(paths.project))}")
@@ -238,7 +248,7 @@ def ensure_layout(session: str, paths: Paths) -> None:
 
 
 def list_windows(session: str) -> dict[str, str]:
-    result = run(["tmux", "list-windows", "-t", session, "-F", "#{window_index}\t#{window_name}"], check=True)
+    result = run(tmux_command("list-windows", "-t", session, "-F", "#{window_index}\t#{window_name}"), check=True)
     windows: dict[str, str] = {}
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -377,8 +387,8 @@ Acceptance:
 
 
 def exercise_copy_mode_guard(session: str, paths: Paths) -> None:
-    target = f"{session}:implementer.0"
-    run(["tmux", "copy-mode", "-t", target], check=True)
+    target = pane_target(session, "implementer")
+    run(tmux_command("copy-mode", "-t", target), check=True)
     try:
         result = run(tt(paths) + ["notify", "implementer", "--method", "send-keys"], cwd=paths.project, check=False)
         if result.returncode == 0:
@@ -388,7 +398,7 @@ def exercise_copy_mode_guard(session: str, paths: Paths) -> None:
                 f"expected copy-mode notification deferral\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
     finally:
-        run(["tmux", "send-keys", "-t", target, "-X", "cancel"], check=False)
+        run(tmux_command("send-keys", "-t", target, "-X", "cancel"), check=False)
 
 
 def collector_script(paths: Paths) -> str:
@@ -801,12 +811,11 @@ def verify_congestion(paths: Paths) -> None:
 
 
 def send_keys(session: str, role: str, command: str) -> None:
-    target = f"{session}:{role}.0"
-    run(["tmux", "send-keys", "-t", target, command, "Enter"], check=True)
+    run(tmux_command("send-keys", "-t", pane_target(session, role), command, "Enter"), check=True)
 
 
 def capture_pane(session: str, role: str) -> str:
-    result = run(["tmux", "capture-pane", "-p", "-t", f"{session}:{role}.0", "-S", "-120"], check=False)
+    result = run(tmux_command("capture-pane", "-p", "-t", pane_target(session, role), "-S", "-120"), check=False)
     return result.stdout or result.stderr
 
 
@@ -824,8 +833,46 @@ def role_artifacts(paths: Paths, role: str) -> str:
 
 
 def tmux_ok(*args: str) -> bool:
-    result = run(["tmux", *args], check=False)
+    result = run(tmux_command(*args), check=False)
     return result.returncode == 0
+
+
+def configure_tmux(args: argparse.Namespace, paths: Paths) -> None:
+    global TMUX_COMMAND
+    if not args.one_based_tmux:
+        TMUX_COMMAND = ("tmux",)
+        return
+    config = paths.root / "tmux-one-based.conf"
+    config.write_text(
+        "set-option -g base-index 1\nset-window-option -g pane-base-index 1\nset-option -g renumber-windows on\n",
+        encoding="utf-8",
+    )
+    TMUX_COMMAND = ("tmux", "-L", f"tmux-team-one-based-{os.getpid()}", "-f", str(config))
+
+
+def verify_one_based_tmux() -> None:
+    window_index = run(tmux_command("show-options", "-gv", "base-index"), check=True).stdout.strip()
+    pane_index = run(tmux_command("show-window-options", "-gv", "pane-base-index"), check=True).stdout.strip()
+    if window_index != "1" or pane_index != "1":
+        raise DemoError(
+            "isolated tmux server did not apply one-based indexes: "
+            f"base-index={window_index!r} pane-base-index={pane_index!r}"
+        )
+
+
+def pane_target(session: str, role: str) -> str:
+    result = run(
+        tmux_command("list-panes", "-t", f"{session}:{role}", "-F", "#{pane_id}"),
+        check=True,
+    )
+    panes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not panes:
+        raise DemoError(f"tmux window has no panes: {session}:{role}")
+    return panes[0]
+
+
+def tmux_command(*args: str) -> list[str]:
+    return [*TMUX_COMMAND, *args]
 
 
 def run(command: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:

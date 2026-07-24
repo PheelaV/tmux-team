@@ -21,7 +21,7 @@ LIVE_DEMO_ACP_CLAUDE_MODEL ?= us.anthropic.claude-opus-4-8
 LIVE_DEMO_ACP_POOL_COMMAND ?= pool acp
 LIVE_DEMO_ACP_POOL_MODEL ?=
 
-.PHONY: require-uv require-live-acp install-dev install-skill install-cursor-skill install-pool-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-cursor-bootstrap live-demo-acp-codex-bootstrap live-demo-acp-claude-bootstrap live-demo-acp-pool-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
+.PHONY: require-uv require-live-acp install-dev install-skill install-cursor-skill install-pool-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test one-based-index-smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-cursor-bootstrap live-demo-acp-codex-bootstrap live-demo-acp-claude-bootstrap live-demo-acp-pool-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
 
 require-uv:
 	@command -v "$(UV)" >/dev/null 2>&1 || (echo "tmux-team tests require uv. Install with: brew install uv" >&2; exit 2)
@@ -70,10 +70,14 @@ bootstrap-layout-smoke-test: require-uv
 smoke-test: require-uv
 	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --cleanup-session --session tt-itest --root /tmp/tmux-team-itest --force
 
+one-based-index-smoke-test: require-uv
+	$(UV_RUN) python scripts/bootstrap_layout_smoke.py --one-based-tmux --session tt-one-based-layout-itest --root /tmp/tmux-team-one-based-layout-itest --force
+	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --cleanup-session --one-based-tmux --session tt-one-based-itest --root /tmp/tmux-team-one-based-itest --force
+
 congestion-smoke-test: require-uv
 	$(UV_RUN) python scripts/sandbox_demo.py --spawn-session --cleanup-session --session tt-congestion-itest --root /tmp/tmux-team-congestion-itest --force --scenario congestion
 
-integration-test: lint test bootstrap-layout-smoke-test smoke-test congestion-smoke-test
+integration-test: lint test bootstrap-layout-smoke-test smoke-test one-based-index-smoke-test congestion-smoke-test
 
 docker-smoke-test:
 	docker build -f Dockerfile.sandbox -t tmux-team-sandbox .

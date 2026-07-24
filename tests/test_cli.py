@@ -19,8 +19,10 @@ from tmux_team.bootstrap import (
     acp_control_shell_command,
     apply_acp_initial_config,
     codex_control_shell_command,
+    codex_plugin_skill_enabled,
     configure_session_truecolor,
     default_session_name,
+    ensure_start_skill_available,
     prepare_role_worktrees,
     render_team_config,
     resolve_tool_executable,
@@ -88,6 +90,66 @@ requires_stable_commit = true
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
         self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
+
+    def test_skill_preflight_accepts_enabled_codex_plugin(self) -> None:
+        plugin_list = subprocess.CompletedProcess(
+            args=["codex", "plugin", "list", "--json"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "installed": [
+                        {
+                            "name": "tmux-team",
+                            "installed": True,
+                            "enabled": True,
+                            "version": "0.5.0",
+                        }
+                    ]
+                }
+            ),
+            stderr="",
+        )
+        with (
+            patch.dict(os.environ, {"CODEX_HOME": str(self.root / "empty-codex-home")}),
+            patch("tmux_team.bootstrap.subprocess.run", return_value=plugin_list) as run,
+        ):
+            ensure_start_skill_available("custom-codex")
+
+        run.assert_called_once_with(
+            ["custom-codex", "plugin", "list", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def test_skill_preflight_accepts_legacy_skill_without_plugin_query(self) -> None:
+        skill = self.root / "codex-home" / "skills" / "start-tmux-team" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Skill\n", encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {"CODEX_HOME": str(self.root / "codex-home")}),
+            patch("tmux_team.bootstrap.subprocess.run") as run,
+        ):
+            ensure_start_skill_available()
+
+        run.assert_not_called()
+
+    def test_codex_plugin_skill_requires_enabled_installed_plugin(self) -> None:
+        for plugin in (
+            {"name": "tmux-team", "installed": True, "enabled": False},
+            {"name": "tmux-team", "installed": False, "enabled": True},
+            {"name": "another-plugin", "installed": True, "enabled": True},
+        ):
+            result = subprocess.CompletedProcess(
+                args=["codex", "plugin", "list", "--json"],
+                returncode=0,
+                stdout=json.dumps({"installed": [plugin]}),
+                stderr="",
+            )
+            with patch("tmux_team.bootstrap.subprocess.run", return_value=result):
+                self.assertFalse(codex_plugin_skill_enabled())
 
     def test_acp_config_records_negotiated_resume_capability(self) -> None:
         rendered = render_team_config(
@@ -3650,7 +3712,7 @@ exit 0
         self.assertIn("codex_config = [", out)
         self.assertIn('"model_reasoning_effort=\\"high\\""', out)
         self.assertIn("[operator]", out)
-        self.assertIn('pane = "tt-bootstrap-options:tt-control.0"', out)
+        self.assertIn('pane = "tt-bootstrap-options:tt-control"', out)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_accepts_custom_role_memory(self) -> None:
