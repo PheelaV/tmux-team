@@ -1708,7 +1708,7 @@ def build_operator_snapshot(
 ) -> dict[str, Any]:
     target_value = config.operator.pane
     if not target_value and session:
-        target_value = f"{session}:{CONTROL_PLANE_WINDOW}.0"
+        target_value = f"{session}:{CONTROL_PLANE_WINDOW}"
     if not target_value and not config.operator.codex_thread_id and not config.operator.capabilities:
         return {}
     if target_value and not dry_run:

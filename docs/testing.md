@@ -81,6 +81,7 @@ Run locally:
 make integration-test
 make bootstrap-layout-smoke-test
 make smoke-test
+make one-based-index-smoke-test
 make congestion-smoke-test
 ```
 
@@ -90,6 +91,7 @@ make congestion-smoke-test
 - unit tests;
 - the real tmux bootstrap/sleep layout smoke;
 - the basic fake-agent workflow;
+- bootstrap/sleep and the basic workflow on isolated tmux servers with `base-index=1` and `pane-base-index=1`;
 - the congestion/multiple-message workflow.
 
 `bootstrap-layout-smoke-test` verifies the real bootstrap tmux shape with a fake Codex binary: `tt-control`, isolated `tt-app-server`, and one tiled `tt-agents` window with the default role panes. It then runs `tmux-team sleep`, verifies a TOML sleep snapshot, and confirms only `tt-control` remains.

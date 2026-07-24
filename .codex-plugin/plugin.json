@@ -1,6 +1,6 @@
 {
   "name": "tmux-team",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Pane-visible agent team orchestration with tmux, durable inboxes, and runtime-native wake delivery.",
   "author": {
     "name": "tmux-team contributors",

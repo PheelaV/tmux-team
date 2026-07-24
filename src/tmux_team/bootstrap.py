@@ -251,7 +251,7 @@ def bootstrap_team(
                 role_profile,
                 role_launch_options,
                 role_scratchpad_values,
-                operator=operator_config(f"{session}:{control_window}.0", agent_runtime, operator_control_socket),
+                operator=operator_config(f"{session}:{control_window}", agent_runtime, operator_control_socket),
                 agent_runtime=agent_runtime,
                 acp_tui_bin=acp_tui_bin,
                 acp_agent_command=acp_agent_command,
@@ -523,7 +523,7 @@ def ensure_control_plane_window(
 ) -> tuple[str | None, bool]:
     if not tmux_session_exists(tmux_bin, session):
         run(control_plane_session_command(tmux_bin, session, project_root, control_window, command), check=True)
-        pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+        pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}"
         return pane, True
 
     current_session = detect_current_tmux_session(tmux_bin)
@@ -536,9 +536,9 @@ def ensure_control_plane_window(
 
     if not tmux_window_exists(tmux_bin, session, control_window):
         run(new_window_command(tmux_bin, session, control_window, project_root, command), check=True)
-        pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+        pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}"
         return pane, True
-    pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}.0"
+    pane = first_pane_id(tmux_bin, f"{session}:{control_window}") or f"{session}:{control_window}"
     return pane, False
 
 
@@ -628,7 +628,11 @@ def start_acp_role_panes(
                 for command in select_tiled_layout_commands(tmux_bin, session, agents_window):
                     run(command, check=False)
         if not pane:
-            pane = f"{session}:{agents_window}.{index}" if agent_layout == "grouped" else f"{session}:{tt_name(role)}.0"
+            pane = (
+                last_pane_id(tmux_bin, f"{session}:{agents_window}") or f"{session}:{agents_window}"
+                if agent_layout == "grouped"
+                else f"{session}:{tt_name(role)}"
+            )
         label_role_pane(tmux_bin, pane, role)
         try:
             status = wait_for_acp_tui(role_sockets[role], timeout=30.0)
@@ -831,7 +835,9 @@ def ensure_role_pane(
         if pane:
             label_role_pane(tmux_bin, pane, role)
             return pane
-        return f"{session}:{agents_window}.{index}"
+        pane = last_pane_id(tmux_bin, f"{session}:{agents_window}") or f"{session}:{agents_window}"
+        label_role_pane(tmux_bin, pane, role)
+        return pane
 
     role_window = tt_name(role)
     if tmux_window_exists(tmux_bin, session, role_window):
@@ -856,7 +862,7 @@ def ensure_role_pane(
     if pane:
         label_role_pane(tmux_bin, pane, role)
         return pane
-    return f"{session}:{role_window}.0"
+    return f"{session}:{role_window}"
 
 
 def configure_agent_window(tmux_bin: str, session: str, agents_window: str) -> None:
@@ -1654,6 +1660,14 @@ def first_pane_id(tmux_bin: str, target: str) -> str:
     return result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
 
 
+def last_pane_id(tmux_bin: str, target: str) -> str:
+    result = run([tmux_bin, "list-panes", "-t", target, "-F", "#{pane_id}"], check=False)
+    if result.returncode != 0:
+        return ""
+    panes = result.stdout.splitlines()
+    return panes[-1] if panes else ""
+
+
 def run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if check and result.returncode != 0:
@@ -1823,7 +1837,7 @@ def dry_run_role_bindings(
     role_control_sockets = role_control_sockets or {}
     bindings: dict[str, RoleBinding] = {}
     for index, role in enumerate(roles):
-        pane = f"{session}:{agents_window}.{index}" if agent_layout == "grouped" else f"{session}:{tt_name(role)}.0"
+        pane = f"{session}:{agents_window}.{index}" if agent_layout == "grouped" else f"{session}:{tt_name(role)}"
         bindings[role] = RoleBinding(
             thread_id=f"dry-thread-{role}" if agent_runtime == "codex" else "",
             pane=pane,

@@ -3712,7 +3712,7 @@ exit 0
         self.assertIn("codex_config = [", out)
         self.assertIn('"model_reasoning_effort=\\"high\\""', out)
         self.assertIn("[operator]", out)
-        self.assertIn('pane = "tt-bootstrap-options:tt-control.0"', out)
+        self.assertIn('pane = "tt-bootstrap-options:tt-control"', out)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_accepts_custom_role_memory(self) -> None:

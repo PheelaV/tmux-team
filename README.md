@@ -448,10 +448,13 @@ Deterministic fake-agent smoke test:
 make integration-test
 make bootstrap-layout-smoke-test
 make smoke-test
+make one-based-index-smoke-test
 make congestion-smoke-test
 ```
 
-`make integration-test` is the default local confidence suite. It runs Ruff, unit tests, the real tmux bootstrap/sleep layout smoke, the basic fake-agent workflow, and the congestion/multiple-message workflow.
+`make integration-test` is the default local confidence suite. It runs Ruff, unit tests, the real tmux
+bootstrap/sleep layout smoke, the basic fake-agent workflow, bootstrap and workflow checks on isolated tmux servers
+with one-based window and pane indexes, and the congestion/multiple-message workflow.
 
 Visible tmux run:
 
