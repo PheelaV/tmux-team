@@ -18,6 +18,7 @@ from tmux_team.bootstrap import (
     RoleBinding,
     acp_control_shell_command,
     apply_acp_initial_config,
+    capture_tmux_pane,
     codex_control_shell_command,
     configure_session_truecolor,
     default_session_name,
@@ -88,6 +89,28 @@ requires_stable_commit = true
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
         self.assertEqual(default_session_name(Path("/tmp/tt-existing")), "tt-existing")
+
+    def test_capture_tmux_pane_returns_bounded_diagnostic(self) -> None:
+        fake_dir = self.root / "capture-bin"
+        fake_dir.mkdir()
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            """#!/bin/sh
+if [ "$1" = "capture-pane" ] && [ "$2" = "-p" ] && [ "$3" = "-t" ] &&
+   [ "$4" = "demo:tt-app-server" ] && [ "$5" = "-S" ] && [ "$6" = "-80" ]; then
+  printf 'fatal app-server configuration\\n'
+  exit 0
+fi
+exit 1
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        self.assertEqual(
+            capture_tmux_pane(str(tmux), "demo:tt-app-server", lines=80),
+            "fatal app-server configuration",
+        )
 
     def test_acp_config_records_negotiated_resume_capability(self) -> None:
         rendered = render_team_config(

@@ -326,7 +326,19 @@ def bootstrap_team(
             run(command, check=True)
 
     if runtime.uses_app_server:
-        wait_for_app_server(endpoint, timeout=20.0)
+        try:
+            wait_for_app_server(endpoint, timeout=20.0)
+        except BootstrapError as exc:
+            diagnostic = capture_tmux_pane(
+                tmux_bin,
+                f"{session}:{DEFAULT_APP_SERVER_WINDOW}",
+                lines=80,
+            )
+            if diagnostic:
+                raise BootstrapError(
+                    f"{exc}\napp-server pane output:\n{diagnostic}"
+                ) from exc
+            raise
         role_bindings = start_role_panes_and_discover_threads(
             tmux_bin,
             codex_bin,
@@ -1621,6 +1633,18 @@ def first_pane_id(tmux_bin: str, target: str) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
+
+
+def capture_tmux_pane(tmux_bin: str, target: str, *, lines: int) -> str:
+    if lines <= 0:
+        raise ValueError("pane capture lines must be greater than zero")
+    result = run(
+        [tmux_bin, "capture-pane", "-p", "-t", target, "-S", f"-{lines}"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
