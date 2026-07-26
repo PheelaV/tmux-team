@@ -14,6 +14,7 @@ from scripts.live_demo_scenario import (
     acp_demo_initial_config,
     bootstrap,
     prepare_acp_demo_provider,
+    reset_root,
     resume_team,
     scenario_paths,
     start_goal,
@@ -79,6 +80,16 @@ class LiveDemoScenarioTests(unittest.TestCase):
         self.assertEqual(project, self.root)
         self.assertEqual(implementer, self.root.parent / f"{self.root.name}-implementer")
         self.assertEqual(collector, self.root.parent / f"{self.root.name}-collector")
+
+    def test_reuses_only_an_otherwise_empty_marked_root(self) -> None:
+        provisioned = self.root / "provisioned"
+        provisioned.mkdir()
+        marker = provisioned / ".tmux-team-live-demo-scenario"
+        marker.write_text("provisioned\n", encoding="utf-8")
+
+        reset_root(provisioned, False, reuse_marked_root=True)
+
+        self.assertTrue(marker.exists())
 
     def test_bootstrap_passes_named_codex_role_profile(self) -> None:
         args = Namespace(

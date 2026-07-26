@@ -137,3 +137,7 @@ scenario root can add `--flat-project` to `setup`. That layout keeps the main
 checkout at the root and creates sibling `-implementer` and `-collector`
 worktrees. The scenario's guarded `clean` command removes those exact recorded
 siblings before removing the marked root.
+
+A privileged parent service can instead provision an empty marked container
+and then run setup as an unprivileged worker with `--reuse-marked-root`.
+Reusing the root fails unless the marker is the only existing entry.

@@ -81,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     setup_parser.add_argument("--expected-commit", default=DEFAULT_REPO_COMMIT)
     setup_parser.add_argument("--skip-failing-check", action="store_true")
     setup_parser.add_argument(
+        "--reuse-marked-root",
+        action="store_true",
+        help="Reuse an otherwise empty marked root provisioned by a parent service",
+    )
+    setup_parser.add_argument(
         "--flat-project",
         action="store_true",
         help="Use the marked scenario root as the main project and sibling role worktrees",
@@ -146,7 +151,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup(root: Path, args: argparse.Namespace) -> None:
-    reset_root(root, args.force)
+    reset_root(root, args.force, reuse_marked_root=args.reuse_marked_root)
     project, implementer, collector = scenario_paths(root, flat_project=args.flat_project)
     clone_target = project
     if args.flat_project:
@@ -863,11 +868,16 @@ def start_dashboard_pane(session: str, config_path: Path) -> None:
     run(["tmux", "select-layout", "-t", f"{session}:tt-control", "even-horizontal"], check=False)
 
 
-def reset_root(root: Path, force: bool) -> None:
+def reset_root(root: Path, force: bool, *, reuse_marked_root: bool = False) -> None:
     if root.exists():
         marker = root / MARKER
         if not marker.exists():
             raise ScenarioError(f"refusing to replace unmarked directory: {root}")
+        if reuse_marked_root:
+            entries = {item.name for item in root.iterdir()}
+            if entries != {MARKER}:
+                raise ScenarioError(f"reused marked root is not otherwise empty: {root}")
+            return
         if not force:
             raise ScenarioError(f"scenario root exists; rerun setup with --force: {root}")
         shutil.rmtree(root)

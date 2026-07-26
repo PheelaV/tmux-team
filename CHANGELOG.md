@@ -10,6 +10,8 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Add an opt-in flat live-demo layout for managed registries that require the
   main repository at the scenario root while retaining isolated sibling role
   worktrees.
+- Allow a parent service to provision an empty marked live-demo container that
+  the unprivileged scenario worker can safely reuse.
 - Added a separate versioned read-only control protocol for external orchestrators with bounded field-allowlisted status,
   cursor-paginated event metadata, and filtered milestone queries.
 - Made the external reader open only an existing exact-version `team.sqlite` through SQLite read-only/query-only mode;
