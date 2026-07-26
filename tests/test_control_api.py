@@ -232,6 +232,7 @@ worktree = "/private/worktrees/implementer"
                 lambda: self.control.milestones({"scope": "all"}),
                 lambda: self.control.milestones({"subject_role": "x" * 129}),
                 lambda: self.control.milestones({"since": "2026-07-26"}),
+                lambda: self.control.obligations(conn, {"status": "unknown"}),
             )
             for invalid_call in invalid_calls:
                 with self.subTest(call=invalid_call), self.assertRaises(ControlAPIError):
@@ -296,12 +297,54 @@ worktree = "/private/worktrees/implementer"
         with self.assertRaisesRegex(ControlAPIError, "not a regular file"):
             self.control.milestones()
 
+    def test_obligations_are_filtered_bounded_and_field_allowlisted(self) -> None:
+        with closing(self.store.connect()) as writer:
+            obligation = self.store.start_obligation(
+                writer,
+                role="orchestrator",
+                summary="Investigate safely",
+                goal="private goal /private/worktrees/orchestrator",
+                created_by="operator",
+                next_update_at="2026-07-27T00:00:00+00:00",
+            )
+            self.store.update_obligation(
+                writer,
+                role="orchestrator",
+                obligation_id=str(obligation["id"]),
+                summary="Blocked on evidence",
+                status="blocked",
+                next_update_at="2026-07-27T01:00:00+00:00",
+            )
+
+        with closing(self.control.connect()) as conn:
+            result = self.control.obligations(
+                conn,
+                {"role": "orchestrator", "status": "blocked", "limit": 1},
+            )
+
+        self.assertEqual(result["api_version"], API_VERSION)
+        self.assertEqual(result["kind"], "obligations")
+        self.assertFalse(result["truncated"])
+        self.assertEqual(len(result["obligations"]), 1)
+        row = result["obligations"][0]
+        self.assertEqual(row["role"], "orchestrator")
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["current_summary"], "Blocked on evidence")
+        self.assertNotIn("goal", row)
+        self.assertNotIn("created_by", row)
+        self.assert_no_private_bindings(result)
+
     def test_tool_catalog_contains_only_read_only_control_tools(self) -> None:
         tools = list_operations()
 
         self.assertEqual(
             {tool["name"] for tool in tools},
-            {"team_control_status", "team_control_events_since", "team_control_milestones"},
+            {
+                "team_control_status",
+                "team_control_events_since",
+                "team_control_milestones",
+                "team_control_obligations",
+            },
         )
         for tool in tools:
             self.assertTrue(tool["annotations"]["readOnlyHint"])

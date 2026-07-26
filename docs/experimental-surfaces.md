@@ -42,6 +42,7 @@ The server advertises only:
 - `team_control_status`: bounded role state and durable message counts;
 - `team_control_events_since`: normalized event metadata after an integer cursor, with `next` and `has_more`;
 - `team_control_milestones`: bounded milestone-tail queries by time, subject, scope, and kind.
+- `team_control_obligations`: bounded durable obligations filtered by role and state.
 
 Every operation response carries `api_version = "tmux-team.control/v1"`. Page sizes are limited to 100, status is
 limited to 64 roles, request frames are limited to 64 KiB, strings are capped, and milestone scanning is limited to the

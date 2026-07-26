@@ -32,9 +32,10 @@ MAX_MILESTONE_SUBJECTS = 16
 MAX_MILESTONE_TAGS = 16
 MAX_EVENT_CURSOR = (1 << 63) - 1
 MAX_REQUEST_BYTES = 64 * 1024
+OBLIGATION_STATES = ("active", "blocked", "paused", "done", "failed", "cancelled")
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
-_REQUIRED_TABLES = ("roles", "messages", "events")
+_REQUIRED_TABLES = ("roles", "messages", "events", "obligations")
 
 
 class ControlAPIError(ValueError):
@@ -294,6 +295,85 @@ class ReadOnlyControl:
             "discarded_lines": discarded_lines,
         }
 
+    def obligations(
+        self,
+        conn: sqlite3.Connection,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        args = _arguments(arguments, allowed=("role", "status", "limit"))
+        role = _optional_filter(args, "role")
+        status_filter = _optional_filter(args, "status")
+        if status_filter is not None and status_filter not in OBLIGATION_STATES:
+            raise ControlAPIError("status is not a supported obligation state")
+        limit = _bounded_int(args, "limit", default=DEFAULT_PAGE_SIZE, minimum=1, maximum=MAX_PAGE_SIZE)
+        clauses: list[str] = []
+        filter_params: list[Any] = []
+        if role is not None:
+            clauses.append("role = ?")
+            filter_params.append(role)
+        if status_filter is not None:
+            clauses.append("status = ?")
+            filter_params.append(status_filter)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params = (
+            MAX_IDENTIFIER_LENGTH,
+            MAX_IDENTIFIER_LENGTH,
+            MAX_IDENTIFIER_LENGTH,
+            MAX_SUMMARY_LENGTH,
+            MAX_FILTER_LENGTH,
+            MAX_FILTER_LENGTH,
+            MAX_SUMMARY_LENGTH,
+            MAX_FILTER_LENGTH,
+            *filter_params,
+            limit + 1,
+        )
+        rows = conn.execute(
+            f"""
+            SELECT
+              CASE WHEN typeof(id) = 'text' AND length(id) <= ? THEN id END AS id,
+              CASE WHEN typeof(role) = 'text' AND length(role) <= ? THEN role END AS role,
+              CASE WHEN typeof(status) = 'text' AND length(status) <= ? THEN status END AS status,
+              CASE
+                WHEN typeof(current_summary) = 'text' THEN substr(current_summary, 1, ?)
+              END AS current_summary,
+              CASE
+                WHEN typeof(updated_at) = 'text' AND length(updated_at) <= ? THEN updated_at
+              END AS updated_at,
+              CASE
+                WHEN typeof(next_update_at) = 'text' AND length(next_update_at) <= ? THEN next_update_at
+              END AS next_update_at,
+              CASE
+                WHEN typeof(paused_reason) = 'text' THEN substr(paused_reason, 1, ?)
+              END AS paused_reason,
+              CASE
+                WHEN typeof(review_at) = 'text' AND length(review_at) <= ? THEN review_at
+              END AS review_at
+            FROM obligations
+            {where}
+            ORDER BY
+              CASE status
+                WHEN 'blocked' THEN 0
+                WHEN 'paused' THEN 1
+                WHEN 'active' THEN 2
+                WHEN 'failed' THEN 3
+                WHEN 'done' THEN 4
+                ELSE 5
+              END,
+              updated_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        truncated = len(rows) > limit
+        obligations = [_external_obligation(row) for row in rows[:limit]]
+        return {
+            "api_version": API_VERSION,
+            "kind": "obligations",
+            "query": {"role": role, "status": status_filter, "limit": limit},
+            "obligations": obligations,
+            "truncated": truncated,
+        }
+
     def _read_milestone_tail(self) -> tuple[list[dict[str, Any]], bool, int]:
         flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -373,6 +453,25 @@ def list_operations() -> list[dict[str, Any]]:
             },
             "annotations": read_only,
         },
+        {
+            "name": "team_control_obligations",
+            "description": "List bounded field-allowlisted durable obligations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "maxLength": MAX_FILTER_LENGTH},
+                    "status": {"type": "string", "enum": list(OBLIGATION_STATES)},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_PAGE_SIZE,
+                        "default": DEFAULT_PAGE_SIZE,
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": read_only,
+        },
     ]
 
 
@@ -388,6 +487,8 @@ def call_operation(
         return control.events_since(conn, arguments)
     if name == "team_control_milestones":
         return control.milestones(arguments)
+    if name == "team_control_obligations":
+        return control.obligations(conn, arguments)
     raise ControlAPIError("unknown read-only control operation")
 
 
@@ -606,6 +707,19 @@ def _external_milestone(row: dict[str, Any], subjects: tuple[str, ...]) -> dict[
         "subject_roles": list(subjects),
         "reference": _safe_identifier_or_none(row.get("ref_id")),
         "tags": tags,
+    }
+
+
+def _external_obligation(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": _safe_identifier_or_none(row["id"]),
+        "role": _safe_identifier_or_none(row["role"]),
+        "status": _safe_identifier_or_none(row["status"]),
+        "current_summary": _bounded_text(row["current_summary"], MAX_SUMMARY_LENGTH),
+        "updated_at": _bounded_text(row["updated_at"], MAX_FILTER_LENGTH),
+        "next_update_at": _bounded_text(row["next_update_at"], MAX_FILTER_LENGTH) or None,
+        "paused_reason": _bounded_text(row["paused_reason"], MAX_SUMMARY_LENGTH) or None,
+        "review_at": _bounded_text(row["review_at"], MAX_FILTER_LENGTH) or None,
     }
 
 
