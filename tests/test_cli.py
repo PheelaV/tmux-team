@@ -20,6 +20,7 @@ from tmux_team.bootstrap import (
     apply_acp_initial_config,
     capture_tmux_pane,
     codex_control_shell_command,
+    configure_session_shell,
     configure_session_truecolor,
     default_session_name,
     keep_open_command,
@@ -104,6 +105,24 @@ requires_stable_commit = true
         )
         self.assertEqual(completed.returncode, 0)
         self.assertIn("test process exited with status 1", completed.stdout)
+
+    def test_configure_session_shell_ignores_locked_account_shell(self) -> None:
+        fake_dir = self.root / "shell-bin"
+        fake_dir.mkdir()
+        log = self.root / "tmux-shell.log"
+        tmux = fake_dir / "tmux"
+        tmux.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+
+        with patch.dict(os.environ, {"SHELL": "/usr/sbin/nologin"}):
+            configure_session_shell(str(tmux), "tt-locked")
+
+        rendered = log.read_text(encoding="utf-8")
+        self.assertIn("set-option -t tt-locked default-shell ", rendered)
+        self.assertNotIn("nologin", rendered)
 
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
@@ -3370,6 +3389,7 @@ can_notify = ["orchestrator"]
 
         self.assertEqual(code, 0, err)
         self.assertIn("tmux new-session -d -s tt-bootstrap -n tt-control", out)
+        self.assertIn("tmux set-option -t tt-bootstrap default-shell ", out)
         self.assertIn("tmux set-option -t tt-bootstrap default-terminal tmux-256color", out)
         self.assertIn("tmux set-option -as -t tt-bootstrap terminal-features", out)
         self.assertIn("tmux set-environment -t tt-bootstrap COLORTERM truecolor", out)

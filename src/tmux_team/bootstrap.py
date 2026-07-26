@@ -312,6 +312,7 @@ def bootstrap_team(
         agent_runtime if operator_started else None,
         operator_control_socket,
     )
+    configure_session_shell(tmux_bin, session)
     if runtime.uses_control_socket and operator_started:
         operator = initialize_acp_control_agent(
             operator,
@@ -434,6 +435,7 @@ def dry_run_tmux_commands(
     commands: list[list[str]] = [
         control_plane_session_command(tmux_bin, session, project_root, control_window, control_command)
     ]
+    commands.append(session_shell_tmux_command(tmux_bin, session))
     if enable_truecolor:
         commands.extend(session_truecolor_tmux_commands(tmux_bin, session))
     if start_app_server and agent_runtime == "codex":
@@ -494,6 +496,18 @@ def session_truecolor_tmux_commands(tmux_bin: str, session: str) -> list[list[st
         [tmux_bin, "set-option", "-as", "-t", session, "terminal-features", ",*:RGB"],
         [tmux_bin, "set-environment", "-t", session, "COLORTERM", "truecolor"],
     ]
+
+
+def managed_shell() -> str:
+    return shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+
+
+def session_shell_tmux_command(tmux_bin: str, session: str) -> list[str]:
+    return [tmux_bin, "set-option", "-t", session, "default-shell", managed_shell()]
+
+
+def configure_session_shell(tmux_bin: str, session: str) -> None:
+    run(session_shell_tmux_command(tmux_bin, session), check=True)
 
 
 def session_truecolor_fallback_command(tmux_bin: str, session: str) -> list[str]:
