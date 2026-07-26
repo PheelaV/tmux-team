@@ -335,9 +335,7 @@ def bootstrap_team(
                 lines=80,
             )
             if diagnostic:
-                raise BootstrapError(
-                    f"{exc}\napp-server pane output:\n{diagnostic}"
-                ) from exc
+                raise BootstrapError(f"{exc}\napp-server pane output:\n{diagnostic}") from exc
             raise
         role_bindings = start_role_panes_and_discover_threads(
             tmux_bin,
@@ -1505,7 +1503,10 @@ def keep_open_command(command: str, label: str) -> str:
         f"{command}\n"
         "status=$?\n"
         f"printf '\\n[tmux-team] {label} exited with status %s. Shell left open for inspection.\\n' \"$status\"\n"
-        'exec "${SHELL:-/bin/sh}"\n'
+        # Service identities commonly use nologin as their account shell.
+        # The pane is already running inside the explicitly selected shell
+        # below, so use a known inspection shell instead of trusting $SHELL.
+        "exec /bin/sh\n"
     )
     shell = "bash" if shutil.which("bash") else "sh"
     return f"{shell} -lc {shlex.quote(script)}"

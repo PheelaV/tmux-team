@@ -22,6 +22,7 @@ from tmux_team.bootstrap import (
     codex_control_shell_command,
     configure_session_truecolor,
     default_session_name,
+    keep_open_command,
     prepare_role_worktrees,
     render_team_config,
     resolve_tool_executable,
@@ -85,6 +86,24 @@ requires_stable_commit = true
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_keep_open_command_ignores_locked_account_shell(self) -> None:
+        rendered = keep_open_command("false", "test process")
+
+        self.assertIn("exec /bin/sh", rendered)
+        self.assertNotIn("${SHELL", rendered)
+        completed = subprocess.run(
+            rendered,
+            shell=True,
+            input="exit\n",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "SHELL": "/usr/sbin/nologin"},
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("test process exited with status 1", completed.stdout)
 
     def test_default_session_name_is_tt_prefixed(self) -> None:
         self.assertEqual(default_session_name(Path("/tmp/my project")), "tt-my-project")
