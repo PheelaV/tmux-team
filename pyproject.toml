@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 tmux-team = "tmux_team.cli:main"
+tmux-team-control = "tmux_team.control_api:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

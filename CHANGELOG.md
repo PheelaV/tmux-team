@@ -12,6 +12,7 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made status and its event cursor one SQLite snapshot, signaled cursor resets, bounded protocol frames and errors, and
   rejected symlinked or non-regular milestone logs through an fd-based no-follow open.
 - Added a bounded field-allowlisted obligation query for external supervisors without exposing goals or creator data.
+- Installed the private control protocol as the explicit `tmux-team-control` entry point.
 - Avoided enabling WAL on SQLite versions affected by the WAL-reset corruption bug. Fresh databases use rollback
   journaling on affected runtimes and retain WAL on SQLite 3.51.3+, 3.50.7, and 3.44.6.
 

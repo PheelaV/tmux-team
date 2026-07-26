@@ -30,7 +30,7 @@ This is intentionally a thin adapter, not a second state model. SQLite remains a
 extend or restrict the existing role-facing MCP experiment. Run the read-only stdio server with:
 
 ```bash
-python -m tmux_team.control_api --config .tmux-team/team.toml
+tmux-team-control --config .tmux-team/team.toml
 ```
 
 This is a private newline-delimited JSON-RPC control protocol, not an MCP server. A deployment that exposes these
