@@ -6,9 +6,16 @@ import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from tmux_team.config import RoleConfig, TeamConfig
-from tmux_team.store import SCHEMA_VERSION, Message, Store
+from tmux_team.store import (
+    SCHEMA_VERSION,
+    Message,
+    Store,
+    apply_safe_journal_mode,
+    sqlite_wal_reset_vulnerable,
+)
 
 
 class StoreInboxTests(unittest.TestCase):
@@ -73,6 +80,80 @@ class StoreInboxTests(unittest.TestCase):
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
 
         self.assertEqual(version, SCHEMA_VERSION)
+
+    def test_vulnerable_sqlite_uses_delete_journal_mode(self) -> None:
+        with (
+            mock.patch(
+                "tmux_team.store.sqlite_wal_reset_vulnerable",
+                return_value=True,
+            ),
+            tempfile.TemporaryDirectory() as temp,
+        ):
+            path = Path(temp) / "state.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                self.assertEqual(apply_safe_journal_mode(conn), "delete")
+                self.assertEqual(
+                    conn.execute("PRAGMA journal_mode").fetchone()[0],
+                    "delete",
+                )
+            finally:
+                conn.close()
+
+    def test_fixed_sqlite_uses_wal_journal_mode(self) -> None:
+        with (
+            mock.patch(
+                "tmux_team.store.sqlite_wal_reset_vulnerable",
+                return_value=False,
+            ),
+            tempfile.TemporaryDirectory() as temp,
+        ):
+            path = Path(temp) / "state.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                self.assertEqual(apply_safe_journal_mode(conn), "wal")
+                self.assertEqual(
+                    conn.execute("PRAGMA journal_mode").fetchone()[0],
+                    "wal",
+                )
+            finally:
+                conn.close()
+
+    def test_vulnerable_sqlite_refuses_existing_wal_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "state.sqlite"
+            seed = sqlite3.connect(path)
+            seed.execute("PRAGMA journal_mode = WAL")
+            seed.close()
+            conn = sqlite3.connect(path)
+            try:
+                with (
+                    mock.patch(
+                        "tmux_team.store.sqlite_wal_reset_vulnerable",
+                        return_value=True,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "already uses WAL"),
+                ):
+                    apply_safe_journal_mode(conn)
+            finally:
+                conn.close()
+
+    def test_sqlite_wal_reset_version_gate(self) -> None:
+        cases = {
+            (3, 6, 23): False,
+            (3, 44, 5): True,
+            (3, 44, 6): False,
+            (3, 45, 1): True,
+            (3, 49, 1): True,
+            (3, 50, 6): True,
+            (3, 50, 7): False,
+            (3, 51, 2): True,
+            (3, 51, 3): False,
+            (3, 52, 0): False,
+        }
+        for version, expected in cases.items():
+            with self.subTest(version=version):
+                self.assertEqual(sqlite_wal_reset_vulnerable(version), expected)
 
     def test_schema_rejects_newer_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

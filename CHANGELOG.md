@@ -2,6 +2,27 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## Unreleased
+
+- Added a separate versioned read-only control protocol for external orchestrators with bounded field-allowlisted status,
+  cursor-paginated event metadata, and filtered milestone queries.
+- Made the external reader open only an existing exact-version `team.sqlite` through SQLite read-only/query-only mode;
+  it cannot initialize, migrate, sync, or mutate tmux-team state, rejects symlinked state files, and does not alter the
+  existing MCP surface.
+- Made status and its event cursor one SQLite snapshot, signaled cursor resets, bounded protocol frames and errors, and
+  rejected symlinked or non-regular milestone logs through an fd-based no-follow open.
+- Avoided enabling WAL on SQLite versions affected by the WAL-reset corruption bug. Fresh databases use rollback
+  journaling on affected runtimes and retain WAL on SQLite 3.51.3+, 3.50.7, and 3.44.6.
+
+Migration notes:
+
+- Existing teams need no state migration for this prototype. Start the normal matching tmux-team CLI once before the
+  control API when the runtime database is missing or belongs to an older schema version.
+- An existing WAL database opened through an affected SQLite runtime now fails closed. Stop all tmux-team processes,
+  back up `team.sqlite` together with any `team.sqlite-wal` and `team.sqlite-shm` files, then use one offline SQLite
+  connection to run `PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;` before restarting. Alternatively,
+  upgrade the application runtime to SQLite 3.51.3+ or fixed backport 3.50.7/3.44.6.
+
 ## 0.5.0 - 2026-07-11
 
 - Added a minimal Codex/ACP runtime adapter boundary while keeping Codex as the default built-in runtime.

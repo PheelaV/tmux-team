@@ -39,6 +39,52 @@ TODO_STATES = ("open", "done", "superseded")
 WATCHDOG_RUNNER_STATES = ("running", "paused", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 SCHEMA_VERSION = 9
+_SQLITE_WAL_INTRODUCED = (3, 7, 0)
+_SQLITE_WAL_RESET_FIXED = (3, 51, 3)
+_SQLITE_WAL_RESET_BACKPORTS = (
+    ((3, 44, 6), (3, 45, 0)),
+    ((3, 50, 7), (3, 51, 0)),
+)
+
+
+def sqlite_wal_reset_vulnerable(
+    version: tuple[int, ...] | None = None,
+) -> bool:
+    """Return whether SQLite is affected by the documented WAL-reset bug."""
+    raw_version = sqlite3.sqlite_version_info if version is None else version
+    normalized = tuple(raw_version[:3]) + (0,) * max(0, 3 - len(raw_version))
+    normalized = normalized[:3]
+    if normalized < _SQLITE_WAL_INTRODUCED:
+        return False
+    if normalized >= _SQLITE_WAL_RESET_FIXED:
+        return False
+    return not any(lower <= normalized < upper for lower, upper in _SQLITE_WAL_RESET_BACKPORTS)
+
+
+def apply_safe_journal_mode(conn: sqlite3.Connection) -> str:
+    """Enable WAL only on fixed SQLite builds and never live-flip unsafe WAL."""
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    current = str(row[0]).lower() if row else ""
+    if sqlite_wal_reset_vulnerable():
+        if current == "wal":
+            raise RuntimeError(
+                "runtime database already uses WAL with vulnerable SQLite "
+                f"{sqlite3.sqlite_version}; stop every tmux-team process and "
+                "convert the database to journal_mode=DELETE with a fixed or "
+                "offline SQLite runtime before continuing"
+            )
+        selected = conn.execute("PRAGMA journal_mode = DELETE").fetchone()
+        mode = str(selected[0]).lower() if selected else ""
+        if mode != "delete":
+            raise RuntimeError("could not enforce safe SQLite DELETE journal mode")
+        return mode
+    if current == "wal":
+        return current
+    selected = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+    mode = str(selected[0]).lower() if selected else ""
+    if mode != "wal":
+        raise RuntimeError("could not enable SQLite WAL journal mode")
+    return mode
 
 
 @dataclass(frozen=True)
@@ -80,7 +126,7 @@ class Store:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
+        apply_safe_journal_mode(conn)
         self.init_schema(conn)
         self.sync_roles(conn, self.config.roles.values())
         return conn
