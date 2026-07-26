@@ -113,3 +113,21 @@ Override the root or session when needed:
 LIVE_DEMO_ROOT=/tmp/my-tt-demo LIVE_DEMO_SESSION=tt-my-demo make live-demo-setup
 LIVE_DEMO_ROOT=/tmp/my-tt-demo LIVE_DEMO_SESSION=tt-my-demo make live-demo-bootstrap
 ```
+
+For a disposable project that already has a constrained Codex execution
+profile, invoke the scenario wrapper directly instead of using the Make
+target's YOLO policy:
+
+```bash
+uv run python scripts/live_demo_scenario.py \
+  --root /path/to/marked-demo-root \
+  bootstrap \
+  --session tt-live-demo \
+  --role-profile tmux-team-role \
+  --defer-goal \
+  --force-config
+```
+
+Pass the same `--role-profile` to `resume` when an operator intentionally
+overrides the profile stored in the sleep snapshot. `--role-profile` and
+`--role-yolo` are mutually exclusive.

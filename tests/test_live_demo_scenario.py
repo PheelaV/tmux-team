@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -11,7 +12,9 @@ from unittest.mock import patch
 
 from scripts.live_demo_scenario import (
     acp_demo_initial_config,
+    bootstrap,
     prepare_acp_demo_provider,
+    resume_team,
     start_goal,
     verify_acp_demo_model,
     wait_for_acp_session_idle,
@@ -68,6 +71,58 @@ class LiveDemoScenarioTests(unittest.TestCase):
         self.assertIn("--body-file", command)
         self.assertIn(str(self.root / "goal.md"), command)
         self.assertIn("live-demo-goal", command)
+
+    def test_bootstrap_passes_named_codex_role_profile(self) -> None:
+        args = Namespace(
+            session="tt-demo",
+            agent_runtime="codex",
+            acp_tui_bin="toad",
+            acp_agent_command="agent acp",
+            acp_provider="cursor",
+            acp_model="",
+            acp_effort="",
+            acp_fast="",
+            acp_startup_timeout=180.0,
+            instruction_profile="guided",
+            defer_goal=True,
+            role_profile="tmux-team-role",
+            role_yolo=False,
+            force_config=False,
+        )
+        completed = subprocess.CompletedProcess([], 0, "", "")
+
+        with (
+            patch("scripts.live_demo_scenario.run", return_value=completed) as run,
+            patch("scripts.live_demo_scenario.start_dashboard_pane"),
+            redirect_stdout(StringIO()),
+        ):
+            bootstrap(self.root, args)
+
+        command = run.call_args.args[0]
+        self.assertIn("--role-profile", command)
+        self.assertEqual(command[command.index("--role-profile") + 1], "tmux-team-role")
+        self.assertNotIn("--role-yolo", command)
+
+    def test_resume_passes_named_codex_role_profile(self) -> None:
+        self.config.write_text(
+            """[team]
+name = "demo"
+
+[roles.orchestrator]
+mode = "codex_tui"
+""",
+            encoding="utf-8",
+        )
+        args = Namespace(role_profile="tmux-team-role", role_yolo=False)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+
+        with patch("scripts.live_demo_scenario.run", return_value=completed) as run, redirect_stdout(StringIO()):
+            resume_team(self.root, args)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            ["tmux-team", "--config", str(self.config), "resume", "--role-profile", "tmux-team-role"],
+        )
 
     def test_verify_acp_demo_model_checks_roles_and_operator_without_mutation(self) -> None:
         model = "test-model[reasoning=medium]"

@@ -4,6 +4,9 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 
 ## Unreleased
 
+- Allow the repeatable live-demo wrapper to launch and resume native Codex
+  roles with a named constrained `--role-profile` instead of requiring the
+  Make target's YOLO policy.
 - Added a separate versioned read-only control protocol for external orchestrators with bounded field-allowlisted status,
   cursor-paginated event metadata, and filtered milestone queries.
 - Made the external reader open only an existing exact-version `team.sqlite` through SQLite read-only/query-only mode;

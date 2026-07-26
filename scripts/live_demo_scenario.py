@@ -103,7 +103,13 @@ def parse_args() -> argparse.Namespace:
         help="Role startup instruction verbosity",
     )
     bootstrap_parser.add_argument("--defer-goal", action="store_true", help="Start roles without queuing the goal")
-    bootstrap_parser.add_argument(
+    bootstrap_policy = bootstrap_parser.add_mutually_exclusive_group()
+    bootstrap_policy.add_argument(
+        "--role-profile",
+        default=None,
+        help="Codex profile to pass to every managed role TUI",
+    )
+    bootstrap_policy.add_argument(
         "--role-yolo", action="store_true", help="Launch managed role panes in Codex YOLO mode"
     )
     bootstrap_parser.add_argument("--force-config", action="store_true", help="Replace an existing team.toml")
@@ -114,7 +120,13 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("sleep", help="Operator phase: sleep the running live-demo team")
 
     resume_parser = subparsers.add_parser("resume", help="Operator phase: resume the live-demo team")
-    resume_parser.add_argument("--role-yolo", action="store_true", help="Resume managed role panes in Codex YOLO mode")
+    resume_policy = resume_parser.add_mutually_exclusive_group()
+    resume_policy.add_argument(
+        "--role-profile",
+        default=None,
+        help="Codex profile to pass to every resumed managed role TUI",
+    )
+    resume_policy.add_argument("--role-yolo", action="store_true", help="Resume managed role panes in Codex YOLO mode")
 
     subparsers.add_parser(
         "watchdog-now",
@@ -270,6 +282,8 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
         )
     if args.role_yolo and args.agent_runtime == "codex":
         command.append("--role-yolo")
+    elif args.role_profile and args.agent_runtime == "codex":
+        command.extend(["--role-profile", args.role_profile])
     if args.force_config:
         command.append("--force-config")
     run(command)
@@ -747,6 +761,8 @@ def resume_team(root: Path, args: argparse.Namespace) -> None:
     is_acp = all(role.get("mode") == "acp_tui" for role in config.get("roles", {}).values())
     if args.role_yolo and not is_acp:
         command.append("--role-yolo")
+    elif args.role_profile and not is_acp:
+        command.extend(["--role-profile", args.role_profile])
     run(command)
     print("LIVE DEMO RESUME OK")
     print(f"config: {config_path}")
