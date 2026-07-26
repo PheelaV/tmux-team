@@ -80,6 +80,11 @@ def parse_args() -> argparse.Namespace:
     setup_parser.add_argument("--repo-ref", default=DEFAULT_REPO_REF)
     setup_parser.add_argument("--expected-commit", default=DEFAULT_REPO_COMMIT)
     setup_parser.add_argument("--skip-failing-check", action="store_true")
+    setup_parser.add_argument(
+        "--flat-project",
+        action="store_true",
+        help="Use the marked scenario root as the main project and sibling role worktrees",
+    )
 
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Start tmux-team against the prepared scenario")
     bootstrap_parser.add_argument("--session", default=DEFAULT_SESSION)
@@ -142,11 +147,19 @@ def parse_args() -> argparse.Namespace:
 
 def setup(root: Path, args: argparse.Namespace) -> None:
     reset_root(root, args.force)
-    project = root / "project"
-    implementer = root / "project-implementer"
-    collector = root / "project-collector"
+    project, implementer, collector = scenario_paths(root, flat_project=args.flat_project)
+    clone_target = project
+    if args.flat_project:
+        for worktree in (implementer, collector):
+            if worktree.exists() or worktree.is_symlink():
+                raise ScenarioError(f"flat-project worktree already exists: {worktree}")
+        clone_target = root / ".clone-staging"
 
-    run(["git", "clone", "--quiet", args.repo_url, str(project)])
+    run(["git", "clone", "--quiet", args.repo_url, str(clone_target)])
+    if args.flat_project:
+        for entry in clone_target.iterdir():
+            shutil.move(str(entry), root / entry.name)
+        clone_target.rmdir()
     run(["git", "-C", str(project), "checkout", "--quiet", "--detach", args.repo_ref])
     base_commit = git_output(project, "rev-parse", "HEAD")
     if args.expected_commit and base_commit != args.expected_commit:
@@ -201,6 +214,10 @@ def setup(root: Path, args: argparse.Namespace) -> None:
     }
     (root / "scenario.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     write_goal(root, metadata)
+    if args.flat_project:
+        exclude = Path(git_output(project, "rev-parse", "--git-path", "info/exclude"))
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write(f"/{MARKER}\n/scenario.json\n/goal.md\n")
 
     if not args.skip_failing_check:
         result = run_target_test(collector, check=False)
@@ -217,6 +234,16 @@ def setup(root: Path, args: argparse.Namespace) -> None:
     print(f"base: {base_commit}")
     print(f"seed: {seed_commit}")
     print(f"goal: {root / 'goal.md'}")
+
+
+def scenario_paths(root: Path, *, flat_project: bool) -> tuple[Path, Path, Path]:
+    if flat_project:
+        return (
+            root,
+            root.parent / f"{root.name}-implementer",
+            root.parent / f"{root.name}-collector",
+        )
+    return root / "project", root / "project-implementer", root / "project-collector"
 
 
 def bootstrap(root: Path, args: argparse.Namespace) -> None:
@@ -737,6 +764,19 @@ def clean(root: Path, args: argparse.Namespace) -> None:
         marker = root / MARKER
         if not marker.exists():
             raise ScenarioError(f"refusing to remove unmarked directory: {root}")
+        metadata = load_metadata(root)
+        for label in ("implementer_worktree", "collector_worktree"):
+            worktree = Path(str(metadata.get(label, ""))).resolve()
+            if worktree.parent == root.parent and worktree.name in {
+                f"{root.name}-implementer",
+                f"{root.name}-collector",
+            }:
+                run(
+                    ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+                    check=False,
+                )
+                if worktree.exists() or worktree.is_symlink():
+                    raise ScenarioError(f"flat-project worktree was not safely removed: {worktree}")
         shutil.rmtree(root)
     print("LIVE DEMO CLEAN OK")
     print(f"session: {args.session}")

@@ -15,6 +15,7 @@ from scripts.live_demo_scenario import (
     bootstrap,
     prepare_acp_demo_provider,
     resume_team,
+    scenario_paths,
     start_goal,
     verify_acp_demo_model,
     wait_for_acp_session_idle,
@@ -71,6 +72,13 @@ class LiveDemoScenarioTests(unittest.TestCase):
         self.assertIn("--body-file", command)
         self.assertIn(str(self.root / "goal.md"), command)
         self.assertIn("live-demo-goal", command)
+
+    def test_flat_project_layout_keeps_registered_project_at_root(self) -> None:
+        project, implementer, collector = scenario_paths(self.root, flat_project=True)
+
+        self.assertEqual(project, self.root)
+        self.assertEqual(implementer, self.root.parent / f"{self.root.name}-implementer")
+        self.assertEqual(collector, self.root.parent / f"{self.root.name}-collector")
 
     def test_bootstrap_passes_named_codex_role_profile(self) -> None:
         args = Namespace(

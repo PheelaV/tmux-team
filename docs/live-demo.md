@@ -131,3 +131,9 @@ uv run python scripts/live_demo_scenario.py \
 Pass the same `--role-profile` to `resume` when an operator intentionally
 overrides the profile stored in the sleep snapshot. `--role-profile` and
 `--role-yolo` are mutually exclusive.
+
+Managed project registries that require the main repository at the marked
+scenario root can add `--flat-project` to `setup`. That layout keeps the main
+checkout at the root and creates sibling `-implementer` and `-collector`
+worktrees. The scenario's guarded `clean` command removes those exact recorded
+siblings before removing the marked root.
