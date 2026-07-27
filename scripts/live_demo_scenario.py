@@ -682,7 +682,8 @@ def verify(root: Path) -> None:
             require_sql_count(
                 conn,
                 "events",
-                "type = 'watchdog.runner_upserted' AND actor = 'resume' AND ref_id = 'live-resume'",
+                "type = 'watchdog.runner_upserted' AND actor IN ('resume', 'operator') "
+                "AND ref_id = 'live-resume'",
                 1,
             )
             require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
@@ -818,6 +819,54 @@ def resume_team(root: Path, args: argparse.Namespace) -> None:
 def nudge_resumed_watchdog(root: Path) -> None:
     metadata = load_metadata(root)
     config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
+    status = run(
+        [
+            "tmux-team",
+            "--config",
+            str(config_path),
+            "watchdog",
+            "status",
+            WATCHDOG_RESUME_NAME,
+            "--json",
+        ]
+    )
+    rows = json.loads(status.stdout)
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ScenarioError(f"expected exactly one {WATCHDOG_RESUME_NAME} watchdog runner")
+    state = rows[0].get("state")
+    if state == "failed":
+        snapshot_path = Path(metadata["project"]) / ".tmux-team" / "runtime" / "sleeps" / "latest.toml"
+        if not snapshot_path.is_file():
+            raise ScenarioError(f"missing sleep snapshot for watchdog recovery: {snapshot_path}")
+        snapshot = tomllib.loads(snapshot_path.read_text(encoding="utf-8"))
+        session = snapshot.get("tmux", {}).get("session")
+        if not isinstance(session, str) or not session:
+            raise ScenarioError("sleep snapshot has no tmux session for watchdog recovery")
+        run(
+            [
+                "tmux-team",
+                "--config",
+                str(config_path),
+                "watchdog",
+                "start",
+                "--name",
+                WATCHDOG_RESUME_NAME,
+                "--interval",
+                "1m",
+                "--delivery",
+                "report-only",
+                "--notify-role",
+                "orchestrator",
+                "--description",
+                "Resume post-sleep verification operation",
+                "--goal",
+                "Resume the post-sleep verification operation and stop once implementer tests pass.",
+                "--session",
+                session,
+            ]
+        )
+    elif state not in ("running", "paused"):
+        raise ScenarioError(f"cannot nudge {WATCHDOG_RESUME_NAME} watchdog in state {state}")
     run(
         [
             "tmux-team",

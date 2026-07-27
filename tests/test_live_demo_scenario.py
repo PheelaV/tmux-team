@@ -13,6 +13,7 @@ from unittest.mock import patch
 from scripts.live_demo_scenario import (
     acp_demo_initial_config,
     bootstrap,
+    nudge_resumed_watchdog,
     prepare_acp_demo_provider,
     reset_root,
     resume_team,
@@ -142,6 +143,44 @@ mode = "codex_tui"
             run.call_args.args[0],
             ["tmux-team", "--config", str(self.config), "resume", "--role-profile", "tmux-team-role"],
         )
+
+    def test_watchdog_nudge_recovers_failed_runner_as_operator(self) -> None:
+        sleep = self.project / ".tmux-team" / "runtime" / "sleeps"
+        sleep.mkdir(parents=True)
+        (sleep / "latest.toml").write_text(
+            '[tmux]\nsession = "tt-recovered"\n',
+            encoding="utf-8",
+        )
+        completed = [
+            subprocess.CompletedProcess([], 0, '[{"name":"live-resume","state":"failed"}]\n', ""),
+            subprocess.CompletedProcess([], 0, "live-resume state=running\n", ""),
+            subprocess.CompletedProcess([], 0, "live-resume state=running interval=5s\n", ""),
+        ]
+
+        with patch("scripts.live_demo_scenario.run", side_effect=completed) as run, redirect_stdout(StringIO()):
+            nudge_resumed_watchdog(self.root)
+
+        start = run.call_args_list[1].args[0]
+        self.assertIn("watchdog", start)
+        self.assertIn("start", start)
+        self.assertIn("--name", start)
+        self.assertEqual(start[start.index("--session") + 1], "tt-recovered")
+        update = run.call_args_list[2].args[0]
+        self.assertIn("update", update)
+        self.assertEqual(update[update.index("--interval") + 1], "5s")
+
+    def test_watchdog_nudge_updates_running_runner_without_recovery(self) -> None:
+        completed = [
+            subprocess.CompletedProcess([], 0, '[{"name":"live-resume","state":"running"}]\n', ""),
+            subprocess.CompletedProcess([], 0, "live-resume state=running interval=5s\n", ""),
+        ]
+
+        with patch("scripts.live_demo_scenario.run", side_effect=completed) as run, redirect_stdout(StringIO()):
+            nudge_resumed_watchdog(self.root)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("status", run.call_args_list[0].args[0])
+        self.assertIn("update", run.call_args_list[1].args[0])
 
     def test_verify_acp_demo_model_checks_roles_and_operator_without_mutation(self) -> None:
         model = "test-model[reasoning=medium]"
