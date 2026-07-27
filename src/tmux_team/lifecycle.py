@@ -280,9 +280,7 @@ def resume_team(
         explicit_role_launch_options,
     )
     role_scratchpads = {
-        role: config.roles[role].scratchpad or f".tmux-team/memory/{role}.md"
-        for role in roles
-        if role in config.roles
+        role: config.roles[role].scratchpad or f".tmux-team/memory/{role}.md" for role in roles if role in config.roles
     }
     role_launch_options = add_coordination_writable_roots(
         config.project_root or Path.cwd(),

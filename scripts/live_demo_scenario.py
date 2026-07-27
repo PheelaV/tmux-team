@@ -687,8 +687,7 @@ def verify(root: Path) -> None:
             require_sql_count(
                 conn,
                 "events",
-                "type = 'watchdog.runner_upserted' AND actor IN ('resume', 'operator') "
-                "AND ref_id = 'live-resume'",
+                "type = 'watchdog.runner_upserted' AND actor IN ('resume', 'operator') AND ref_id = 'live-resume'",
                 1,
             )
             require_sql_count(conn, "events", "type = 'watchdog.runner_stopped' AND ref_id = 'live-resume'", 1)
@@ -775,10 +774,13 @@ def materialize_approved_commit(root: Path) -> None:
                 "refusing materialization because managed role heads are neither the seed nor the approved commit"
             )
 
-        commit_exists = run(
-            ["git", "-C", str(project), "cat-file", "-e", f"{approved_sha}^{{commit}}"],
-            check=False,
-        ).returncode == 0
+        commit_exists = (
+            run(
+                ["git", "-C", str(project), "cat-file", "-e", f"{approved_sha}^{{commit}}"],
+                check=False,
+            ).returncode
+            == 0
+        )
         if not commit_exists:
             candidate = find_private_commit_clone(approved_sha)
             run(
@@ -884,10 +886,13 @@ def find_private_commit_clone(commit_sha: str) -> Path:
             continue
         if parent_stat.st_mode & 0o077:
             continue
-        if run(
-            ["git", "-C", str(repo), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
-            check=False,
-        ).returncode == 0:
+        if (
+            run(
+                ["git", "-C", str(repo), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+                check=False,
+            ).returncode
+            == 0
+        ):
             candidates.append(repo)
     if len(candidates) != 1:
         raise ScenarioError(

@@ -73,9 +73,7 @@ notify_method = "app-server-turn"
                 delivered, failed = relay_once(self.store, conn)
 
             self.assertEqual((delivered, failed), (1, 0))
-            states = conn.execute(
-                "SELECT recipient, state FROM messages ORDER BY recipient, created_at"
-            ).fetchall()
+            states = conn.execute("SELECT recipient, state FROM messages ORDER BY recipient, created_at").fetchall()
             self.assertEqual(
                 [(row["recipient"], row["state"]) for row in states],
                 [
@@ -97,9 +95,7 @@ notify_method = "app-server-turn"
                 ),
             ):
                 delivered, failed = relay_once(self.store, conn)
-            state = conn.execute(
-                "SELECT state FROM messages WHERE recipient = 'collector'"
-            ).fetchone()["state"]
+            state = conn.execute("SELECT state FROM messages WHERE recipient = 'collector'").fetchone()["state"]
 
         self.assertEqual((delivered, failed), (0, 1))
         self.assertEqual(state, "queued")

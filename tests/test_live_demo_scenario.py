@@ -299,13 +299,8 @@ mode = "codex_tui"
     def test_resume_watchdog_allows_bounded_pressure_while_work_completes(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        conn.execute(
-            "CREATE TABLE messages(sender TEXT, recipient TEXT, correlation_key TEXT)"
-        )
-        rows = [
-            ("watchdog:live-resume", "orchestrator", WATCHDOG_RESUME_CORRELATION)
-            for _ in range(4)
-        ]
+        conn.execute("CREATE TABLE messages(sender TEXT, recipient TEXT, correlation_key TEXT)")
+        rows = [("watchdog:live-resume", "orchestrator", WATCHDOG_RESUME_CORRELATION) for _ in range(4)]
         conn.executemany("INSERT INTO messages VALUES (?, ?, ?)", rows)
 
         require_bounded_resume_pressure(conn)
