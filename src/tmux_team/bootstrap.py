@@ -10,7 +10,7 @@ import sys
 import time
 import urllib.request
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import tomli_w
@@ -93,6 +93,7 @@ class RoleLaunchOptions:
     config_overrides: tuple[str, ...] = ()
     yolo: bool | None = None
     instruction_profile: str | None = None
+    writable_roots: tuple[Path, ...] = ()
 
 
 class BootstrapError(RuntimeError):
@@ -206,6 +207,14 @@ def bootstrap_team(
     )
     role_scratchpad_values = resolve_role_scratchpads(project_root, roles, role_scratchpads or {})
     resolved_runtime_dir = resolve_runtime_dir(project_root, runtime_dir)
+    if runtime.uses_app_server:
+        role_launch_options = add_coordination_writable_roots(
+            project_root,
+            resolved_runtime_dir,
+            role_scratchpad_values,
+            role_launch_options,
+            roles,
+        )
     role_control_sockets = {role: control_socket_path(resolved_runtime_dir, role) for role in roles}
     operator_control_socket = resolved_runtime_dir / "acp" / "tt-control.sock"
 
@@ -1398,6 +1407,8 @@ def role_shell_command(
         codex_args.append("resume")
     if profile:
         codex_args.extend(["--profile", profile])
+    for writable_root in role_launch_options.writable_roots:
+        codex_args.extend(["--add-dir", str(writable_root)])
     if role_yolo or role_launch_options.yolo:
         codex_args.append("--dangerously-bypass-approvals-and-sandbox")
     if role_launch_options.model:
@@ -1687,6 +1698,27 @@ def validate_role_launch_options(roles: tuple[str, ...], options: dict[str, Role
     unknown = set(options) - set(roles)
     if unknown:
         raise BootstrapError(f"Codex launch options specified for unknown role(s): {', '.join(sorted(unknown))}")
+
+
+def add_coordination_writable_roots(
+    project_root: Path,
+    runtime_dir: Path,
+    role_scratchpads: dict[str, str],
+    options: dict[str, RoleLaunchOptions],
+    roles: tuple[str, ...],
+) -> dict[str, RoleLaunchOptions]:
+    """Add only tmux-team's shared runtime and role-memory parents to Codex."""
+    updated = dict(options)
+    runtime_root = runtime_dir.expanduser().resolve()
+    for role in roles:
+        scratchpad = Path(role_scratchpads.get(role, f".tmux-team/memory/{role}.md")).expanduser()
+        if not scratchpad.is_absolute():
+            scratchpad = project_root / scratchpad
+        memory_root = scratchpad.resolve().parent
+        launch = updated.get(role, RoleLaunchOptions())
+        roots = tuple(dict.fromkeys((*launch.writable_roots, runtime_root, memory_root)))
+        updated[role] = replace(launch, writable_roots=roots)
+    return updated
 
 
 def validate_acp_launch_options(role_yolo: bool, options: dict[str, RoleLaunchOptions]) -> None:

@@ -17,6 +17,7 @@ from .bootstrap import (
     RoleBinding,
     RoleLaunchOptions,
     acp_role_spawn_command,
+    add_coordination_writable_roots,
     app_server_tmux_commands,
     configure_agent_window,
     configure_session_truecolor,
@@ -278,6 +279,18 @@ def resume_team(
         saved_role_launch_options(snapshot, config, roles),
         explicit_role_launch_options,
     )
+    role_scratchpads = {
+        role: config.roles[role].scratchpad or f".tmux-team/memory/{role}.md"
+        for role in roles
+        if role in config.roles
+    }
+    role_launch_options = add_coordination_writable_roots(
+        config.project_root or Path.cwd(),
+        config.runtime_dir,
+        role_scratchpads,
+        role_launch_options,
+        roles,
+    )
     agent_layout = normalize_agent_layout(agent_layout)
     session = session or snapshot.get("tmux", {}).get("session") or config.name
     endpoint = endpoint or first_snapshot_endpoint(snapshot)
@@ -376,9 +389,6 @@ def resume_team(
         label_role_pane(tmux_bin, pane, role)
         resumed_bindings[role] = RoleBinding(thread_id=binding.thread_id, pane=pane, worktree=binding.worktree)
 
-    role_scratchpads = {
-        role: config.roles[role].scratchpad or f".tmux-team/memory/{role}.md" for role in roles if role in config.roles
-    }
     write_team_config(
         config.config_path,
         str(config.runtime_dir),

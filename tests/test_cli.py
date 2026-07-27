@@ -3402,7 +3402,9 @@ can_notify = ["orchestrator"]
         self.assertIn("tmux select-pane -t tt-bootstrap:tt-agents.1 -T tt-implementer", out)
         self.assertIn("tmux select-layout -t tt-bootstrap:tt-agents tiled", out)
         self.assertIn("codex app-server --listen ws://127.0.0.1:4500", out)
-        self.assertIn(f"codex --cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
+        self.assertIn(f"--add-dir {self.root.resolve() / '.tmux-team' / 'runtime'}", out)
+        self.assertIn(f"--add-dir {self.root.resolve() / '.tmux-team' / 'memory'}", out)
+        self.assertIn(f"--cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
         self.assertIn("You are the `orchestrator` role in a tmux-team managed Codex team.", out)
         self.assertIn("tmux-team memory show --role orchestrator", out)
         self.assertIn("tmux-team inbox next --role orchestrator", out)
@@ -3643,10 +3645,9 @@ exit 0
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn(
-            f"codex --dangerously-bypass-approvals-and-sandbox --cd {self.root.resolve()} --remote ws://127.0.0.1:4500",
-            out,
-        )
+        self.assertIn("codex --add-dir", out)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", out)
+        self.assertIn(f"--cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
         self.assertIn("codex_yolo = true", out)
         self.assertFalse(generated_config.exists())
 
@@ -3671,7 +3672,8 @@ exit 0
         )
 
         self.assertEqual(code, 0, err)
-        self.assertIn(f"codex --profile tmux-team-role --cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
+        self.assertIn("codex --profile tmux-team-role --add-dir", out)
+        self.assertIn(f"--cd {self.root.resolve()} --remote ws://127.0.0.1:4500", out)
         self.assertIn('codex_profile = "tmux-team-role"', out)
         self.assertFalse(generated_config.exists())
 
@@ -3738,6 +3740,7 @@ exit 0
 
         self.assertEqual(code, 0, err)
         self.assertIn(f'scratchpad = "{memory_path.resolve()}"', out)
+        self.assertIn(f"--add-dir {memory_path.parent.resolve()}", out)
         self.assertFalse(generated_config.exists())
 
     def test_bootstrap_dry_run_uses_per_role_worktrees(self) -> None:
@@ -3769,8 +3772,10 @@ exit 0
         self.assertEqual(code, 0, err)
         self.assertIn(f"tmux split-window -t tt-bootstrap-worktrees:tt-agents -c {collector}", out)
         self.assertIn(f"tmux split-window -t tt-bootstrap-worktrees:tt-agents -c {trainer}", out)
-        self.assertIn(f"codex --cd {collector} --remote ws://127.0.0.1:4500", out)
-        self.assertIn(f"codex --cd {trainer} --remote ws://127.0.0.1:4500", out)
+        self.assertIn(f"--cd {collector} --remote ws://127.0.0.1:4500", out)
+        self.assertIn(f"--cd {trainer} --remote ws://127.0.0.1:4500", out)
+        self.assertGreaterEqual(out.count(f"--add-dir {self.root.resolve() / '.tmux-team' / 'runtime'}"), 3)
+        self.assertGreaterEqual(out.count(f"--add-dir {self.root.resolve() / '.tmux-team' / 'memory'}"), 3)
         self.assertIn("TMUX_TEAM_ROLE=collector", out)
         self.assertIn("TMUX_TEAM_ROLE=trainer", out)
         self.assertIn(f'worktree = "{collector}"', out)
@@ -4022,6 +4027,8 @@ acp_resume_supported = true
         self.assertIn('model_reasoning_effort="xhigh"', out)
         self.assertIn("--profile implementer-profile", out)
         self.assertIn('model_reasoning_effort="high"', out)
+        self.assertGreaterEqual(out.count(f"--add-dir {(self.root / 'runtime').resolve()}"), 2)
+        self.assertGreaterEqual(out.count(f"--add-dir {(self.root / '.tmux-team' / 'memory').resolve()}"), 2)
         self.assertIn("--remote ws://127.0.0.1:4500 thread-orch", out)
         self.assertIn("--remote ws://127.0.0.1:4500 thread-impl", out)
         self.assertIn("tmux new-window -t tt -n tt-agents", out)
