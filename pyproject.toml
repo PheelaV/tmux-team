@@ -30,6 +30,7 @@ dev = [
 [project.scripts]
 tmux-team = "tmux_team.cli:main"
 tmux-team-control = "tmux_team.control_api:main"
+tmux-team-wake-relay = "tmux_team.wake_relay:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

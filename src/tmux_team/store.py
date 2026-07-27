@@ -2213,6 +2213,28 @@ class Store:
             ).fetchone()[0]
         )
 
+    def queued_active_roles(self, conn: sqlite3.Connection) -> list[str]:
+        """Return active roles that need an out-of-band wake.
+
+        Only freshly queued messages are selected. A successful notification
+        changes them to ``notified``, which makes this query its own durable
+        de-duplication boundary.
+        """
+        return [
+            str(row["recipient"])
+            for row in conn.execute(
+                """
+                SELECT messages.recipient, MIN(messages.created_at) AS first_created_at
+                FROM messages
+                JOIN roles ON roles.name = messages.recipient
+                WHERE messages.state = 'queued'
+                  AND roles.state = 'active'
+                GROUP BY messages.recipient
+                ORDER BY first_created_at, messages.recipient
+                """
+            )
+        ]
+
     def pending_wake_context(self, conn: sqlite3.Connection, role: str) -> dict[str, Any]:
         now = utc_now()
         pending = self.pending_count(conn, role)
