@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from scripts.live_demo_scenario import (
     acp_demo_initial_config,
     bootstrap,
+    materialize_approved_commit,
     nudge_resumed_watchdog,
     prepare_acp_demo_provider,
     reset_root,
@@ -181,6 +183,108 @@ mode = "codex_tui"
         self.assertEqual(run.call_count, 2)
         self.assertIn("status", run.call_args_list[0].args[0])
         self.assertIn("update", run.call_args_list[1].args[0])
+
+    def test_materializes_only_the_approved_exact_role_tree(self) -> None:
+        project = self.root / "materialize-project"
+        implementer = self.root / "materialize-implementer"
+        collector = self.root / "materialize-collector"
+        private = self.root / "private-commit"
+
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
+        subprocess.run(["git", "-C", str(project), "config", "user.name", "demo"], check=True)
+        subprocess.run(["git", "-C", str(project), "config", "user.email", "demo@example.invalid"], check=True)
+        source = project / "src" / "tmux_team" / "store.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("priority = 'broken'\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(project), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(project), "commit", "-qm", "seed"], check=True)
+        seed = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(project), "worktree", "add", "-qb", "implementer", str(implementer), seed],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(project), "worktree", "add", "-qb", "collector", str(collector), seed],
+            check=True,
+        )
+        for worktree in (implementer, collector):
+            (worktree / "src" / "tmux_team" / "store.py").write_text("priority = 'fixed'\n", encoding="utf-8")
+
+        subprocess.run(["git", "clone", "-q", str(project), str(private)], check=True)
+        subprocess.run(["git", "-C", str(private), "config", "user.name", "implementer"], check=True)
+        subprocess.run(["git", "-C", str(private), "config", "user.email", "implementer@example.invalid"], check=True)
+        (private / "src" / "tmux_team" / "store.py").write_text("priority = 'fixed'\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(private), "add", "src/tmux_team/store.py"], check=True)
+        subprocess.run(["git", "-C", str(private), "commit", "-qm", "Fix priority"], check=True)
+        approved = subprocess.run(
+            ["git", "-C", str(private), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+        runtime = project / ".tmux-team" / "runtime"
+        runtime.mkdir(parents=True)
+        conn = sqlite3.connect(runtime / "team.sqlite")
+        conn.executescript(
+            """
+            CREATE TABLE stable_commits (
+              scope TEXT PRIMARY KEY,
+              commit_sha TEXT NOT NULL,
+              approved_by TEXT NOT NULL,
+              approved_at TEXT NOT NULL,
+              note TEXT
+            );
+            CREATE TABLE events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at TEXT NOT NULL,
+              type TEXT NOT NULL,
+              actor TEXT,
+              ref_id TEXT,
+              payload_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO stable_commits VALUES (?, ?, ?, ?, ?)",
+            ("collector", approved, "orchestrator", "2026-07-27T00:00:00+00:00", "reviewed"),
+        )
+        conn.commit()
+        conn.close()
+        metadata = {
+            "project": str(project),
+            "implementer_worktree": str(implementer),
+            "collector_worktree": str(collector),
+            "seed_commit": seed,
+        }
+        (self.root / "scenario.json").write_text(json.dumps(metadata), encoding="utf-8")
+        passing = subprocess.CompletedProcess([], 0, "OK\n", "")
+
+        with (
+            patch("scripts.live_demo_scenario.find_private_commit_clone", return_value=private),
+            patch("scripts.live_demo_scenario.run_target_test", return_value=passing),
+            redirect_stdout(StringIO()),
+        ):
+            materialize_approved_commit(self.root)
+            materialize_approved_commit(self.root)
+
+        for worktree in (implementer, collector):
+            head = subprocess.run(
+                ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            self.assertEqual(head, approved)
+        conn = sqlite3.connect(runtime / "team.sqlite")
+        count = conn.execute("SELECT COUNT(*) FROM events WHERE type = 'scenario.commit_materialized'").fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
 
     def test_verify_acp_demo_model_checks_roles_and_operator_without_mutation(self) -> None:
         model = "test-model[reasoning=medium]"

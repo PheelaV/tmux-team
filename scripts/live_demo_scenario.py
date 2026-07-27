@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -11,6 +13,7 @@ import sys
 import textwrap
 import time
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,7 @@ WATCHDOG_PRESSURE_NAME = "live-pressure"
 WATCHDOG_PRESSURE_CORRELATION = f"watchdog:{WATCHDOG_PRESSURE_NAME}:team:to:orchestrator"
 WATCHDOG_RESUME_NAME = "live-resume"
 WATCHDOG_RESUME_CORRELATION = f"watchdog:{WATCHDOG_RESUME_NAME}:team:to:orchestrator"
+FIX_PATH = "src/tmux_team/store.py"
 
 
 class ScenarioError(RuntimeError):
@@ -53,6 +57,8 @@ def main() -> int:
             start_goal(root)
         elif args.command == "verify":
             verify(root)
+        elif args.command == "materialize":
+            materialize_approved_commit(root)
         elif args.command == "sleep":
             sleep_team(root)
         elif args.command == "resume":
@@ -127,6 +133,10 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("start-goal", help="Submit the prepared goal after an attach-before-run bootstrap")
 
     subparsers.add_parser("verify", help="Verify the live run reached real target success")
+    subparsers.add_parser(
+        "materialize",
+        help="Materialize the approved sandbox-produced commit into the managed role worktrees",
+    )
     subparsers.add_parser("sleep", help="Operator phase: sleep the running live-demo team")
 
     resume_parser = subparsers.add_parser("resume", help="Operator phase: resume the live-demo team")
@@ -725,6 +735,169 @@ def verify(root: Path) -> None:
     print(f"collector_head: {collector_head}")
     print(f"implementer_head: {implementer_head}")
     print(f"target_test: {TARGET_TEST}")
+
+
+def materialize_approved_commit(root: Path) -> None:
+    """Attach an approved sandbox-produced commit to the managed worktrees.
+
+    Codex's workspace sandbox deliberately protects Git metadata. A role may
+    therefore create the commit object in a private temporary clone while
+    leaving the reviewed tree in its managed worktree. This fixed operator
+    phase imports only the already-approved object after proving that its
+    parent, changed path, and both managed worktree trees are exact.
+    """
+
+    metadata = load_metadata(root)
+    project = Path(metadata["project"])
+    implementer = Path(metadata["implementer_worktree"])
+    collector = Path(metadata["collector_worktree"])
+    seed_commit = str(metadata["seed_commit"])
+    db_path = project / ".tmux-team" / "runtime" / "team.sqlite"
+    if not db_path.exists():
+        raise ScenarioError(f"missing runtime database: {db_path}")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT commit_sha, approved_by, approved_at FROM stable_commits WHERE scope = ?",
+            (STABLE_SCOPE,),
+        ).fetchone()
+        if row is None:
+            raise ScenarioError(f"no approved commit exists for stable scope {STABLE_SCOPE}")
+        approved_sha = str(row["commit_sha"])
+        if re.fullmatch(r"[0-9a-f]{40}", approved_sha) is None:
+            raise ScenarioError("approved stable commit is not a full lowercase SHA-1")
+
+        implementer_head = git_output(implementer, "rev-parse", "HEAD")
+        collector_head = git_output(collector, "rev-parse", "HEAD")
+        if implementer_head == approved_sha and collector_head == approved_sha:
+            print("LIVE DEMO APPROVED COMMIT ALREADY MATERIALIZED")
+            print(f"commit: {approved_sha}")
+            return
+        if implementer_head != seed_commit or collector_head != seed_commit:
+            raise ScenarioError(
+                "refusing materialization because managed role heads are neither the seed nor the approved commit"
+            )
+
+        commit_exists = run(
+            ["git", "-C", str(project), "cat-file", "-e", f"{approved_sha}^{{commit}}"],
+            check=False,
+        ).returncode == 0
+        if not commit_exists:
+            candidate = find_private_commit_clone(approved_sha)
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(project),
+                    "fetch",
+                    "--no-tags",
+                    "--quiet",
+                    str(candidate),
+                    approved_sha,
+                ]
+            )
+
+        parents = git_output(project, "rev-list", "--parents", "-n", "1", approved_sha).split()
+        if parents != [approved_sha, seed_commit]:
+            raise ScenarioError(
+                f"approved commit must have exactly the seeded parent {seed_commit}; got {' '.join(parents[1:])}"
+            )
+        changed_paths = [
+            line
+            for line in git_output(
+                project,
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                approved_sha,
+            ).splitlines()
+            if line
+        ]
+        if changed_paths != [FIX_PATH]:
+            raise ScenarioError(
+                f"approved commit must change only {FIX_PATH}; got {', '.join(changed_paths) or 'no paths'}"
+            )
+
+        for label, worktree in (("implementer", implementer), ("collector", collector)):
+            if run(
+                ["git", "-C", str(worktree), "diff", "--quiet", approved_sha, "--", "."],
+                check=False,
+            ).returncode:
+                raise ScenarioError(f"{label} tracked worktree does not exactly match approved commit {approved_sha}")
+
+        run(["git", "-C", str(implementer), "reset", "--hard", "--quiet", approved_sha])
+        run(["git", "-C", str(collector), "reset", "--hard", "--quiet", approved_sha])
+        result = run_target_test(collector, check=False)
+        if result.returncode != 0:
+            raise ScenarioError(
+                "collector target test failed after approved commit materialization:"
+                f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+
+        existing = conn.execute(
+            "SELECT 1 FROM events WHERE type = ? AND actor = ? AND ref_id = ?",
+            ("scenario.commit_materialized", "operator", approved_sha),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO events(created_at, type, actor, ref_id, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(UTC).isoformat(),
+                    "scenario.commit_materialized",
+                    "operator",
+                    approved_sha,
+                    json.dumps(
+                        {
+                            "approved_at": row["approved_at"],
+                            "approved_by": row["approved_by"],
+                            "changed_paths": changed_paths,
+                            "scope": STABLE_SCOPE,
+                            "seed_commit": seed_commit,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    print("LIVE DEMO APPROVED COMMIT MATERIALIZED")
+    print(f"commit: {approved_sha}")
+    print(f"changed_path: {FIX_PATH}")
+
+
+def find_private_commit_clone(commit_sha: str) -> Path:
+    candidates: list[Path] = []
+    for parent in Path("/tmp").glob("tmux-team-implementer-commit.*"):
+        try:
+            parent_stat = parent.lstat()
+            repo = parent / "repo"
+            repo_stat = repo.lstat()
+        except OSError:
+            continue
+        if parent.is_symlink() or repo.is_symlink():
+            continue
+        if parent_stat.st_uid != os.getuid() or repo_stat.st_uid != os.getuid():
+            continue
+        if parent_stat.st_mode & 0o077:
+            continue
+        if run(
+            ["git", "-C", str(repo), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+            check=False,
+        ).returncode == 0:
+            candidates.append(repo)
+    if len(candidates) != 1:
+        raise ScenarioError(
+            f"expected exactly one private implementer commit clone containing {commit_sha}, got {len(candidates)}"
+        )
+    return candidates[0]
 
 
 def verify_tmux_truecolor(config: dict[str, Any]) -> None:
