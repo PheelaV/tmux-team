@@ -196,6 +196,7 @@ mode = "codex_tui"
         source = project / "src" / "tmux_team" / "store.py"
         source.parent.mkdir(parents=True)
         source.write_text("priority = 'broken'\n", encoding="utf-8")
+        (project / "CHANGELOG.md").write_text("# Changes\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(project), "add", "."], check=True)
         subprocess.run(["git", "-C", str(project), "commit", "-qm", "seed"], check=True)
         seed = subprocess.run(
@@ -214,12 +215,17 @@ mode = "codex_tui"
         )
         for worktree in (implementer, collector):
             (worktree / "src" / "tmux_team" / "store.py").write_text("priority = 'fixed'\n", encoding="utf-8")
+            (worktree / "CHANGELOG.md").write_text("# Changes\n\n- Fix priority.\n", encoding="utf-8")
 
         subprocess.run(["git", "clone", "-q", str(project), str(private)], check=True)
         subprocess.run(["git", "-C", str(private), "config", "user.name", "implementer"], check=True)
         subprocess.run(["git", "-C", str(private), "config", "user.email", "implementer@example.invalid"], check=True)
         (private / "src" / "tmux_team" / "store.py").write_text("priority = 'fixed'\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(private), "add", "src/tmux_team/store.py"], check=True)
+        (private / "CHANGELOG.md").write_text("# Changes\n\n- Fix priority.\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(private), "add", "CHANGELOG.md", "src/tmux_team/store.py"],
+            check=True,
+        )
         subprocess.run(["git", "-C", str(private), "commit", "-qm", "Fix priority"], check=True)
         approved = subprocess.run(
             ["git", "-C", str(private), "rev-parse", "HEAD"],

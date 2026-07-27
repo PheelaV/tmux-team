@@ -38,7 +38,7 @@ WATCHDOG_PRESSURE_NAME = "live-pressure"
 WATCHDOG_PRESSURE_CORRELATION = f"watchdog:{WATCHDOG_PRESSURE_NAME}:team:to:orchestrator"
 WATCHDOG_RESUME_NAME = "live-resume"
 WATCHDOG_RESUME_CORRELATION = f"watchdog:{WATCHDOG_RESUME_NAME}:team:to:orchestrator"
-FIX_PATH = "src/tmux_team/store.py"
+FIX_PATHS = ("CHANGELOG.md", "src/tmux_team/store.py")
 
 
 class ScenarioError(RuntimeError):
@@ -816,9 +816,10 @@ def materialize_approved_commit(root: Path) -> None:
             ).splitlines()
             if line
         ]
-        if changed_paths != [FIX_PATH]:
+        if changed_paths != list(FIX_PATHS):
             raise ScenarioError(
-                f"approved commit must change only {FIX_PATH}; got {', '.join(changed_paths) or 'no paths'}"
+                "approved commit must change exactly "
+                f"{', '.join(FIX_PATHS)}; got {', '.join(changed_paths) or 'no paths'}"
             )
 
         for label, worktree in (("implementer", implementer), ("collector", collector)):
@@ -870,7 +871,7 @@ def materialize_approved_commit(root: Path) -> None:
 
     print("LIVE DEMO APPROVED COMMIT MATERIALIZED")
     print(f"commit: {approved_sha}")
-    print(f"changed_path: {FIX_PATH}")
+    print(f"changed_paths: {', '.join(FIX_PATHS)}")
 
 
 def find_private_commit_clone(commit_sha: str) -> Path:
