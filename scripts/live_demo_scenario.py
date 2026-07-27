@@ -38,6 +38,7 @@ WATCHDOG_PRESSURE_NAME = "live-pressure"
 WATCHDOG_PRESSURE_CORRELATION = f"watchdog:{WATCHDOG_PRESSURE_NAME}:team:to:orchestrator"
 WATCHDOG_RESUME_NAME = "live-resume"
 WATCHDOG_RESUME_CORRELATION = f"watchdog:{WATCHDOG_RESUME_NAME}:team:to:orchestrator"
+MAX_RESUME_PRESSURE_MESSAGES = 12
 FIX_PATHS = ("CHANGELOG.md", "src/tmux_team/store.py")
 
 
@@ -662,13 +663,7 @@ def verify(root: Path) -> None:
             1,
         )
         if not is_acp:
-            require_sql_count_exact(
-                conn,
-                "messages",
-                "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
-                f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
-                1,
-            )
+            require_bounded_resume_pressure(conn)
         require_sql_count_exact(conn, "messages", "state != 'completed'", 0)
         require_sql_count_exact(
             conn,
@@ -1316,6 +1311,17 @@ def require_sql_count_exact(conn: sqlite3.Connection, table: str, where: str, ex
     count = int(row["count"])
     if count != expected:
         raise ScenarioError(f"expected exactly {expected} rows in {table} where {where}, got {count}")
+
+
+def require_bounded_resume_pressure(conn: sqlite3.Connection) -> None:
+    require_sql_count_range(
+        conn,
+        "messages",
+        "sender = 'watchdog:live-resume' AND recipient = 'orchestrator' "
+        f"AND correlation_key = '{WATCHDOG_RESUME_CORRELATION}'",
+        minimum=1,
+        maximum=MAX_RESUME_PRESSURE_MESSAGES,
+    )
 
 
 def require_sql_count_range(conn: sqlite3.Connection, table: str, where: str, *, minimum: int, maximum: int) -> None:

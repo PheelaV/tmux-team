@@ -12,11 +12,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.live_demo_scenario import (
+    MAX_RESUME_PRESSURE_MESSAGES,
+    WATCHDOG_RESUME_CORRELATION,
+    ScenarioError,
     acp_demo_initial_config,
     bootstrap,
     materialize_approved_commit,
     nudge_resumed_watchdog,
     prepare_acp_demo_provider,
+    require_bounded_resume_pressure,
     reset_root,
     resume_team,
     scenario_paths,
@@ -291,6 +295,31 @@ mode = "codex_tui"
         count = conn.execute("SELECT COUNT(*) FROM events WHERE type = 'scenario.commit_materialized'").fetchone()[0]
         conn.close()
         self.assertEqual(count, 1)
+
+    def test_resume_watchdog_allows_bounded_pressure_while_work_completes(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE messages(sender TEXT, recipient TEXT, correlation_key TEXT)"
+        )
+        rows = [
+            ("watchdog:live-resume", "orchestrator", WATCHDOG_RESUME_CORRELATION)
+            for _ in range(4)
+        ]
+        conn.executemany("INSERT INTO messages VALUES (?, ?, ?)", rows)
+
+        require_bounded_resume_pressure(conn)
+
+        conn.executemany(
+            "INSERT INTO messages VALUES (?, ?, ?)",
+            [
+                ("watchdog:live-resume", "orchestrator", WATCHDOG_RESUME_CORRELATION)
+                for _ in range(MAX_RESUME_PRESSURE_MESSAGES - 4 + 1)
+            ],
+        )
+        with self.assertRaises(ScenarioError):
+            require_bounded_resume_pressure(conn)
+        conn.close()
 
     def test_verify_acp_demo_model_checks_roles_and_operator_without_mutation(self) -> None:
         model = "test-model[reasoning=medium]"
