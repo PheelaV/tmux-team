@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -15,11 +16,14 @@ from tmux_team.control_api import (
     API_VERSION,
     MAX_PAGE_SIZE,
     ControlAPIError,
+    MutationControl,
     ReadOnlyControl,
     call_operation,
     list_operations,
     serve_control_protocol,
+    serve_stdio,
 )
+from tmux_team.service import NotificationResult
 from tmux_team.store import Store
 
 
@@ -233,6 +237,8 @@ worktree = "/private/worktrees/implementer"
                 lambda: self.control.milestones({"subject_role": "x" * 129}),
                 lambda: self.control.milestones({"since": "2026-07-26"}),
                 lambda: self.control.obligations(conn, {"status": "unknown"}),
+                lambda: self.control.watchdog_status(conn, {"limit": 0}),
+                lambda: self.control.evidence(conn, {"limit": MAX_PAGE_SIZE + 1}),
             )
             for invalid_call in invalid_calls:
                 with self.subTest(call=invalid_call), self.assertRaises(ControlAPIError):
@@ -334,6 +340,82 @@ worktree = "/private/worktrees/implementer"
         self.assertNotIn("created_by", row)
         self.assert_no_private_bindings(result)
 
+    def test_watchdog_status_is_bounded_and_omits_execution_bindings(self) -> None:
+        with closing(self.store.connect()) as writer:
+            self.store.upsert_watchdog_runner(
+                writer,
+                name="integration-pressure",
+                state="running",
+                interval_seconds=300,
+                scope_role="orchestrator",
+                description="private description",
+                goal="private goal",
+                notify_role="orchestrator",
+                delivery_method="structured",
+                pane="private-session:watchdogs.0",
+                window="private-session:watchdogs",
+                process_id=12345,
+                next_run_at="2026-07-27T12:00:00+00:00",
+            )
+            writer.commit()
+
+        with closing(self.control.connect()) as conn:
+            result = self.control.watchdog_status(
+                conn,
+                {"name": "integration-pressure", "limit": 1},
+            )
+
+        self.assertEqual(result["kind"], "watchdog-status")
+        self.assertEqual(len(result["watchdogs"]), 1)
+        watchdog = result["watchdogs"][0]
+        self.assertEqual(watchdog["name"], "integration-pressure")
+        self.assertEqual(watchdog["state"], "running")
+        self.assertEqual(watchdog["interval_seconds"], 300)
+        for forbidden in ("description", "goal", "pane", "window", "process_id"):
+            self.assertNotIn(forbidden, watchdog)
+        self.assert_no_private_bindings(result)
+
+    def test_evidence_is_bounded_and_omits_message_and_commit_bindings(self) -> None:
+        with closing(self.store.connect()) as writer:
+            self.store.approve_stable_commit(
+                writer,
+                scope="global",
+                commit_sha="a" * 40,
+                approved_by="operator",
+                note="validated",
+            )
+            message = self.store.create_message(
+                writer,
+                sender="operator",
+                recipient="orchestrator",
+                priority="normal",
+                summary="bounded completion",
+                body="private body",
+                state="completed",
+            )
+            writer.execute(
+                """
+                UPDATE messages
+                SET result_status = 'done',
+                    result_summary = 'Verification passed',
+                    completed_at = '2026-07-27T12:00:00+00:00'
+                WHERE id = ?
+                """,
+                (message.id,),
+            )
+            writer.commit()
+
+        with closing(self.control.connect()) as conn:
+            result = self.control.evidence(conn, {"limit": 1})
+
+        self.assertEqual(result["kind"], "evidence")
+        self.assertEqual(result["stable_commits"][0]["commit"], "a" * 40)
+        self.assertEqual(result["completed_work"][0]["summary"], "Verification passed")
+        serialized = json.dumps(result, sort_keys=True)
+        for forbidden in ("body_path", "correlation_key", "pane", "worktree"):
+            self.assertNotIn(forbidden, serialized)
+        self.assert_no_private_bindings(result)
+
     def test_tool_catalog_contains_only_read_only_control_tools(self) -> None:
         tools = list_operations()
 
@@ -344,6 +426,8 @@ worktree = "/private/worktrees/implementer"
                 "team_control_events_since",
                 "team_control_milestones",
                 "team_control_obligations",
+                "team_control_watchdog_status",
+                "team_control_evidence",
             },
         )
         for tool in tools:
@@ -404,6 +488,276 @@ worktree = "/private/worktrees/implementer"
             "/private/worktrees/orchestrator",
         ):
             self.assertNotIn(forbidden, serialized)
+
+
+class MutationControlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.runtime = self.root / "runtime"
+        self.config_path = self.root / ".tmux-team" / "team.toml"
+        self.config_path.parent.mkdir(parents=True)
+        self.config_path.write_text(
+            f"""[team]
+name = "mutation-test"
+runtime_dir = "{self.runtime}"
+
+[roles.orchestrator]
+mode = "app_server_remote_tui"
+state = "active"
+pane = "tt-agents:orchestrator"
+""",
+            encoding="utf-8",
+        )
+        self.config = load_config(self.config_path)
+        self.store = Store(self.config)
+        with closing(self.store.connect()):
+            pass
+        self.control = MutationControl(
+            self.config,
+            project_id="project-opaque-1",
+            actor="gateway:telegram",
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def submit_arguments(self, key: str = "request-1") -> dict[str, object]:
+        return {
+            "idempotency_key": key,
+            "objective": "Implement the bounded project change.",
+            "constraints": ["Do not change unrelated files."],
+            "acceptance_criteria": ["The targeted tests pass."],
+        }
+
+    def test_mutation_catalog_is_explicit_and_contains_one_idempotent_action(self) -> None:
+        default_names = {tool["name"] for tool in list_operations()}
+        enabled = list_operations(include_mutations=True)
+        enabled_names = {tool["name"] for tool in enabled}
+
+        self.assertNotIn("team_control_submit_goal", default_names)
+        self.assertEqual(enabled_names - default_names, {"team_control_submit_goal"})
+        mutation = next(tool for tool in enabled if tool["name"] == "team_control_submit_goal")
+        self.assertFalse(mutation["annotations"]["readOnlyHint"])
+        self.assertFalse(mutation["annotations"]["destructiveHint"])
+        self.assertTrue(mutation["annotations"]["idempotentHint"])
+        forbidden_arguments = {
+            "path",
+            "worktree",
+            "pane",
+            "role",
+            "command",
+            "environment",
+        }
+        self.assertTrue(forbidden_arguments.isdisjoint(mutation["inputSchema"]["properties"]))
+
+    def test_submit_goal_is_idempotent_and_audited_without_goal_payload(self) -> None:
+        notification = NotificationResult(
+            ok=True,
+            details="structured wake accepted",
+            method="structured",
+        )
+        with closing(self.control.connect()) as conn:
+            with mock.patch.object(
+                self.control.service,
+                "notify_role",
+                return_value=notification,
+            ) as notify_role:
+                first = self.control.submit_goal(conn, self.submit_arguments())
+                replay = self.control.submit_goal(conn, self.submit_arguments())
+
+            messages = conn.execute(
+                "SELECT * FROM messages WHERE correlation_key = ?",
+                ("control-goal:request-1",),
+            ).fetchall()
+            event = conn.execute(
+                """
+                SELECT actor, ref_id, payload_json
+                FROM events
+                WHERE type = 'control.request_completed'
+                """
+            ).fetchone()
+            request = conn.execute(
+                """
+                SELECT state, project_id, actor, result_json
+                FROM control_requests
+                WHERE idempotency_key = ?
+                """,
+                ("request-1",),
+            ).fetchone()
+
+        self.assertEqual(first["state"], "accepted")
+        self.assertFalse(first["idempotency"]["replayed"])
+        self.assertEqual(replay["state"], "accepted")
+        self.assertTrue(replay["idempotency"]["replayed"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["sender"], "external-control")
+        self.assertEqual(messages[0]["recipient"], "orchestrator")
+        self.assertEqual(notify_role.call_count, 1)
+        self.assertEqual(request["state"], "completed")
+        self.assertEqual(request["project_id"], "project-opaque-1")
+        self.assertEqual(request["actor"], "gateway:telegram")
+        self.assertEqual(event["actor"], "gateway:telegram")
+        self.assertEqual(event["ref_id"], "request-1")
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(payload["project_id"], "project-opaque-1")
+        self.assertEqual(payload["action"], "team_control_submit_goal")
+        self.assertEqual(payload["result"], "completed")
+        self.assertNotIn("objective", payload)
+        self.assertNotIn("constraints", payload)
+        self.assertNotIn("acceptance_criteria", payload)
+
+    def test_reused_idempotency_key_with_different_payload_is_rejected(self) -> None:
+        notification = NotificationResult(ok=True, details="ok", method="structured")
+        with closing(self.control.connect()) as conn:
+            with mock.patch.object(
+                self.control.service,
+                "notify_role",
+                return_value=notification,
+            ):
+                self.control.submit_goal(conn, self.submit_arguments())
+                changed = self.submit_arguments()
+                changed["objective"] = "A different objective."
+                with self.assertRaisesRegex(
+                    ControlAPIError,
+                    "already used for a different request",
+                ):
+                    self.control.submit_goal(conn, changed)
+
+            count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE correlation_key = ?",
+                ("control-goal:request-1",),
+            ).fetchone()[0]
+
+        self.assertEqual(count, 1)
+
+    def test_inactive_orchestrator_rejection_is_durable_and_replayed(self) -> None:
+        with closing(self.control.connect()) as conn:
+            conn.execute("UPDATE roles SET state = 'paused' WHERE name = 'orchestrator'")
+            conn.commit()
+
+            first = self.control.submit_goal(conn, self.submit_arguments("request-2"))
+            replay = self.control.submit_goal(conn, self.submit_arguments("request-2"))
+            message_count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE correlation_key = ?",
+                ("control-goal:request-2",),
+            ).fetchone()[0]
+
+        self.assertEqual(first["state"], "rejected")
+        self.assertEqual(first["error"], "orchestrator is not active")
+        self.assertFalse(first["idempotency"]["replayed"])
+        self.assertEqual(replay["state"], "rejected")
+        self.assertTrue(replay["idempotency"]["replayed"])
+        self.assertEqual(message_count, 0)
+
+    def test_running_request_returns_conflict_without_executing_action(self) -> None:
+        arguments = self.submit_arguments("request-running")
+        normalized = {
+            "objective": arguments["objective"],
+            "constraints": arguments["constraints"],
+            "acceptance_criteria": arguments["acceptance_criteria"],
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "operation": "team_control_submit_goal",
+                    "project_id": "project-opaque-1",
+                    "actor": "gateway:telegram",
+                    "arguments": normalized,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        with closing(self.control.connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO control_requests(
+                  idempotency_key, operation, project_id, actor,
+                  request_hash, state, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'running', ?)
+                """,
+                (
+                    "request-running",
+                    "team_control_submit_goal",
+                    "project-opaque-1",
+                    "gateway:telegram",
+                    request_hash,
+                    "2026-07-27T12:00:00+00:00",
+                ),
+            )
+            conn.commit()
+
+            with mock.patch.object(
+                self.control.service,
+                "send_message",
+            ) as send_message:
+                result = self.control.submit_goal(conn, arguments)
+            message_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+
+        self.assertEqual(result["state"], "conflict")
+        self.assertEqual(result["idempotency"]["state"], "running")
+        self.assertTrue(result["idempotency"]["replayed"])
+        send_message.assert_not_called()
+        self.assertEqual(message_count, 0)
+
+    def test_unexpected_mutation_failure_rolls_back_and_fails_closed(self) -> None:
+        with closing(self.control.connect()) as conn:
+            with (
+                mock.patch.object(
+                    self.control.service,
+                    "send_message",
+                    side_effect=RuntimeError("unexpected private failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "unexpected private failure"),
+            ):
+                self.control.submit_goal(conn, self.submit_arguments("request-failed"))
+
+            self.assertFalse(conn.in_transaction)
+            request = conn.execute(
+                "SELECT state, result_json FROM control_requests WHERE idempotency_key = ?",
+                ("request-failed",),
+            ).fetchone()
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE ref_id = ?",
+                ("request-failed",),
+            ).fetchone()[0]
+
+        self.assertEqual(request["state"], "running")
+        self.assertIsNone(request["result_json"])
+        self.assertEqual(event_count, 0)
+
+    def test_read_only_server_rejects_submit_goal_and_mutation_flags_are_paired(
+        self,
+    ) -> None:
+        read_only = ReadOnlyControl(self.config)
+        with (
+            closing(read_only.connect()) as conn,
+            self.assertRaisesRegex(
+                ControlAPIError,
+                "unknown read-only",
+            ),
+        ):
+            call_operation(
+                read_only,
+                conn,
+                "team_control_submit_goal",
+                self.submit_arguments(),
+            )
+
+        with self.assertRaisesRegex(
+            ControlAPIError,
+            "--project-id and --actor require",
+        ):
+            serve_stdio(
+                config_path=str(self.config_path),
+                project_id="project-opaque-1",
+                actor="gateway:telegram",
+                input_stream=StringIO(),
+                output_stream=StringIO(),
+            )
 
 
 if __name__ == "__main__":

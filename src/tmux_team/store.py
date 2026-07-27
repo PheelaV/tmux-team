@@ -38,7 +38,7 @@ OBLIGATION_STATES = OBLIGATION_VISIBLE_STATES + ("done", "failed", "cancelled")
 TODO_STATES = ("open", "done", "superseded")
 WATCHDOG_RUNNER_STATES = ("running", "paused", "stopped", "failed")
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _SQLITE_WAL_INTRODUCED = (3, 7, 0)
 _SQLITE_WAL_RESET_FIXED = (3, 51, 3)
 _SQLITE_WAL_RESET_BACKPORTS = (
@@ -277,6 +277,21 @@ class Store:
 
             CREATE INDEX IF NOT EXISTS idx_watchdog_runners_state_updated
               ON watchdog_runners(state, updated_at);
+
+            CREATE TABLE IF NOT EXISTS control_requests (
+              idempotency_key TEXT PRIMARY KEY,
+              operation TEXT NOT NULL,
+              project_id TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              request_hash TEXT NOT NULL,
+              state TEXT NOT NULL,
+              result_json TEXT,
+              created_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_control_requests_state_created
+              ON control_requests(state, created_at);
             """
         )
         self._ensure_column(conn, "messages", "correlation_key", "TEXT")

@@ -20,14 +20,19 @@ All notable user-visible changes should be recorded here. Keep migration notes c
 - Made status and its event cursor one SQLite snapshot, signaled cursor resets, bounded protocol frames and errors, and
   rejected symlinked or non-regular milestone logs through an fd-based no-follow open.
 - Added a bounded field-allowlisted obligation query for external supervisors without exposing goals or creator data.
+- Added bounded watchdog-health and evidence queries to the external control protocol without exposing goals, task
+  bodies, runtime paths, pane/window targets, or process IDs.
+- Added an explicitly enabled, project-neutral `team_control_submit_goal` operation with a fixed orchestrator
+  recipient, bounded structured input, durable idempotency records, structured wake delivery, and payload-free audit
+  events. The default control process remains read-only and does not advertise the mutation.
 - Installed the private control protocol as the explicit `tmux-team-control` entry point.
 - Avoided enabling WAL on SQLite versions affected by the WAL-reset corruption bug. Fresh databases use rollback
   journaling on affected runtimes and retain WAL on SQLite 3.51.3+, 3.50.7, and 3.44.6.
 
 Migration notes:
 
-- Existing teams need no state migration for this prototype. Start the normal matching tmux-team CLI once before the
-  control API when the runtime database is missing or belongs to an older schema version.
+- Schema version 10 adds the `control_requests` table. Start the normal matching tmux-team CLI once before the control
+  API when the runtime database is missing or belongs to an older schema version.
 - An existing WAL database opened through an affected SQLite runtime now fails closed. Stop all tmux-team processes,
   back up `team.sqlite` together with any `team.sqlite-wal` and `team.sqlite-shm` files, then use one offline SQLite
   connection to run `PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;` before restarting. Alternatively,

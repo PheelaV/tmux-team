@@ -24,7 +24,7 @@ python -m tmux_team.mcp_server --config .tmux-team/team.toml
 
 This is intentionally a thin adapter, not a second state model. SQLite remains authoritative and app-server wake turns remain notification, not task transport.
 
-## External Read-Only Control Protocol
+## External Control Protocol
 
 `src/tmux_team/control_api.py` is a separate, versioned observation surface for external orchestrators. It does not
 extend or restrict the existing role-facing MCP experiment. Run the read-only stdio server with:
@@ -41,8 +41,10 @@ The server advertises only:
 
 - `team_control_status`: bounded role state and durable message counts;
 - `team_control_events_since`: normalized event metadata after an integer cursor, with `next` and `has_more`;
-- `team_control_milestones`: bounded milestone-tail queries by time, subject, scope, and kind.
-- `team_control_obligations`: bounded durable obligations filtered by role and state.
+- `team_control_milestones`: bounded milestone-tail queries by time, subject, scope, and kind;
+- `team_control_obligations`: bounded durable obligations filtered by role and state;
+- `team_control_watchdog_status`: bounded watchdog health without descriptions, goals, panes, windows, or process IDs;
+- `team_control_evidence`: bounded stable-commit and completed-work summaries without message bodies or paths.
 
 Every operation response carries `api_version = "tmux-team.control/v1"`. Page sizes are limited to 100, status is
 limited to 64 roles, request frames are limited to 64 KiB, strings are capped, and milestone scanning is limited to the
@@ -63,6 +65,34 @@ milestone logs are rejected through an fd-based no-follow open. Normal SQLite re
 through existing `team.sqlite-wal` and `team.sqlite-shm` sidecars on live WAL databases; `mode=ro` is a logical SQL
 write boundary, not a byte-for-byte filesystem immutability claim. Production deployments must keep the runtime
 directory owned by a trusted tmux-team identity.
+
+### Opt-in goal submission
+
+One project-neutral mutation is available only when the operator starts a separate control process with all three
+explicit bindings:
+
+```bash
+tmux-team-control \
+  --config .tmux-team/team.toml \
+  --allow-mutations \
+  --project-id opaque-project-id \
+  --actor external-gateway
+```
+
+This adds only `team_control_submit_goal` to the advertised catalog. It accepts a bounded objective, optional bounded
+constraints and acceptance criteria, and a required idempotency key. The recipient is fixed to the configured
+`orchestrator`; callers cannot choose a role, path, pane, command, environment, or transport. The operation creates one
+durable high-priority message through `TeamService` and requests the role's configured structured wake.
+
+Idempotency records live in the authoritative team database. Repeating the same request returns the stored result
+without creating another message; reusing a key for different content is rejected; an in-progress request returns a
+conflict. Expected team-state rejection is stored and replayed. Unexpected failures roll back team-state changes and
+leave the reserved request in `running`, requiring operator review rather than guessing whether execution occurred.
+Completion audit events record only actor, opaque project ID, request ID, action, result, and time—not the goal payload.
+
+Without `--allow-mutations`, the process remains the exact read-only/query-only reader described above. Supplying
+`--project-id` or `--actor` without the mutation flag fails closed. This protocol still is not an approval mechanism:
+deployments must place their own confirmation and authorization boundary in front of the opt-in process.
 
 ## Permissions
 

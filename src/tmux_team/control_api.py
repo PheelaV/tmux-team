@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -8,13 +9,15 @@ import sqlite3
 import stat
 import sys
 from collections import deque
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from typing import Any, TextIO
 
 from . import __version__
 from .config import ConfigError, TeamConfig, load_config
-from .store import SCHEMA_VERSION, utc_now
+from .service import TeamService
+from .store import SCHEMA_VERSION, Store, utc_now
 
 API_VERSION = "tmux-team.control/v1"
 JSONRPC_VERSION = "2.0"
@@ -27,6 +30,9 @@ MAX_STATUS_ROLES = 64
 MAX_FILTER_LENGTH = 128
 MAX_IDENTIFIER_LENGTH = 128
 MAX_SUMMARY_LENGTH = 512
+MAX_GOAL_LENGTH = 4096
+MAX_GOAL_ITEMS = 16
+MAX_IDEMPOTENCY_KEY_LENGTH = 128
 MAX_MILESTONE_SCAN_BYTES = 2 * 1024 * 1024
 MAX_MILESTONE_SUBJECTS = 16
 MAX_MILESTONE_TAGS = 16
@@ -35,7 +41,15 @@ MAX_REQUEST_BYTES = 64 * 1024
 OBLIGATION_STATES = ("active", "blocked", "paused", "done", "failed", "cancelled")
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
-_REQUIRED_TABLES = ("roles", "messages", "events", "obligations")
+_REQUIRED_TABLES = (
+    "roles",
+    "messages",
+    "events",
+    "obligations",
+    "watchdog_runners",
+    "stable_commits",
+    "control_requests",
+)
 
 
 class ControlAPIError(ValueError):
@@ -374,6 +388,170 @@ class ReadOnlyControl:
             "truncated": truncated,
         }
 
+    def watchdog_status(
+        self,
+        conn: sqlite3.Connection,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        args = _arguments(arguments, allowed=("name", "limit"))
+        name = _optional_filter(args, "name")
+        limit = _bounded_int(
+            args,
+            "limit",
+            default=DEFAULT_PAGE_SIZE,
+            minimum=1,
+            maximum=MAX_PAGE_SIZE,
+        )
+        where = "WHERE name = ?" if name is not None else ""
+        filter_params: tuple[Any, ...] = (name,) if name is not None else ()
+        rows = conn.execute(
+            f"""
+            SELECT
+              CASE WHEN typeof(name) = 'text' AND length(name) <= ? THEN name END AS name,
+              CASE WHEN typeof(state) = 'text' AND length(state) <= ? THEN state END AS state,
+              interval_seconds,
+              CASE
+                WHEN typeof(scope_role) = 'text' AND length(scope_role) <= ? THEN scope_role
+              END AS scope_role,
+              CASE
+                WHEN typeof(notify_role) = 'text' AND length(notify_role) <= ? THEN notify_role
+              END AS notify_role,
+              CASE
+                WHEN typeof(delivery_method) = 'text' AND length(delivery_method) <= ?
+                THEN delivery_method
+              END AS delivery_method,
+              CASE
+                WHEN typeof(updated_at) = 'text' AND length(updated_at) <= ? THEN updated_at
+              END AS updated_at,
+              CASE
+                WHEN typeof(last_run_at) = 'text' AND length(last_run_at) <= ? THEN last_run_at
+              END AS last_run_at,
+              CASE
+                WHEN typeof(next_run_at) = 'text' AND length(next_run_at) <= ? THEN next_run_at
+              END AS next_run_at,
+              last_finding_count,
+              CASE
+                WHEN typeof(last_finding_summary) = 'text'
+                THEN substr(last_finding_summary, 1, ?)
+              END AS last_finding_summary,
+              CASE WHEN typeof(last_error) = 'text' THEN substr(last_error, 1, ?) END AS last_error
+            FROM watchdog_runners
+            {where}
+            ORDER BY updated_at DESC, name
+            LIMIT ?
+            """,
+            (
+                MAX_IDENTIFIER_LENGTH,
+                MAX_IDENTIFIER_LENGTH,
+                MAX_IDENTIFIER_LENGTH,
+                MAX_IDENTIFIER_LENGTH,
+                MAX_IDENTIFIER_LENGTH,
+                MAX_FILTER_LENGTH,
+                MAX_FILTER_LENGTH,
+                MAX_FILTER_LENGTH,
+                MAX_SUMMARY_LENGTH,
+                MAX_SUMMARY_LENGTH,
+                *filter_params,
+                limit + 1,
+            ),
+        ).fetchall()
+        return {
+            "api_version": API_VERSION,
+            "kind": "watchdog-status",
+            "query": {"name": name, "limit": limit},
+            "watchdogs": [_external_watchdog(row) for row in rows[:limit]],
+            "truncated": len(rows) > limit,
+        }
+
+    def evidence(
+        self,
+        conn: sqlite3.Connection,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        args = _arguments(arguments, allowed=("limit",))
+        limit = _bounded_int(
+            args,
+            "limit",
+            default=DEFAULT_PAGE_SIZE,
+            minimum=1,
+            maximum=MAX_PAGE_SIZE,
+        )
+        conn.execute("BEGIN")
+        try:
+            stable_rows = conn.execute(
+                """
+                SELECT
+                  CASE WHEN typeof(scope) = 'text' AND length(scope) <= ? THEN scope END AS scope,
+                  CASE
+                    WHEN typeof(commit_sha) = 'text' AND length(commit_sha) <= ? THEN commit_sha
+                  END AS commit_sha,
+                  CASE
+                    WHEN typeof(approved_by) = 'text' AND length(approved_by) <= ? THEN approved_by
+                  END AS approved_by,
+                  CASE
+                    WHEN typeof(approved_at) = 'text' AND length(approved_at) <= ? THEN approved_at
+                  END AS approved_at,
+                  CASE WHEN typeof(note) = 'text' THEN substr(note, 1, ?) END AS note
+                FROM stable_commits
+                ORDER BY approved_at DESC, scope
+                LIMIT ?
+                """,
+                (
+                    MAX_IDENTIFIER_LENGTH,
+                    MAX_IDENTIFIER_LENGTH,
+                    MAX_IDENTIFIER_LENGTH,
+                    MAX_FILTER_LENGTH,
+                    MAX_SUMMARY_LENGTH,
+                    limit + 1,
+                ),
+            ).fetchall()
+            completion_rows = conn.execute(
+                """
+                SELECT
+                  CASE WHEN typeof(id) = 'text' AND length(id) <= ? THEN id END AS id,
+                  CASE
+                    WHEN typeof(recipient) = 'text' AND length(recipient) <= ? THEN recipient
+                  END AS recipient,
+                  CASE
+                    WHEN typeof(result_status) = 'text' AND length(result_status) <= ?
+                    THEN result_status
+                  END AS result_status,
+                  CASE
+                    WHEN typeof(result_summary) = 'text' THEN substr(result_summary, 1, ?)
+                  END AS result_summary,
+                  CASE
+                    WHEN typeof(completed_at) = 'text' AND length(completed_at) <= ?
+                    THEN completed_at
+                  END AS completed_at
+                FROM messages
+                WHERE state = 'completed' AND result_summary IS NOT NULL
+                ORDER BY completed_at DESC, id
+                LIMIT ?
+                """,
+                (
+                    MAX_IDENTIFIER_LENGTH,
+                    MAX_IDENTIFIER_LENGTH,
+                    MAX_IDENTIFIER_LENGTH,
+                    MAX_SUMMARY_LENGTH,
+                    MAX_FILTER_LENGTH,
+                    limit + 1,
+                ),
+            ).fetchall()
+            cursor = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0])
+        finally:
+            conn.rollback()
+        return {
+            "api_version": API_VERSION,
+            "kind": "evidence",
+            "snapshot": {"created_at": utc_now(), "event_cursor": cursor},
+            "stable_commits": [_external_stable_commit(row) for row in stable_rows[:limit]],
+            "completed_work": [_external_completion(row) for row in completion_rows[:limit]],
+            "truncated": {
+                "stable_commits": len(stable_rows) > limit,
+                "completed_work": len(completion_rows) > limit,
+            },
+        }
+
     def _read_milestone_tail(self) -> tuple[list[dict[str, Any]], bool, int]:
         flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -409,14 +587,304 @@ class ReadOnlyControl:
         return rows, start > 0, discarded_lines
 
 
-def list_operations() -> list[dict[str, Any]]:
+class MutationControl(ReadOnlyControl):
+    """Explicitly enabled, idempotent mutation surface for a registered team."""
+
+    def __init__(self, config: TeamConfig, *, project_id: str, actor: str):
+        super().__init__(config)
+        self.project_id = _validated_identifier(
+            project_id,
+            "project_id",
+            maximum=MAX_IDENTIFIER_LENGTH,
+        )
+        self.actor = _validated_identifier(
+            actor,
+            "actor",
+            maximum=MAX_IDENTIFIER_LENGTH,
+        )
+        self.store = Store(config)
+        self.service = TeamService(self.store)
+
+    def connect(self) -> sqlite3.Connection:
+        if self.db_path.is_symlink():
+            raise ControlAPIError("refusing symlinked tmux-team runtime database")
+        if not self.db_path.is_file():
+            raise ControlAPIError("tmux-team runtime database does not exist")
+        conn = self.store.connect()
+        try:
+            self._validate_schema(conn)
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    def submit_goal(
+        self,
+        conn: sqlite3.Connection,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        args = _arguments(
+            arguments,
+            allowed=(
+                "idempotency_key",
+                "objective",
+                "constraints",
+                "acceptance_criteria",
+            ),
+        )
+        idempotency_key = _required_identifier(
+            args,
+            "idempotency_key",
+            maximum=MAX_IDEMPOTENCY_KEY_LENGTH,
+        )
+        objective = _required_text(args, "objective", maximum=MAX_GOAL_LENGTH)
+        constraints = _bounded_text_list(args, "constraints")
+        acceptance = _bounded_text_list(args, "acceptance_criteria")
+        normalized = {
+            "objective": objective,
+            "constraints": constraints,
+            "acceptance_criteria": acceptance,
+        }
+
+        def action() -> dict[str, Any]:
+            role = self.store.get_role(conn, "orchestrator")
+            if role is None:
+                raise ControlAPIError("team has no orchestrator role")
+            if role["state"] != "active":
+                raise ControlAPIError("orchestrator is not active")
+            result = self.service.send_message(
+                conn,
+                sender="external-control",
+                recipient="orchestrator",
+                priority="high",
+                summary=_goal_summary(objective),
+                body=_goal_body(objective, constraints, acceptance),
+                wake=True,
+                correlation_key=f"control-goal:{idempotency_key}",
+                actor=self.actor,
+            )
+            if result.blocked is not None:
+                raise ControlAPIError("orchestrator rejected the goal")
+            notification = result.notification
+            return {
+                "api_version": API_VERSION,
+                "kind": "action",
+                "action": "submit-goal",
+                "state": "accepted",
+                "message": {
+                    "id": _safe_identifier_or_none(result.message.id),
+                    "state": _safe_identifier_or_none(result.message.state),
+                    "recipient": "orchestrator",
+                },
+                "notification": {
+                    "attempted": notification is not None,
+                    "accepted": bool(notification and notification.ok),
+                },
+            }
+
+        return self._idempotent_mutation(
+            conn,
+            operation="team_control_submit_goal",
+            idempotency_key=idempotency_key,
+            normalized_arguments=normalized,
+            action=action,
+        )
+
+    def _idempotent_mutation(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        operation: str,
+        idempotency_key: str,
+        normalized_arguments: dict[str, Any],
+        action: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "operation": operation,
+                    "project_id": self.project_id,
+                    "actor": self.actor,
+                    "arguments": normalized_arguments,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                """
+                SELECT operation, request_hash, state, result_json
+                FROM control_requests
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if existing["operation"] != operation or existing["request_hash"] != request_hash:
+                    raise ControlAPIError("idempotency_key was already used for a different request")
+                state = str(existing["state"])
+                if state == "running":
+                    conn.rollback()
+                    return {
+                        "api_version": API_VERSION,
+                        "kind": "action",
+                        "action": operation.removeprefix("team_control_").replace("_", "-"),
+                        "state": "conflict",
+                        "idempotency": {
+                            "key": idempotency_key,
+                            "state": "running",
+                            "replayed": True,
+                        },
+                    }
+                result = json.loads(str(existing["result_json"]))
+                conn.rollback()
+                result["idempotency"] = {
+                    "key": idempotency_key,
+                    "state": state,
+                    "replayed": True,
+                }
+                return result
+            conn.execute(
+                """
+                INSERT INTO control_requests(
+                  idempotency_key, operation, project_id, actor,
+                  request_hash, state, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'running', ?)
+                """,
+                (
+                    idempotency_key,
+                    operation,
+                    self.project_id,
+                    self.actor,
+                    request_hash,
+                    utc_now(),
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+        try:
+            result = action()
+        except ControlAPIError as exc:
+            rejected = {
+                "api_version": API_VERSION,
+                "kind": "action",
+                "action": operation.removeprefix("team_control_").replace("_", "-"),
+                "state": "rejected",
+                "error": _bounded_text(exc, MAX_SUMMARY_LENGTH),
+            }
+            self._complete_control_request(
+                conn,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                state="rejected",
+                result=rejected,
+            )
+            rejected["idempotency"] = {
+                "key": idempotency_key,
+                "state": "rejected",
+                "replayed": False,
+            }
+            return rejected
+        except (KeyError, ValueError):
+            rejected = {
+                "api_version": API_VERSION,
+                "kind": "action",
+                "action": operation.removeprefix("team_control_").replace("_", "-"),
+                "state": "rejected",
+                "error": "control mutation rejected",
+            }
+            self._complete_control_request(
+                conn,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                state="rejected",
+                result=rejected,
+            )
+            rejected["idempotency"] = {
+                "key": idempotency_key,
+                "state": "rejected",
+                "replayed": False,
+            }
+            return rejected
+        except Exception:
+            conn.rollback()
+            raise
+
+        self._complete_control_request(
+            conn,
+            operation=operation,
+            idempotency_key=idempotency_key,
+            state="completed",
+            result=result,
+        )
+        result["idempotency"] = {
+            "key": idempotency_key,
+            "state": "completed",
+            "replayed": False,
+        }
+        return result
+
+    def _complete_control_request(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        operation: str,
+        idempotency_key: str,
+        state: str,
+        result: dict[str, Any],
+    ) -> None:
+        completed_at = utc_now()
+        serialized = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        try:
+            updated = conn.execute(
+                """
+                UPDATE control_requests
+                SET state = ?, result_json = ?, completed_at = ?
+                WHERE idempotency_key = ? AND state = 'running'
+                """,
+                (state, serialized, completed_at, idempotency_key),
+            )
+            if updated.rowcount != 1:
+                raise ControlAPIError("control request is no longer running")
+            self.store.record_event(
+                conn,
+                "control.request_completed",
+                self.actor,
+                idempotency_key,
+                {
+                    "action": operation,
+                    "project_id": self.project_id,
+                    "request_id": idempotency_key,
+                    "result": state,
+                    "completed_at": completed_at,
+                },
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def list_operations(*, include_mutations: bool = False) -> list[dict[str, Any]]:
     read_only = {
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
         "openWorldHint": False,
     }
-    return [
+    operations = [
         {
             "name": "team_control_status",
             "description": "Read a bounded field-allowlisted team status snapshot.",
@@ -472,7 +940,87 @@ def list_operations() -> list[dict[str, Any]]:
             },
             "annotations": read_only,
         },
+        {
+            "name": "team_control_watchdog_status",
+            "description": "Read bounded watchdog health without goals or process bindings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "maxLength": MAX_FILTER_LENGTH},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_PAGE_SIZE,
+                        "default": DEFAULT_PAGE_SIZE,
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "team_control_evidence",
+            "description": "Read bounded approved commits and completed-work summaries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_PAGE_SIZE,
+                        "default": DEFAULT_PAGE_SIZE,
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "annotations": read_only,
+        },
     ]
+    if include_mutations:
+        operations.append(
+            {
+                "name": "team_control_submit_goal",
+                "description": ("Submit one bounded goal to the configured orchestrator using an idempotency key."),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "idempotency_key": {
+                            "type": "string",
+                            "maxLength": MAX_IDEMPOTENCY_KEY_LENGTH,
+                        },
+                        "objective": {
+                            "type": "string",
+                            "maxLength": MAX_GOAL_LENGTH,
+                        },
+                        "constraints": {
+                            "type": "array",
+                            "maxItems": MAX_GOAL_ITEMS,
+                            "items": {
+                                "type": "string",
+                                "maxLength": MAX_SUMMARY_LENGTH,
+                            },
+                        },
+                        "acceptance_criteria": {
+                            "type": "array",
+                            "maxItems": MAX_GOAL_ITEMS,
+                            "items": {
+                                "type": "string",
+                                "maxLength": MAX_SUMMARY_LENGTH,
+                            },
+                        },
+                    },
+                    "required": ["idempotency_key", "objective"],
+                    "additionalProperties": False,
+                },
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            }
+        )
+    return operations
 
 
 def call_operation(
@@ -489,6 +1037,12 @@ def call_operation(
         return control.milestones(arguments)
     if name == "team_control_obligations":
         return control.obligations(conn, arguments)
+    if name == "team_control_watchdog_status":
+        return control.watchdog_status(conn, arguments)
+    if name == "team_control_evidence":
+        return control.evidence(conn, arguments)
+    if name == "team_control_submit_goal" and isinstance(control, MutationControl):
+        return control.submit_goal(conn, arguments)
     raise ControlAPIError("unknown read-only control operation")
 
 
@@ -517,7 +1071,7 @@ def handle_control_request(
             result = {
                 "api_version": API_VERSION,
                 "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "operations": list_operations(),
+                "operations": list_operations(include_mutations=isinstance(control, MutationControl)),
             }
         elif method == "control/call":
             result = _handle_control_call(control, conn, params)
@@ -586,11 +1140,27 @@ def serve_stdio(
     *,
     config_path: str | None = None,
     runtime_dir: str | None = None,
+    allow_mutations: bool = False,
+    project_id: str | None = None,
+    actor: str | None = None,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
 ) -> int:
     config = load_config(config_path, runtime_dir)
-    control = ReadOnlyControl(config)
+    if allow_mutations:
+        if project_id is None:
+            raise ControlAPIError("--project-id is required with --allow-mutations")
+        if actor is None:
+            raise ControlAPIError("--actor is required with --allow-mutations")
+        control: ReadOnlyControl = MutationControl(
+            config,
+            project_id=project_id,
+            actor=actor,
+        )
+    else:
+        if project_id is not None or actor is not None:
+            raise ControlAPIError("--project-id and --actor require --allow-mutations")
+        control = ReadOnlyControl(config)
     with closing(control.connect()) as conn:
         return serve_control_protocol(control, conn, input_stream or sys.stdin, output_stream or sys.stdout)
 
@@ -634,6 +1204,63 @@ def _optional_filter(arguments: dict[str, Any], key: str) -> str | None:
     if len(normalized) > MAX_FILTER_LENGTH:
         raise ControlAPIError(f"{key} exceeds maximum length {MAX_FILTER_LENGTH}")
     return normalized
+
+
+def _validated_identifier(value: Any, key: str, *, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise ControlAPIError(f"{key} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ControlAPIError(f"{key} must not be empty")
+    if len(normalized) > maximum:
+        raise ControlAPIError(f"{key} exceeds maximum length {maximum}")
+    if _SAFE_IDENTIFIER.fullmatch(normalized) is None:
+        raise ControlAPIError(f"{key} contains unsupported characters")
+    return normalized
+
+
+def _required_identifier(
+    arguments: dict[str, Any],
+    key: str,
+    *,
+    maximum: int,
+) -> str:
+    if key not in arguments:
+        raise ControlAPIError(f"missing required argument: {key}")
+    return _validated_identifier(arguments[key], key, maximum=maximum)
+
+
+def _required_text(arguments: dict[str, Any], key: str, *, maximum: int) -> str:
+    if key not in arguments:
+        raise ControlAPIError(f"missing required argument: {key}")
+    value = arguments[key]
+    if not isinstance(value, str):
+        raise ControlAPIError(f"{key} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ControlAPIError(f"{key} must not be empty")
+    if len(normalized) > maximum:
+        raise ControlAPIError(f"{key} exceeds maximum length {maximum}")
+    return normalized
+
+
+def _bounded_text_list(arguments: dict[str, Any], key: str) -> list[str]:
+    value = arguments.get(key, [])
+    if not isinstance(value, list):
+        raise ControlAPIError(f"{key} must be an array")
+    if len(value) > MAX_GOAL_ITEMS:
+        raise ControlAPIError(f"{key} exceeds maximum items {MAX_GOAL_ITEMS}")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ControlAPIError(f"{key} items must be strings")
+        normalized = item.strip()
+        if not normalized:
+            raise ControlAPIError(f"{key} items must not be empty")
+        if len(normalized) > MAX_SUMMARY_LENGTH:
+            raise ControlAPIError(f"{key} item exceeds maximum length {MAX_SUMMARY_LENGTH}")
+        items.append(normalized)
+    return items
 
 
 def _optional_timestamp(arguments: dict[str, Any], key: str) -> datetime | None:
@@ -723,6 +1350,73 @@ def _external_obligation(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _external_watchdog(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "name": _safe_identifier_or_none(row["name"]),
+        "state": _safe_identifier_or_none(row["state"]),
+        "interval_seconds": int(row["interval_seconds"]),
+        "scope_role": _safe_identifier_or_none(row["scope_role"]),
+        "notify_role": _safe_identifier_or_none(row["notify_role"]),
+        "delivery_method": _safe_identifier_or_none(row["delivery_method"]),
+        "updated_at": _bounded_text(row["updated_at"], MAX_FILTER_LENGTH),
+        "last_run_at": _bounded_text(row["last_run_at"], MAX_FILTER_LENGTH) or None,
+        "next_run_at": _bounded_text(row["next_run_at"], MAX_FILTER_LENGTH) or None,
+        "last_finding_count": int(row["last_finding_count"]),
+        "last_finding_summary": (_bounded_text(row["last_finding_summary"], MAX_SUMMARY_LENGTH) or None),
+        "last_error": _bounded_text(row["last_error"], MAX_SUMMARY_LENGTH) or None,
+    }
+
+
+def _external_stable_commit(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "scope": _safe_identifier_or_none(row["scope"]),
+        "commit": _safe_identifier_or_none(row["commit_sha"]),
+        "approved_by": _safe_identifier_or_none(row["approved_by"]),
+        "approved_at": _bounded_text(row["approved_at"], MAX_FILTER_LENGTH),
+        "note": _bounded_text(row["note"], MAX_SUMMARY_LENGTH) or None,
+    }
+
+
+def _external_completion(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "message_id": _safe_identifier_or_none(row["id"]),
+        "role": _safe_identifier_or_none(row["recipient"]),
+        "status": _safe_identifier_or_none(row["result_status"]),
+        "summary": _bounded_text(row["result_summary"], MAX_SUMMARY_LENGTH),
+        "completed_at": _bounded_text(row["completed_at"], MAX_FILTER_LENGTH),
+    }
+
+
+def _goal_summary(objective: str) -> str:
+    one_line = " ".join(objective.split())
+    return _bounded_text(f"External goal: {one_line}", MAX_SUMMARY_LENGTH)
+
+
+def _goal_body(
+    objective: str,
+    constraints: list[str],
+    acceptance_criteria: list[str],
+) -> str:
+    sections = ["Objective", objective]
+    if constraints:
+        sections.extend(
+            [
+                "",
+                "Constraints",
+                *(f"- {item}" for item in constraints),
+            ]
+        )
+    if acceptance_criteria:
+        sections.extend(
+            [
+                "",
+                "Acceptance criteria",
+                *(f"- {item}" for item in acceptance_criteria),
+            ]
+        )
+    return "\n".join(sections).rstrip() + "\n"
+
+
 def _role_counts(counts: dict[str, int]) -> dict[str, int]:
     stale = counts.get("stale_claimed", 0)
     pending = sum(counts.get(state, 0) for state in ("queued", "notified", "retrying")) + stale
@@ -755,6 +1449,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m tmux_team.control_api")
     parser.add_argument("--config", help="Path to .tmux-team/team.toml")
     parser.add_argument("--runtime-dir", help="Override runtime directory")
+    parser.add_argument(
+        "--allow-mutations",
+        action="store_true",
+        help="Explicitly enable the bounded mutation catalog.",
+    )
+    parser.add_argument(
+        "--project-id",
+        help="Opaque project identifier recorded with mutation audit events.",
+    )
+    parser.add_argument(
+        "--actor",
+        help="Bounded external actor identifier recorded with mutation audit events.",
+    )
     return parser
 
 
@@ -762,7 +1469,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return serve_stdio(config_path=args.config, runtime_dir=args.runtime_dir)
+        return serve_stdio(
+            config_path=args.config,
+            runtime_dir=args.runtime_dir,
+            allow_mutations=args.allow_mutations,
+            project_id=args.project_id,
+            actor=args.actor,
+        )
     except (ConfigError, ControlAPIError, OSError, sqlite3.Error) as exc:
         print(f"tmux-team-control: {exc}", file=sys.stderr)
         return 2
