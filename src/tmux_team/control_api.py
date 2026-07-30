@@ -39,6 +39,7 @@ MAX_MILESTONE_TAGS = 16
 MAX_EVENT_CURSOR = (1 << 63) - 1
 MAX_REQUEST_BYTES = 64 * 1024
 OBLIGATION_STATES = ("active", "blocked", "paused", "done", "failed", "cancelled")
+SUPERVISOR_DECISIONS = ("continue", "redirect", "stop", "request-human", "complete")
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
 _REQUIRED_TABLES = (
@@ -690,6 +691,111 @@ class MutationControl(ReadOnlyControl):
             action=action,
         )
 
+    def apply_supervisor_decision(
+        self,
+        conn: sqlite3.Connection,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        args = _arguments(
+            arguments,
+            allowed=(
+                "idempotency_key",
+                "record_id",
+                "packet_sha256",
+                "decision",
+                "instructions",
+                "wake_conditions",
+                "next_review_deadline",
+            ),
+        )
+        idempotency_key = _required_identifier(
+            args,
+            "idempotency_key",
+            maximum=MAX_IDEMPOTENCY_KEY_LENGTH,
+        )
+        record_id = _required_identifier(
+            args,
+            "record_id",
+            maximum=MAX_IDENTIFIER_LENGTH,
+        )
+        packet_sha256 = _required_identifier(
+            args,
+            "packet_sha256",
+            maximum=64,
+        )
+        if len(packet_sha256) != 64 or any(character not in "0123456789abcdef" for character in packet_sha256):
+            raise ControlAPIError("packet_sha256 must be a lowercase SHA-256 digest")
+        decision = _required_text(args, "decision", maximum=32)
+        if decision not in SUPERVISOR_DECISIONS:
+            raise ControlAPIError("decision is not supported")
+        instructions = _bounded_text_list(args, "instructions")
+        wake_conditions = _bounded_text_list(args, "wake_conditions")
+        if not instructions or not wake_conditions:
+            raise ControlAPIError("instructions and wake_conditions must be non-empty arrays")
+        next_review_deadline = _optional_filter(args, "next_review_deadline")
+        if next_review_deadline is not None:
+            _optional_timestamp(args, "next_review_deadline")
+        normalized = {
+            "record_id": record_id,
+            "packet_sha256": packet_sha256,
+            "decision": decision,
+            "instructions": instructions,
+            "wake_conditions": wake_conditions,
+            "next_review_deadline": next_review_deadline,
+        }
+
+        def action() -> dict[str, Any]:
+            role = self.store.get_role(conn, "orchestrator")
+            if role is None:
+                raise ControlAPIError("team has no orchestrator role")
+            if role["state"] != "active":
+                raise ControlAPIError("orchestrator is not active")
+            result = self.service.send_message(
+                conn,
+                sender="external-supervisor",
+                recipient="orchestrator",
+                priority="urgent" if decision in {"stop", "request-human"} else "high",
+                summary=_supervisor_summary(decision),
+                body=_supervisor_body(
+                    record_id=record_id,
+                    packet_sha256=packet_sha256,
+                    decision=decision,
+                    instructions=instructions,
+                    wake_conditions=wake_conditions,
+                    next_review_deadline=next_review_deadline,
+                ),
+                wake=True,
+                correlation_key=f"control-supervisor:{idempotency_key}",
+                actor=self.actor,
+            )
+            if result.blocked is not None:
+                raise ControlAPIError("orchestrator rejected the supervisor decision")
+            notification = result.notification
+            return {
+                "api_version": API_VERSION,
+                "kind": "action",
+                "action": "apply-supervisor-decision",
+                "state": "accepted",
+                "decision": decision,
+                "message": {
+                    "id": _safe_identifier_or_none(result.message.id),
+                    "state": _safe_identifier_or_none(result.message.state),
+                    "recipient": "orchestrator",
+                },
+                "notification": {
+                    "attempted": notification is not None,
+                    "accepted": bool(notification and notification.ok),
+                },
+            }
+
+        return self._idempotent_mutation(
+            conn,
+            operation="team_control_apply_supervisor_decision",
+            idempotency_key=idempotency_key,
+            normalized_arguments=normalized,
+            action=action,
+        )
+
     def _idempotent_mutation(
         self,
         conn: sqlite3.Connection,
@@ -977,48 +1083,115 @@ def list_operations(*, include_mutations: bool = False) -> list[dict[str, Any]]:
         },
     ]
     if include_mutations:
-        operations.append(
-            {
-                "name": "team_control_submit_goal",
-                "description": ("Submit one bounded goal to the configured orchestrator using an idempotency key."),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "idempotency_key": {
-                            "type": "string",
-                            "maxLength": MAX_IDEMPOTENCY_KEY_LENGTH,
-                        },
-                        "objective": {
-                            "type": "string",
-                            "maxLength": MAX_GOAL_LENGTH,
-                        },
-                        "constraints": {
-                            "type": "array",
-                            "maxItems": MAX_GOAL_ITEMS,
-                            "items": {
+        operations.extend(
+            [
+                {
+                    "name": "team_control_submit_goal",
+                    "description": ("Submit one bounded goal to the configured orchestrator using an idempotency key."),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "idempotency_key": {
                                 "type": "string",
-                                "maxLength": MAX_SUMMARY_LENGTH,
+                                "maxLength": MAX_IDEMPOTENCY_KEY_LENGTH,
+                            },
+                            "objective": {
+                                "type": "string",
+                                "maxLength": MAX_GOAL_LENGTH,
+                            },
+                            "constraints": {
+                                "type": "array",
+                                "maxItems": MAX_GOAL_ITEMS,
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": MAX_SUMMARY_LENGTH,
+                                },
+                            },
+                            "acceptance_criteria": {
+                                "type": "array",
+                                "maxItems": MAX_GOAL_ITEMS,
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": MAX_SUMMARY_LENGTH,
+                                },
                             },
                         },
-                        "acceptance_criteria": {
-                            "type": "array",
-                            "maxItems": MAX_GOAL_ITEMS,
-                            "items": {
-                                "type": "string",
-                                "maxLength": MAX_SUMMARY_LENGTH,
-                            },
-                        },
+                        "required": ["idempotency_key", "objective"],
+                        "additionalProperties": False,
                     },
-                    "required": ["idempotency_key", "objective"],
-                    "additionalProperties": False,
+                    "annotations": {
+                        "readOnlyHint": False,
+                        "destructiveHint": False,
+                        "idempotentHint": True,
+                        "openWorldHint": False,
+                    },
                 },
-                "annotations": {
-                    "readOnlyHint": False,
-                    "destructiveHint": False,
-                    "idempotentHint": True,
-                    "openWorldHint": False,
+                {
+                    "name": "team_control_apply_supervisor_decision",
+                    "description": (
+                        "Apply one schema-bound supervisor decision to the configured "
+                        "orchestrator using an idempotency key."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "idempotency_key": {
+                                "type": "string",
+                                "maxLength": MAX_IDEMPOTENCY_KEY_LENGTH,
+                            },
+                            "record_id": {
+                                "type": "string",
+                                "maxLength": MAX_IDENTIFIER_LENGTH,
+                            },
+                            "packet_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$",
+                            },
+                            "decision": {
+                                "type": "string",
+                                "enum": list(SUPERVISOR_DECISIONS),
+                            },
+                            "instructions": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": MAX_GOAL_ITEMS,
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": MAX_SUMMARY_LENGTH,
+                                },
+                            },
+                            "wake_conditions": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": MAX_GOAL_ITEMS,
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": MAX_SUMMARY_LENGTH,
+                                },
+                            },
+                            "next_review_deadline": {
+                                "type": ["string", "null"],
+                                "maxLength": MAX_FILTER_LENGTH,
+                            },
+                        },
+                        "required": [
+                            "idempotency_key",
+                            "record_id",
+                            "packet_sha256",
+                            "decision",
+                            "instructions",
+                            "wake_conditions",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    "annotations": {
+                        "readOnlyHint": False,
+                        "destructiveHint": False,
+                        "idempotentHint": True,
+                        "openWorldHint": False,
+                    },
                 },
-            }
+            ]
         )
     return operations
 
@@ -1043,6 +1216,8 @@ def call_operation(
         return control.evidence(conn, arguments)
     if name == "team_control_submit_goal" and isinstance(control, MutationControl):
         return control.submit_goal(conn, arguments)
+    if name == "team_control_apply_supervisor_decision" and isinstance(control, MutationControl):
+        return control.apply_supervisor_decision(conn, arguments)
     raise ControlAPIError("unknown read-only control operation")
 
 
@@ -1414,6 +1589,39 @@ def _goal_body(
                 *(f"- {item}" for item in acceptance_criteria),
             ]
         )
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def _supervisor_summary(decision: str) -> str:
+    return _bounded_text(
+        f"External supervisor decision: {decision}",
+        MAX_SUMMARY_LENGTH,
+    )
+
+
+def _supervisor_body(
+    *,
+    record_id: str,
+    packet_sha256: str,
+    decision: str,
+    instructions: list[str],
+    wake_conditions: list[str],
+    next_review_deadline: str | None,
+) -> str:
+    sections = [
+        "Supervisor decision",
+        f"Decision: {decision}",
+        f"Record: {record_id}",
+        f"Packet SHA-256: {packet_sha256}",
+        "",
+        "Instructions",
+        *(f"- {item}" for item in instructions),
+        "",
+        "Wake conditions",
+        *(f"- {item}" for item in wake_conditions),
+    ]
+    if next_review_deadline is not None:
+        sections.extend(["", f"Next review: {next_review_deadline}"])
     return "\n".join(sections).rstrip() + "\n"
 
 

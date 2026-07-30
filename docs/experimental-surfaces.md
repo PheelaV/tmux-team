@@ -66,9 +66,9 @@ through existing `team.sqlite-wal` and `team.sqlite-shm` sidecars on live WAL da
 write boundary, not a byte-for-byte filesystem immutability claim. Production deployments must keep the runtime
 directory owned by a trusted tmux-team identity.
 
-### Opt-in goal submission
+### Opt-in bounded mutations
 
-One project-neutral mutation is available only when the operator starts a separate control process with all three
+Two project-neutral mutations are available only when the operator starts a separate control process with all three
 explicit bindings:
 
 ```bash
@@ -79,10 +79,12 @@ tmux-team-control \
   --actor external-gateway
 ```
 
-This adds only `team_control_submit_goal` to the advertised catalog. It accepts a bounded objective, optional bounded
-constraints and acceptance criteria, and a required idempotency key. The recipient is fixed to the configured
-`orchestrator`; callers cannot choose a role, path, pane, command, environment, or transport. The operation creates one
-durable high-priority message through `TeamService` and requests the role's configured structured wake.
+This adds `team_control_submit_goal` and `team_control_apply_supervisor_decision` to the advertised catalog. Goal
+submission accepts a bounded objective, optional bounded constraints and acceptance criteria, and a required
+idempotency key. Supervisor application accepts one typed decision, its originating record and packet digest, bounded
+instructions and wake conditions, and an optional review deadline. Both recipients are fixed to the configured
+`orchestrator`; callers cannot choose a role, path, pane, command, environment, or transport. Each operation creates one
+durable priority message through `TeamService` and requests the role's configured structured wake.
 
 Idempotency records live in the authoritative team database. Repeating the same request returns the stored result
 without creating another message; reusing a key for different content is rejected; an in-progress request returns a

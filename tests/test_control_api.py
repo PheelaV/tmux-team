@@ -530,17 +530,32 @@ pane = "tt-agents:orchestrator"
             "acceptance_criteria": ["The targeted tests pass."],
         }
 
-    def test_mutation_catalog_is_explicit_and_contains_one_idempotent_action(self) -> None:
+    def supervisor_arguments(self, key: str = "supervisor-1") -> dict[str, object]:
+        return {
+            "idempotency_key": key,
+            "record_id": "record-20260730-1",
+            "packet_sha256": "a" * 64,
+            "decision": "redirect",
+            "instructions": ["Run the narrow verifier before continuing."],
+            "wake_conditions": ["The verifier completes."],
+            "next_review_deadline": "2026-07-30T12:00:00Z",
+        }
+
+    def test_mutation_catalog_is_explicit_and_contains_bounded_idempotent_actions(
+        self,
+    ) -> None:
         default_names = {tool["name"] for tool in list_operations()}
         enabled = list_operations(include_mutations=True)
         enabled_names = {tool["name"] for tool in enabled}
 
         self.assertNotIn("team_control_submit_goal", default_names)
-        self.assertEqual(enabled_names - default_names, {"team_control_submit_goal"})
-        mutation = next(tool for tool in enabled if tool["name"] == "team_control_submit_goal")
-        self.assertFalse(mutation["annotations"]["readOnlyHint"])
-        self.assertFalse(mutation["annotations"]["destructiveHint"])
-        self.assertTrue(mutation["annotations"]["idempotentHint"])
+        self.assertEqual(
+            enabled_names - default_names,
+            {
+                "team_control_submit_goal",
+                "team_control_apply_supervisor_decision",
+            },
+        )
         forbidden_arguments = {
             "path",
             "worktree",
@@ -549,7 +564,13 @@ pane = "tt-agents:orchestrator"
             "command",
             "environment",
         }
-        self.assertTrue(forbidden_arguments.isdisjoint(mutation["inputSchema"]["properties"]))
+        for mutation in enabled:
+            if mutation["name"] in default_names:
+                continue
+            self.assertFalse(mutation["annotations"]["readOnlyHint"])
+            self.assertFalse(mutation["annotations"]["destructiveHint"])
+            self.assertTrue(mutation["annotations"]["idempotentHint"])
+            self.assertTrue(forbidden_arguments.isdisjoint(mutation["inputSchema"]["properties"]))
 
     def test_submit_goal_is_idempotent_and_audited_without_goal_payload(self) -> None:
         notification = NotificationResult(
@@ -630,6 +651,70 @@ pane = "tt-agents:orchestrator"
             ).fetchone()[0]
 
         self.assertEqual(count, 1)
+
+    def test_supervisor_decision_is_idempotent_typed_and_audited(self) -> None:
+        notification = NotificationResult(
+            ok=True,
+            details="structured wake accepted",
+            method="structured",
+        )
+        with closing(self.control.connect()) as conn:
+            with mock.patch.object(
+                self.control.service,
+                "notify_role",
+                return_value=notification,
+            ) as notify_role:
+                first = self.control.apply_supervisor_decision(conn, self.supervisor_arguments())
+                replay = self.control.apply_supervisor_decision(conn, self.supervisor_arguments())
+
+            messages = conn.execute(
+                "SELECT * FROM messages WHERE correlation_key = ?",
+                ("control-supervisor:supervisor-1",),
+            ).fetchall()
+            event = conn.execute(
+                """
+                SELECT actor, ref_id, payload_json
+                FROM events
+                WHERE type = 'control.request_completed'
+                  AND ref_id = 'supervisor-1'
+                """
+            ).fetchone()
+
+        self.assertEqual(first["state"], "accepted")
+        self.assertEqual(first["decision"], "redirect")
+        self.assertFalse(first["idempotency"]["replayed"])
+        self.assertTrue(replay["idempotency"]["replayed"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["sender"], "external-supervisor")
+        self.assertEqual(messages[0]["recipient"], "orchestrator")
+        self.assertEqual(messages[0]["priority"], "high")
+        body = Path(messages[0]["body_path"]).read_text(encoding="utf-8")
+        self.assertIn("Packet SHA-256: " + ("a" * 64), body)
+        self.assertEqual(notify_role.call_count, 1)
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(
+            payload["action"],
+            "team_control_apply_supervisor_decision",
+        )
+        self.assertNotIn("instructions", payload)
+        self.assertNotIn("wake_conditions", payload)
+
+    def test_supervisor_decision_rejects_untyped_or_unbounded_input(self) -> None:
+        with closing(self.control.connect()) as conn:
+            unsupported = self.supervisor_arguments()
+            unsupported["decision"] = "rewrite-the-host"
+            with self.assertRaisesRegex(ControlAPIError, "not supported"):
+                self.control.apply_supervisor_decision(conn, unsupported)
+
+            malformed_digest = self.supervisor_arguments()
+            malformed_digest["packet_sha256"] = "not-a-digest"
+            with self.assertRaisesRegex(ControlAPIError, "SHA-256"):
+                self.control.apply_supervisor_decision(conn, malformed_digest)
+
+            empty_instructions = self.supervisor_arguments()
+            empty_instructions["instructions"] = []
+            with self.assertRaisesRegex(ControlAPIError, "non-empty"):
+                self.control.apply_supervisor_decision(conn, empty_instructions)
 
     def test_inactive_orchestrator_rejection_is_durable_and_replayed(self) -> None:
         with closing(self.control.connect()) as conn:
