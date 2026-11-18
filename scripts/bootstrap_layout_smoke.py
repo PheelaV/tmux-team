@@ -123,8 +123,8 @@ def write_fake_codex(root: Path) -> Path:
 
 def patch_app_server_probes() -> None:
     bootstrap_mod.wait_for_app_server = lambda endpoint, timeout: None
-    bootstrap_mod.loaded_threads = lambda endpoint: []
-    bootstrap_mod.wait_for_new_loaded_thread = lambda endpoint, previous, timeout: f"thread-{len(previous) + 1}"
+    threads = iter(f"thread-{index + 1}" for index in range(len(DEFAULT_ROLES)))
+    bootstrap_mod.wait_for_role_thread = lambda endpoint, launch_marker, timeout: next(threads)
 
 
 def verify_layout(session: str, config_path: Path, role_panes: dict[str, str]) -> None:

@@ -3417,7 +3417,6 @@ can_notify = ["orchestrator"]
         for provider, command in (
             ("codex", "codex-acp"),
             ("claude", "claude-agent-acp"),
-            ("pool", "pool acp"),
         ):
             with self.subTest(provider=provider):
                 code, out, err = self.run_main(
@@ -3955,7 +3954,7 @@ acp_resume_supported = true
         self.assertIn("tmux set-option -t tt default-terminal tmux-256color", out)
         self.assertIn("tmux set-option -as -t tt terminal-features", out)
         self.assertIn("tmux set-environment -t tt COLORTERM truecolor", out)
-        self.assertIn("--dangerously-bypass-approvals-and-sandbox", out)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", out)
         self.assertIn("--model gpt-5.5", out)
         self.assertIn('model_reasoning_effort="xhigh"', out)
         self.assertIn("--profile implementer-profile", out)
@@ -3965,6 +3964,17 @@ acp_resume_supported = true
         self.assertIn("tmux new-window -t tt -n tt-agents", out)
         self.assertIn("tmux split-window -t tt:tt-agents", out)
         self.assertIn("dry-run: no tmux panes created", out)
+
+    def test_resume_declines_explicit_remote_permission_overrides(self) -> None:
+        self.write_remote_tui_config()
+        self.write_sleep_snapshot()
+
+        code, _out, err = self.run_cli(
+            "resume", "--dry-run", "--role-codex-config", 'orchestrator=approval_policy="never"'
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("cannot override permissions for resumed Codex role", err)
 
     def test_resume_dry_run_can_disable_truecolor(self) -> None:
         self.write_remote_tui_config()

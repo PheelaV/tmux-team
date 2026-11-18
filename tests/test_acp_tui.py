@@ -126,7 +126,11 @@ class ACPTUIControlTests(unittest.TestCase):
                 "implementer": RoleConfig(
                     name="implementer",
                     mode="acp_tui",
-                    capabilities={"notify_method": "control-socket", "control_socket": str(self.socket_path)},
+                    capabilities={
+                        "notify_method": "control-socket",
+                        "control_socket": str(self.socket_path),
+                        "runtime_session_id": "session-1",
+                    },
                 )
             },
         )
@@ -148,6 +152,7 @@ class ACPTUIControlTests(unittest.TestCase):
         self.assertEqual((row["state"], row["attempts"]), ("notified", 1))
         request = server.requests[0]
         self.assertEqual(request["priority"], "urgent")
+        self.assertEqual(request["sessionId"], "session-1")
         self.assertEqual(request["coalesceKey"], "inbox")
         self.assertIn("fix parser", request["text"])
         self.assertNotIn("SECRET TASK BODY", request["text"])
@@ -169,7 +174,11 @@ class ACPTUIControlTests(unittest.TestCase):
                 "implementer": RoleConfig(
                     name="implementer",
                     mode="acp_tui",
-                    capabilities={"notify_method": "control-socket", "control_socket": str(self.socket_path)},
+                    capabilities={
+                        "notify_method": "control-socket",
+                        "control_socket": str(self.socket_path),
+                        "runtime_session_id": "session-1",
+                    },
                 )
             },
         )
@@ -199,6 +208,39 @@ class ACPTUIControlTests(unittest.TestCase):
             ["notice:notice-1", "notice:notice-2"],
         )
 
+    def test_wake_acknowledgement_for_another_session_keeps_message_queued(self) -> None:
+        server = FakeControlSocket(self.socket_path, [{"state": "accepted", "sessionId": "wrong-session"}])
+        server.start()
+        config = TeamConfig(
+            name="acp-test",
+            runtime_dir=self.root / "runtime",
+            project_root=self.root,
+            roles={
+                "implementer": RoleConfig(
+                    name="implementer",
+                    mode="acp_tui",
+                    capabilities={
+                        "notify_method": "control-socket",
+                        "control_socket": str(self.socket_path),
+                        "runtime_session_id": "saved-session",
+                    },
+                )
+            },
+        )
+        store = Store(config)
+        with closing(store.connect()) as conn:
+            message = store.create_message(
+                conn, sender="operator", recipient="implementer", priority="normal", summary="Next task", body="Task"
+            )
+            ok, details = store.notify_role(conn, "implementer")
+            state, attempts = conn.execute(
+                "SELECT state, attempts FROM messages WHERE id = ?", (message.id,)
+            ).fetchone()
+        server.join()
+        self.assertFalse(ok)
+        self.assertIn("ACP session mismatch", details)
+        self.assertEqual((state, attempts), ("queued", 0))
+
     def test_acp_extra_keeps_base_python_311_compatible(self) -> None:
         pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
 
@@ -206,7 +248,7 @@ class ACPTUIControlTests(unittest.TestCase):
         self.assertEqual(
             pyproject["project"]["optional-dependencies"]["acp"],
             [
-                "batrachian-toad @ git+https://github.com/PheelaV/toad.git@feature/acp-config-options ; "
+                "batrachian-toad @ git+https://github.com/PheelaV/toad.git@5fc2077706ac44aecf86c0a01e82b72d59155d87 ; "
                 "python_version >= '3.14'"
             ],
         )

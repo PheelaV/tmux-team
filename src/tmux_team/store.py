@@ -1879,8 +1879,9 @@ class Store:
             prompt=prompt,
             update_queued=True,
             event_payload={"pending": pending},
-            success_label="app-server turn",
-            failure_label="app-server turn submission failed",
+            success_label="app-server wake",
+            failure_label="app-server wake submission failed",
+            urgent=bool(wake_context.get("urgent_count")),
         )
 
     def notify_role_app_server_prompt(
@@ -1896,6 +1897,7 @@ class Store:
         event_payload: dict[str, Any] | None = None,
         success_label: str,
         failure_label: str,
+        urgent: bool = False,
     ) -> tuple[bool, str]:
         settings = self.resolve_role_app_server(conn, role, role_row)
         if settings is None:
@@ -1913,12 +1915,13 @@ class Store:
 
         endpoint, thread_id, timeout = settings
         try:
-            turn = submit_app_server_wake(
+            wake = submit_app_server_wake(
                 endpoint=endpoint,
                 thread_id=thread_id,
                 prompt=prompt,
-                client_user_message_id=f"tmux-team-{role}-{utc_now()}",
+                client_user_message_id=f"tmux-team-{secrets.token_hex(16)}",
                 timeout=timeout,
+                urgent=urgent,
             )
         except (AppServerError, OSError, TimeoutError) as exc:
             details = f"{failure_label}: {exc}"
@@ -1945,25 +1948,23 @@ class Store:
             )
         payload = {
             "method": "app-server-turn",
-            "thread_id": turn.thread_id,
-            "turn_id": turn.turn_id,
+            "thread_id": wake.thread_id,
+            f"{wake.kind}_id": wake.submission_id,
         }
         if event_payload:
             payload.update(event_payload)
         details = json.dumps(
             {
                 "endpoint": endpoint,
-                "thread_id": turn.thread_id,
-                "turn_id": turn.turn_id,
-                "turn_status": turn.status,
-                **(event_payload or {}),
+                f"{wake.kind}_status": wake.status,
+                **payload,
             },
             sort_keys=True,
         )
         self.record_notification(conn, message_id, role, "app-server-turn", "submitted", details)
         self.record_event(conn, event_type, "app-server", role, payload)
         conn.commit()
-        return True, f"{success_label} submitted thread={turn.thread_id} turn={turn.turn_id}"
+        return True, f"{success_label} submitted thread={wake.thread_id} {wake.kind}={wake.submission_id}"
 
     def resolve_role_app_server(
         self,
@@ -2009,8 +2010,9 @@ class Store:
         coalesce_key: str | None = None,
     ) -> tuple[bool, str]:
         socket_path = self.resolve_role_control_socket(role_row)
-        if socket_path is None:
-            details = "role has no ACP TUI control-socket binding"
+        session_id = self.resolve_role_acp_session(role_row)
+        if socket_path is None or session_id is None:
+            details = "role has no complete ACP control-socket and session binding"
             self.record_notification(conn, message_id, role, "control-socket", "notify_failed", details)
             self.record_event(
                 conn,
@@ -2024,6 +2026,7 @@ class Store:
         try:
             request: dict[str, Any] = {
                 "action": "prompt",
+                "sessionId": session_id,
                 "text": prompt,
                 "priority": priority,
             }
@@ -2073,6 +2076,13 @@ class Store:
         except json.JSONDecodeError:
             return None
         return _optional_capability(capabilities, "control_socket", "cursor_socket", "cursor_acp_socket")
+
+    def resolve_role_acp_session(self, role_row: sqlite3.Row) -> str | None:
+        try:
+            capabilities = json.loads(role_row["capabilities_json"] or "{}")
+        except json.JSONDecodeError:
+            return None
+        return _optional_capability(capabilities, "runtime_session_id")
 
     def app_server_wake_prompt(
         self,

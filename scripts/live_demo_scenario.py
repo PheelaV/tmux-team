@@ -23,6 +23,8 @@ DEFAULT_REPO_REF = "v0.1.3"
 DEFAULT_REPO_COMMIT = "78602d1497a81f0e8e5026999585a65c1eea19b1"
 MARKER = ".tmux-team-live-demo-scenario"
 ROLES = ("orchestrator", "implementer", "collector")
+ACP_DEMO_EFFORT_IDS = {"codex": "reasoning_effort", "claude": "effort"}
+ACP_DEMO_FAST_IDS = {"codex": "fast-mode", "claude": "fast"}
 TARGET_TEST = "tests.test_store.StoreInboxTests.test_claim_next_prefers_urgent_over_older_normal_message"
 CORRELATION_KEYS = {
     "baseline": "urgent-first-baseline",
@@ -56,7 +58,7 @@ def main() -> int:
         elif args.command == "sleep":
             sleep_team(root)
         elif args.command == "resume":
-            resume_team(root, args)
+            resume_team(root)
         elif args.command == "watchdog-now":
             nudge_resumed_watchdog(root)
         elif args.command == "clean":
@@ -85,8 +87,8 @@ def parse_args() -> argparse.Namespace:
     bootstrap_parser.add_argument("--session", default=DEFAULT_SESSION)
     bootstrap_parser.add_argument("--agent-runtime", choices=("codex", "acp"), default="codex")
     bootstrap_parser.add_argument("--acp-tui-bin", default="toad")
-    bootstrap_parser.add_argument("--acp-agent-command", default="agent acp")
-    bootstrap_parser.add_argument("--acp-provider", default="cursor")
+    bootstrap_parser.add_argument("--acp-agent-command", default="")
+    bootstrap_parser.add_argument("--acp-provider", default="cursor", choices=("cursor", "codex", "claude"))
     bootstrap_parser.add_argument("--acp-model", default="")
     bootstrap_parser.add_argument("--acp-effort", default="")
     bootstrap_parser.add_argument("--acp-fast", choices=("true", "false"), default="")
@@ -113,8 +115,7 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("verify", help="Verify the live run reached real target success")
     subparsers.add_parser("sleep", help="Operator phase: sleep the running live-demo team")
 
-    resume_parser = subparsers.add_parser("resume", help="Operator phase: resume the live-demo team")
-    resume_parser.add_argument("--role-yolo", action="store_true", help="Resume managed role panes in Codex YOLO mode")
+    subparsers.add_parser("resume", help="Operator phase: resume the live-demo team")
 
     subparsers.add_parser(
         "watchdog-now",
@@ -278,7 +279,7 @@ def bootstrap(root: Path, args: argparse.Namespace) -> None:
         verify_acp_demo_ready(args.session, config_path)
         if args.acp_model:
             verify_acp_demo_model(config_path, args.acp_model, timeout=args.acp_startup_timeout)
-        verify_acp_demo_categories(config_path, args.acp_effort, args.acp_fast)
+        verify_acp_demo_options(config_path, args.acp_provider, args.acp_effort, args.acp_fast)
     start_dashboard_pane(args.session, config_path)
     print("LIVE DEMO BOOTSTRAP STARTED")
     print(f"session: {args.session}")
@@ -396,26 +397,24 @@ def verify_acp_demo_model(config_path: Path, model: str, *, timeout: float = 180
 def acp_demo_initial_config(provider: str, model: str, effort: str, fast: str) -> tuple[str, ...]:
     if not model:
         raise ScenarioError("ACP live demo requires an explicit model")
-    assignments = [] if provider == "pool" else [f"model={model}"]
-    mode_values = {"codex": "agent-full-access", "claude": "bypassPermissions", "pool": "always-allow"}
+    assignments = [f"model={model}"]
+    mode_values = {"codex": "agent-full-access", "claude": "bypassPermissions"}
     if provider in mode_values:
         assignments.append(f"mode={mode_values[provider]}")
     if effort:
-        effort_ids = {"codex": "reasoning_effort", "claude": "effort"}
-        config_id = effort_ids.get(provider)
+        config_id = ACP_DEMO_EFFORT_IDS.get(provider)
         if config_id is None:
             raise ScenarioError(f"ACP provider {provider!r} has no demo effort-option mapping")
         assignments.append(f"{config_id}={effort}")
     if fast:
-        fast_ids = {"codex": "fast-mode"}
-        config_id = fast_ids.get(provider)
+        config_id = ACP_DEMO_FAST_IDS.get(provider)
         if config_id is None:
             raise ScenarioError(f"ACP provider {provider!r} has no demo fast-option mapping")
         assignments.append(f"{config_id}={fast}")
     return tuple(assignments)
 
 
-def verify_acp_demo_categories(config_path: Path, effort: str, fast: str) -> None:
+def verify_acp_demo_options(config_path: Path, provider: str, effort: str, fast: str) -> None:
     if not effort and not fast:
         return
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -430,18 +429,18 @@ def verify_acp_demo_categories(config_path: Path, effort: str, fast: str) -> Non
         )
         options = response.get("configOptions", [])
         label = "operator" if index == 0 else ROLES[index - 1]
-        if effort and acp_category_value(options, "thought_level") != effort:
+        if effort and acp_option_value(options, ACP_DEMO_EFFORT_IDS[provider]) != effort:
             raise ScenarioError(f"ACP {label} did not confirm effort {effort!r}")
         if fast:
             expected_fast = fast == "true"
-            if acp_category_value(options, "model_config") != expected_fast:
+            if acp_option_value(options, ACP_DEMO_FAST_IDS[provider]) is not expected_fast:
                 raise ScenarioError(f"ACP {label} did not confirm fast={fast}")
 
 
-def acp_category_value(options: object, category: str) -> object:
+def acp_option_value(options: object, config_id: str) -> object:
     if not isinstance(options, list):
         return None
-    option = next((item for item in options if isinstance(item, dict) and item.get("category") == category), None)
+    option = next((item for item in options if isinstance(item, dict) and item.get("id") == config_id), None)
     return option.get("currentValue") if option is not None else None
 
 
@@ -739,14 +738,12 @@ def sleep_team(root: Path) -> None:
     print("resume next: make live-demo-resume")
 
 
-def resume_team(root: Path, args: argparse.Namespace) -> None:
+def resume_team(root: Path) -> None:
     metadata = load_metadata(root)
     config_path = Path(metadata["project"]) / ".tmux-team" / "team.toml"
     command = ["tmux-team", "--config", str(config_path), "resume"]
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     is_acp = all(role.get("mode") == "acp_tui" for role in config.get("roles", {}).values())
-    if args.role_yolo and not is_acp:
-        command.append("--role-yolo")
     run(command)
     print("LIVE DEMO RESUME OK")
     print(f"config: {config_path}")

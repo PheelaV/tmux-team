@@ -11,29 +11,35 @@ from typing import Any
 
 import tomli_w
 
-from .acp_tui import ACPControlError, control_socket_path, send_control_request, wait_for_acp_tui
+from .acp_providers import ACPProviderError, resolve_acp_provider
+from .acp_tui import ACPControlError, control_socket_path, preflight_acp_tui, send_control_request, wait_for_acp_tui
+from .app_server import AppServerError
 from .bootstrap import (
     DEFAULT_AGENTS_WINDOW,
+    BootstrapError,
     RoleBinding,
     RoleLaunchOptions,
     acp_role_spawn_command,
     app_server_tmux_commands,
     configure_agent_window,
     configure_session_truecolor,
+    is_codex_permission_override,
     label_role_pane,
     normalize_agent_layout,
     prepare_grouped_agent_window,
     resolve_tool_executable,
+    role_resume_prompt,
     role_resume_spawn_command,
     select_tiled_layout_commands,
     session_truecolor_tmux_commands,
     wait_for_app_server,
+    wait_for_loaded_thread,
     write_role_env_files,
     write_team_config,
 )
 from .config import OperatorConfig, TeamConfig, load_config, update_role_runtime_binding
 from .display import format_seconds_duration
-from .runtime_switch import prepare_runtime_handoff, recovery_prompt
+from .runtime_switch import RuntimeSwitchError, acp_option_capabilities, prepare_runtime_handoff, recovery_prompt
 from .store import Store, utc_now
 from .watchdog_runner import (
     watchdog_layout_command,
@@ -274,6 +280,11 @@ def resume_team(
         raise LifecycleError(
             f"Codex launch options specified for role(s) not in sleep snapshot: {', '.join(sorted(unknown_launch_roles))}"
         )
+    for role, options in explicit_role_launch_options.items():
+        if any(is_codex_permission_override(override) for override in options.config_overrides):
+            raise LifecycleError(
+                f"cannot override permissions for resumed Codex role {role!r}; it uses saved permissions"
+            )
     role_launch_options = merge_role_launch_options(
         saved_role_launch_options(snapshot, config, roles),
         explicit_role_launch_options,
@@ -345,6 +356,7 @@ def resume_team(
 
     if agent_layout == "grouped":
         prepare_grouped_agent_window(tmux_bin, session, agents_window)
+    pause_active_roles(store, conn)
     resumed_bindings: dict[str, RoleBinding] = {}
     for index, role in enumerate(roles):
         binding = role_bindings[role]
@@ -374,6 +386,10 @@ def resume_team(
                 for layout_command in select_tiled_layout_commands(tmux_bin, session, agents_window):
                     subprocess_run_lifecycle(layout_command)
         label_role_pane(tmux_bin, pane, role)
+        try:
+            wait_for_loaded_thread(endpoint, binding.thread_id, timeout=20.0)
+        except (AppServerError, BootstrapError, OSError) as exc:
+            raise LifecycleError(f"could not resume Codex role {role!r} in pane {pane}: {exc}") from exc
         resumed_bindings[role] = RoleBinding(thread_id=binding.thread_id, pane=pane, worktree=binding.worktree)
 
     role_scratchpads = {
@@ -394,11 +410,36 @@ def resume_team(
     write_role_env_files(config.config_path, resumed_bindings)
 
     resumed_config = load_config(config.config_path)
+    store.config = resumed_config
     store.sync_roles(conn, resumed_config.roles.values())
     for role, binding in resumed_bindings.items():
         store.bind_role_app_server(conn, role, endpoint, binding.thread_id)
         if reactivate_roles:
             store.set_role_state(conn, role, "active", actor="resume")
+    if reactivate_roles:
+        for role in roles:
+            options = role_launch_options.get(role, RoleLaunchOptions())
+            prompt = role_resume_prompt(role, instruction_profile=options.instruction_profile or "guided")
+            wake_context = store.pending_wake_context(conn, role)
+            pending = int(wake_context["pending"])
+            urgent_count = int(wake_context["urgent_count"])
+            if pending:
+                prompt += "\n" + store.app_server_wake_prompt(
+                    role, pending, top_message=wake_context["top_message"], urgent_count=urgent_count
+                )
+            role_row = store.get_role(conn, role)
+            assert role_row is not None
+            store.notify_role_app_server_prompt(
+                conn,
+                role,
+                role_row,
+                prompt=prompt,
+                update_queued=True,
+                event_payload={"pending": pending},
+                success_label="app-server resume wake",
+                failure_label="app-server resume wake submission failed",
+                urgent=bool(urgent_count),
+            )
     resumed_watchdog_panes: dict[str, str] = {}
     watchdog_window_present = bool(watchdogs_data) and tmux_window_exists(tmux_bin, session, watchdog_window_name())
     for index, (name, data) in enumerate(watchdogs_data.items()):
@@ -480,6 +521,7 @@ def resume_acp_team(
     policy_override = normalize_acp_resume_policy(requested_policy) if requested_policy else None
     role_metadata: dict[str, dict[str, Any]] = {}
     role_bindings: dict[str, RoleBinding] = {}
+    checked_tuis: set[str] = set()
     for role in roles:
         role_data = snapshot["roles"][role]
         if not isinstance(role_data, dict):
@@ -505,11 +547,18 @@ def resume_acp_team(
         )
         if not tui_bin or not agent_command:
             raise LifecycleError(f"ACP resume role {role!r} is missing Toad or agent-command metadata")
+        try:
+            agent_command, provider = resolve_acp_provider(optional_string(metadata.get("provider")), agent_command)
+        except ACPProviderError as exc:
+            raise LifecycleError(f"cannot resume ACP role {role!r}: {exc}") from exc
         if not dry_run:
             resolved_tui = resolve_tool_executable(tui_bin)
             if resolved_tui is None:
                 raise LifecycleError(f"ACP TUI binary not found for role {role!r}: {tui_bin}")
             tui_bin = resolved_tui
+            if tui_bin not in checked_tuis:
+                preflight_acp_tui(tui_bin)
+                checked_tuis.add(tui_bin)
         metadata.update(
             {
                 "resume_policy": policy,
@@ -517,6 +566,7 @@ def resume_acp_team(
                 "control_socket": socket_value,
                 "acp_tui_bin": tui_bin,
                 "acp_agent_command": agent_command,
+                "provider": provider,
             }
         )
         role_metadata[role] = metadata
@@ -580,7 +630,9 @@ def resume_acp_team(
         configure_session_truecolor(tmux_bin, session)
     if agent_layout == "grouped":
         prepare_grouped_agent_window(tmux_bin, session, agents_window)
+    pause_active_roles(store, conn)
     resumed_bindings: dict[str, RoleBinding] = {}
+    resumed_options: dict[str, dict[str, Any]] = {}
     for index, role in enumerate(roles):
         binding = role_bindings[role]
         metadata = role_metadata[role]
@@ -624,36 +676,34 @@ def resume_acp_team(
                 raise LifecycleError(f"ACP exact resume capability disappeared for role {role!r}")
         elif not resumed_session:
             raise LifecycleError(f"ACP handoff resume did not create a session for role {role!r}")
-        if metadata["resume_policy"] == "handoff":
-            handoff_path = Path(str(metadata["handoff_file"]))
-            send_control_request(
-                Path(binding.control_socket),
-                {
-                    "action": "prompt",
-                    "text": recovery_prompt(config, role, handoff_path),
-                    "priority": "normal",
-                    "coalesceKey": "sleep-handoff",
-                },
-            )
+        assert resumed_session is not None
+        try:
+            resumed_options[role] = acp_option_capabilities(Path(binding.control_socket), resumed_session)
+        except (ACPControlError, RuntimeSwitchError) as exc:
+            raise LifecycleError(f"could not verify ACP options after resuming role {role!r}: {exc}") from exc
         resumed_bindings[role] = RoleBinding(
             thread_id="",
             pane=pane,
             worktree=binding.worktree,
-            session_id=resumed_session or "",
+            session_id=resumed_session,
             control_socket=binding.control_socket,
             resume_supported=bool(status.get("resumeSupported")),
         )
+    for role, binding in resumed_bindings.items():
+        metadata = role_metadata[role]
         update_role_runtime_binding(
             config.config_path,
             role,
-            pane=pane,
+            pane=binding.pane,
             state="active" if reactivate_roles else "paused",
             capabilities={
+                **resumed_options[role],
                 "control_socket": binding.control_socket,
-                "runtime_session_id": resumed_session,
-                "acp_resume_supported": status.get("resumeSupported")
-                if isinstance(status.get("resumeSupported"), bool)
-                else None,
+                "runtime_session_id": binding.session_id,
+                "acp_resume_supported": binding.resume_supported,
+                "acp_provider": metadata["provider"],
+                "acp_agent_command": metadata["acp_agent_command"],
+                "acp_tui_bin": metadata["acp_tui_bin"],
                 "last_handoff_file": metadata.get("handoff_file"),
             },
         )
@@ -662,6 +712,22 @@ def resume_acp_team(
     resumed_config = load_config(config.config_path)
     store.config = resumed_config
     store.sync_roles(conn, resumed_config.roles.values())
+    for role, binding in resumed_bindings.items():
+        metadata = role_metadata[role]
+        if metadata["resume_policy"] == "handoff":
+            handoff_path = Path(str(metadata["handoff_file"]))
+            send_control_request(
+                Path(binding.control_socket),
+                {
+                    "action": "prompt",
+                    "sessionId": binding.session_id,
+                    "text": recovery_prompt(resumed_config, role, handoff_path),
+                    "priority": "normal",
+                    "coalesceKey": "sleep-handoff",
+                },
+            )
+        if reactivate_roles:
+            store.set_role_state(conn, role, "active", actor="resume")
     resumed_watchdog_panes = resume_watchdogs_from_snapshot(
         store,
         conn,

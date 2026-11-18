@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -20,10 +21,6 @@ ACP_PROVIDER_PRESETS = {
         "claude-agent-acp",
         "Install with `npm install -g @agentclientprotocol/claude-agent-acp` and authenticate Claude Code.",
     ),
-    "pool": ACPProviderPreset(
-        "pool acp",
-        "Install Poolside Pool from https://poolside.ai/get-started and run `pool login`.",
-    ),
 }
 
 
@@ -31,19 +28,21 @@ class ACPProviderError(ValueError):
     pass
 
 
-def resolve_acp_provider(provider: str | None, command: str | None) -> tuple[str, str | None]:
-    provider_name = provider.strip().lower() if provider else None
+def resolve_acp_provider(provider: str | None, command: str | None) -> tuple[str, str]:
     command_value = command.strip() if command else ""
-    if command_value:
-        return command_value, provider_name
-
-    provider_name = provider_name or "cursor"
+    executable = Path(acp_command_executable(command_value)).name if command_value else ""
+    provider_name = (
+        provider.strip().lower()
+        if provider
+        else {"codex-acp": "codex", "claude-agent-acp": "claude"}.get(executable, "cursor")
+    )
     preset = ACP_PROVIDER_PRESETS.get(provider_name)
     if preset is None:
-        raise ACPProviderError(
-            f"ACP provider {provider_name!r} has no built-in command; pass --acp-agent-command explicitly"
-        )
-    return preset.command, provider_name
+        raise ACPProviderError(f"unsupported ACP provider {provider_name!r}; choose cursor, codex, or claude")
+    command_value = command_value or preset.command
+    if executable in {"pool", "poolside"}:
+        raise ACPProviderError("the Poolside ACP command is unsupported; choose Cursor, Codex, or Claude Code")
+    return command_value, provider_name
 
 
 def acp_command_executable(command: str) -> str:
@@ -53,7 +52,7 @@ def acp_command_executable(command: str) -> str:
         raise ACPProviderError(f"invalid ACP agent command: {exc}") from exc
     if not parts:
         raise ACPProviderError("ACP agent command is required")
-    if parts[0] != "env":
+    if Path(parts[0]).name != "env":
         return parts[0]
     for part in parts[1:]:
         if "=" not in part:

@@ -32,7 +32,7 @@ from .bootstrap import (
     default_session_name,
     detect_current_tmux_pane_id,
     detect_current_tmux_session,
-    free_local_endpoint,
+    local_app_server_endpoint,
     normalize_instruction_profile,
     parse_roles,
 )
@@ -314,18 +314,18 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument(
         "--endpoint",
         default=None,
-        help="Existing or desired app-server endpoint; default picks a free local ws:// port",
+        help="Existing or desired app-server endpoint; defaults to a private Unix socket",
     )
     bootstrap.add_argument("--codex-bin", default="codex")
     bootstrap.add_argument("--acp-tui-bin", default="toad")
     bootstrap.add_argument(
         "--acp-agent-command",
         default=None,
-        help="ACP stdio command; defaults from --acp-provider for cursor, codex, claude, or pool",
+        help="ACP stdio command override for the selected provider",
     )
     bootstrap.add_argument(
         "--acp-provider",
-        help="Provider preset/provenance: cursor, codex, claude, pool, or a custom label with an explicit command",
+        help="ACP provider: cursor (default), codex, or claude",
     )
     bootstrap.add_argument(
         "--acp-initial-config",
@@ -710,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_switch.add_argument("role")
     runtime_switch.add_argument(
         "--acp-agent-command",
-        help="New ACP provider command; defaults from --provider for cursor, codex, claude, or pool",
+        help="ACP stdio command override for the selected provider",
     )
     runtime_switch.add_argument("--provider", help="New provider preset/provenance")
     runtime_switch.add_argument("--model", help="New model metadata")
@@ -865,7 +865,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Role pane layout for resumed role panes",
     )
     resume.add_argument("--agents-window", default=DEFAULT_AGENTS_WINDOW, help="Name for grouped role-agent window")
-    resume.add_argument("--role-yolo", action="store_true", help="Resume managed role TUIs with Codex YOLO mode")
+    resume.add_argument(
+        "--role-yolo", action="store_true", help="Deprecated; resumed Codex threads use saved permissions"
+    )
     resume.add_argument("--role-profile", default=None, help="Codex profile to pass to every managed role TUI")
     resume.add_argument("--role-codex-profile", action="append", default=[], metavar="ROLE=PROFILE")
     resume.add_argument("--role-model", action="append", default=[], metavar="ROLE=MODEL")
@@ -891,7 +893,7 @@ def build_parser() -> argparse.ArgumentParser:
     codex_sub = codex.add_subparsers(dest="codex_command", required=True)
     codex_bind = codex_sub.add_parser("bind", help="Bind a role to a Codex app-server thread")
     codex_bind.add_argument("role")
-    codex_bind.add_argument("--endpoint", required=True, help="Codex app-server endpoint, e.g. ws://127.0.0.1:4500")
+    codex_bind.add_argument("--endpoint", required=True, help="Codex app-server Unix socket or loopback WebSocket")
     codex_bind.add_argument("--thread-id", required=True, help="Codex thread id shown by /status or app-server tooling")
     codex_show = codex_sub.add_parser("show", help="Show a role's Codex app-server binding")
     codex_show.add_argument("role")
@@ -954,7 +956,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     try:
         project_root = Path(args.project_root).expanduser().resolve()
         session = args.session or detect_current_tmux_session(args.tmux_bin) or default_session_name(project_root)
-        endpoint = args.endpoint or free_local_endpoint()
+        endpoint = (args.endpoint or local_app_server_endpoint()) if args.agent_runtime == "codex" else ""
         roles = parse_roles(args.roles)
         role_worktrees = parse_role_worktrees(args.role_worktree)
         role_scratchpads = parse_role_paths(args.role_memory, "--role-memory")
@@ -2808,6 +2810,8 @@ def cmd_sleep(args: argparse.Namespace, store: Store, conn, config) -> int:
 
 
 def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
+    if args.role_yolo:
+        raise LifecycleError("--role-yolo applies to bootstrap; remote resume uses the saved Codex thread permissions")
     role_launch_options = parse_role_launch_options(
         roles=tuple(config.roles),
         role_profiles=parse_assignments(args.role_codex_profile, "--role-codex-profile"),
@@ -2828,7 +2832,6 @@ def cmd_resume(args: argparse.Namespace, store: Store, conn, config) -> int:
         endpoint=args.endpoint,
         agent_layout=args.agent_layout,
         agents_window=args.agents_window,
-        role_yolo=args.role_yolo,
         role_profile=args.role_profile,
         role_launch_options=role_launch_options,
         acp_resume_policy=args.acp_resume_policy,
@@ -2886,7 +2889,10 @@ def cmd_acp(args: argparse.Namespace, store: Store, service: TeamService, conn) 
         return 1
 
     if args.acp_command == "cancel":
-        response = send_control_request(socket_path, {"action": "cancel"})
+        session_id = store.resolve_role_acp_session(role)
+        if session_id is None:
+            raise ACPControlError(f"role {args.role!r} has no ACP session binding")
+        response = send_control_request(socket_path, {"action": "cancel", "sessionId": session_id})
         print(f"{args.role} cancellation_requested={str(response.get('submitted', False)).lower()}")
         return 0
 
