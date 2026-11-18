@@ -4,8 +4,8 @@ UV_RUN_DEV = $(UV) run --with-editable . --extra dev
 SKILL_PROVIDERS ?= codex
 LIVE_DEMO_ROOT ?= /tmp/tmux-team-live-demo
 LIVE_DEMO_SESSION ?= tt-live-demo
-LIVE_DEMO_ACP_TUI_BIN ?= $(shell if [ -x "$(CURDIR)/.venv/bin/toad" ]; then printf '%s' "$(CURDIR)/.venv/bin/toad"; else command -v toad 2>/dev/null; fi)
-LIVE_DEMO_ACP_AGENT_COMMAND ?= agent --force acp
+LIVE_DEMO_ACP_TUI_BIN ?= $(shell if [ -x "$(CURDIR)/.venv/bin/toad" ]; then printf '%s' "$(CURDIR)/.venv/bin/toad"; else printf '%s' toad; fi)
+LIVE_DEMO_ACP_AGENT_COMMAND ?= $(if $(filter cursor,$(LIVE_DEMO_ACP_PROVIDER)),agent --force acp)
 LIVE_DEMO_ACP_PROVIDER ?= cursor
 LIVE_DEMO_ACP_MODEL ?=
 LIVE_DEMO_ACP_EFFORT ?=
@@ -13,15 +13,13 @@ LIVE_DEMO_ACP_FAST ?=
 LIVE_DEMO_ACP_STARTUP_TIMEOUT ?= 180
 LIVE_DEMO_ACP_INSTRUCTION_PROFILE ?= compact
 LIVE_DEMO_ACP_CURSOR_COMMAND ?= agent --force acp
-LIVE_DEMO_ACP_CURSOR_MODEL ?= gpt-5.6-terra[context=272k,reasoning=medium,fast=false]
+LIVE_DEMO_ACP_CURSOR_MODEL ?= $(LIVE_DEMO_ACP_MODEL)
 LIVE_DEMO_ACP_CODEX_COMMAND ?= codex-acp
-LIVE_DEMO_ACP_CODEX_MODEL ?= gpt-5.6-terra
+LIVE_DEMO_ACP_CODEX_MODEL ?= $(LIVE_DEMO_ACP_MODEL)
 LIVE_DEMO_ACP_CLAUDE_COMMAND ?= claude-agent-acp
-LIVE_DEMO_ACP_CLAUDE_MODEL ?= us.anthropic.claude-opus-4-8
-LIVE_DEMO_ACP_POOL_COMMAND ?= pool acp
-LIVE_DEMO_ACP_POOL_MODEL ?=
+LIVE_DEMO_ACP_CLAUDE_MODEL ?= $(LIVE_DEMO_ACP_MODEL)
 
-.PHONY: require-uv require-live-acp install-dev install-skill install-cursor-skill install-pool-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-cursor-bootstrap live-demo-acp-codex-bootstrap live-demo-acp-claude-bootstrap live-demo-acp-pool-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
+.PHONY: require-uv require-live-acp install-dev install-skill install-cursor-skill lint ruff-check format-check format test bootstrap-layout-smoke-test smoke-test congestion-smoke-test integration-test docker-smoke-test docker-congestion-smoke-test docker-test codex-integration-test codex-docker-fs-integration-test live-demo-setup live-demo-bootstrap live-demo-acp-bootstrap live-demo-acp-cursor-bootstrap live-demo-acp-codex-bootstrap live-demo-acp-claude-bootstrap live-demo-acp-start live-demo-sleep live-demo-resume live-demo-watchdog-now live-demo-verify live-demo-clean
 
 require-uv:
 	@command -v "$(UV)" >/dev/null 2>&1 || (echo "tmux-team tests require uv. Install with: brew install uv" >&2; exit 2)
@@ -46,9 +44,6 @@ install-skill:
 
 install-cursor-skill:
 	$(MAKE) install-skill SKILL_PROVIDERS=cursor
-
-install-pool-skill:
-	$(MAKE) install-skill SKILL_PROVIDERS=pool
 
 lint: ruff-check format-check
 
@@ -109,9 +104,6 @@ live-demo-acp-codex-bootstrap:
 live-demo-acp-claude-bootstrap:
 	$(MAKE) live-demo-acp-bootstrap LIVE_DEMO_ACP_PROVIDER=claude LIVE_DEMO_ACP_AGENT_COMMAND='$(LIVE_DEMO_ACP_CLAUDE_COMMAND)' LIVE_DEMO_ACP_MODEL='$(LIVE_DEMO_ACP_CLAUDE_MODEL)' LIVE_DEMO_ACP_EFFORT=medium
 
-live-demo-acp-pool-bootstrap:
-	$(MAKE) live-demo-acp-bootstrap LIVE_DEMO_ACP_PROVIDER=pool LIVE_DEMO_ACP_AGENT_COMMAND='$(LIVE_DEMO_ACP_POOL_COMMAND)' LIVE_DEMO_ACP_MODEL='$(LIVE_DEMO_ACP_POOL_MODEL)'
-
 live-demo-acp-start: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) start-goal
 
@@ -119,7 +111,7 @@ live-demo-sleep: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) sleep
 
 live-demo-resume: require-uv
-	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) resume --role-yolo
+	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) resume
 
 live-demo-watchdog-now: require-uv
 	$(UV_RUN) python scripts/live_demo_scenario.py --root $(LIVE_DEMO_ROOT) watchdog-now

@@ -583,15 +583,27 @@ custom_observer_value = "keep-observer"
 
     def test_switch_cancel_success_updates_config_lineage_and_sqlite(self) -> None:
         handoff = self.write_handoff()
-        requests: list[str] = []
+        requests: list[dict] = []
 
         def control_request(_socket_path, request, timeout=5.0):
             del timeout
-            requests.append(request["action"])
+            requests.append(request)
             if request["action"] == "status":
                 return {"state": "asking", "sessionId": "old-session"}
             if request["action"] == "cancel":
                 return {"submitted": True}
+            if request["action"] == "configOptions":
+                return {"sessionId": "new-session", "configOptions": advertised_options()}
+            if request.get("configId") == "model-choice":
+                return {
+                    "sessionId": "new-session",
+                    "configOptions": advertised_options(model="large", effort_values=("high", "xhigh")),
+                }
+            if request.get("configId") == "reasoning":
+                return {
+                    "sessionId": "new-session",
+                    "configOptions": advertised_options(model="large", effort="xhigh", effort_values=("high", "xhigh")),
+                }
             return {"state": "accepted", "sessionId": "new-session"}
 
         completed = subprocess.CompletedProcess([], 0, "", "")
@@ -605,7 +617,7 @@ custom_observer_value = "keep-observer"
                 patch("tmux_team.runtime_switch.quiesce_runtime_session"),
                 patch(
                     "tmux_team.runtime_switch.wait_for_acp_tui",
-                    return_value={"state": "idle", "sessionId": "new-session"},
+                    return_value={"state": "idle", "sessionId": "new-session", "resumeSupported": True},
                 ),
                 patch("tmux_team.runtime_switch.subprocess.run", return_value=completed) as run,
             ):
@@ -613,10 +625,10 @@ custom_observer_value = "keep-observer"
                     self.store,
                     conn,
                     "worker",
-                    acp_agent_command="new-agent --model new-model acp",
+                    acp_agent_command="new-agent acp",
                     handoff_file=handoff,
                     provider="new-provider",
-                    model="new-model",
+                    model="large",
                     effort="xhigh",
                     cancel_active=True,
                     tmux_bin="tmux-test",
@@ -627,13 +639,21 @@ custom_observer_value = "keep-observer"
             ).fetchone()
 
         wait_idle.assert_called_once()
-        self.assertEqual(requests, ["status", "cancel", "prompt"])
+        self.assertEqual(
+            [item["action"] for item in requests],
+            ["status", "cancel", "configOptions", "setConfig", "setConfig", "prompt"],
+        )
+        self.assertEqual(
+            [(item["configId"], item["value"]) for item in requests if item["action"] == "setConfig"],
+            [("model-choice", "large"), ("reasoning", "xhigh")],
+        )
+        self.assertEqual(requests[-1]["sessionId"], "new-session")
         command = run.call_args.args[0]
         self.assertEqual(
             command[:7],
             ("tmux-test", "respawn-pane", "-k", "-t", "%1", "-c", str(self.worktree.resolve())),
         )
-        self.assertIn("new-agent --model new-model acp", command[7])
+        self.assertIn("new-agent acp", command[7])
         self.assertEqual(result.old_session_id, "old-session")
         self.assertEqual(result.new_session_id, "new-session")
         self.assertEqual(role["state"], "active")
@@ -641,8 +661,10 @@ custom_observer_value = "keep-observer"
         self.assertEqual(capabilities["runtime_session_id"], "new-session")
         self.assertEqual(capabilities["previous_runtime_session_id"], "old-session")
         self.assertEqual(capabilities["acp_provider"], "new-provider")
-        self.assertEqual(capabilities["acp_model"], "new-model")
+        self.assertEqual(capabilities["acp_model"], "large")
         self.assertEqual(capabilities["acp_effort"], "xhigh")
+        self.assertEqual(capabilities["acp_config"]["model-choice"], "large")
+        self.assertTrue(capabilities["acp_resume_supported"])
         self.assertEqual(capabilities["last_handoff_file"], str(handoff.resolve()))
 
         data = tomllib.loads(self.config_path.read_text(encoding="utf-8"))
@@ -655,6 +677,40 @@ custom_observer_value = "keep-observer"
         self.assertEqual(lineage["old"]["session_id"], "old-session")
         self.assertEqual(lineage["new"]["session_id"], "new-session")
         self.assertEqual(json.loads(event["payload_json"])["handoff_file"], str(handoff.resolve()))
+
+    def test_unavailable_replacement_model_keeps_the_new_binding_draining(self) -> None:
+        handoff = self.write_handoff()
+        new_options = {"sessionId": "new-session", "configOptions": advertised_options()}
+        with (
+            closing(self.store.connect()) as conn,
+            patch(
+                "tmux_team.runtime_switch.send_control_request",
+                side_effect=[{"state": "idle", "sessionId": "old-session"}, new_options, new_options],
+            ) as control,
+            patch("tmux_team.runtime_switch.quiesce_runtime_session"),
+            patch("tmux_team.runtime_switch.subprocess.run", return_value=subprocess.CompletedProcess([], 0)),
+            patch(
+                "tmux_team.runtime_switch.wait_for_acp_tui",
+                return_value={"state": "idle", "sessionId": "new-session"},
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeSwitchError, "invalid value for config option"):
+                switch_runtime(
+                    self.store,
+                    conn,
+                    "worker",
+                    acp_agent_command="new-agent acp",
+                    handoff_file=handoff,
+                    model="unavailable",
+                )
+            role = self.store.get_role(conn, "worker")
+            self.assertEqual(role["state"], "draining")
+        self.assertEqual(
+            [call.args[1]["action"] for call in control.call_args_list], ["status", "configOptions", "configOptions"]
+        )
+        capabilities = load_config(self.config_path).roles["worker"].capabilities
+        self.assertEqual(capabilities["runtime_session_id"], "new-session")
+        self.assertEqual(capabilities["acp_model"], "small")
 
     def test_dry_run_print_plan_without_mutation(self) -> None:
         handoff = self.write_handoff()

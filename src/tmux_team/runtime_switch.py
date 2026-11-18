@@ -8,13 +8,13 @@ import sqlite3
 import subprocess
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .acp_tui import send_control_request, wait_for_acp_tui
+from .acp_tui import ACPControlError, send_control_request, wait_for_acp_tui
 from .bootstrap import acp_role_shell_command
 from .config import load_config, role_scratchpad_path, update_role_capabilities
 from .display import role_capabilities
@@ -147,28 +147,10 @@ def _configure_runtime_options(
     confirmed_changes: list[tuple[str, str | bool]] = []
     provider = _optional_string(capabilities.get("acp_provider"))
     for config_id, raw_value in requested:
-        current_by_id = _options_by_id(current_options)
-        value = _parse_config_value(current_by_id, config_id, raw_value)
         old_values = _current_values(current_options)
-        response = send_control_request(
-            socket_path,
-            {
-                "action": "setConfig",
-                "sessionId": initial.session_id,
-                "configId": config_id,
-                "value": value,
-            },
+        value, next_options = _set_runtime_option(
+            socket_path, initial.session_id, current_options, config_id, raw_value
         )
-        _require_session_id(
-            response,
-            initial.session_id,
-            operation=f"setting runtime config option {config_id!r}",
-        )
-        next_options = tuple(_response_config_options(response))
-        confirmed = _options_by_id(next_options).get(config_id)
-        if confirmed is None or not _same_config_value(confirmed["currentValue"], value):
-            actual = None if confirmed is None else confirmed["currentValue"]
-            raise RuntimeSwitchError(f"ACP TUI did not confirm {config_id!r}={value!r}; confirmed value is {actual!r}")
         new_values = _current_values(next_options)
         _persist_runtime_options(store, conn, role, next_options)
         event = {
@@ -190,6 +172,25 @@ def _configure_runtime_options(
         current_options = next_options
 
     return RuntimeConfigureResult(initial.session_id, tuple(confirmed_changes))
+
+
+def _set_runtime_option(
+    socket_path: Path,
+    session_id: str,
+    options: Sequence[dict[str, Any]],
+    config_id: str,
+    raw_value: str,
+) -> tuple[str | bool, tuple[dict[str, Any], ...]]:
+    value = _parse_config_value(_options_by_id(options), config_id, raw_value)
+    response = send_control_request(
+        socket_path, {"action": "setConfig", "sessionId": session_id, "configId": config_id, "value": value}
+    )
+    _require_session_id(response, session_id, operation=f"setting runtime config option {config_id!r}")
+    next_options = tuple(_response_config_options(response))
+    actual = _current_values(next_options).get(config_id)
+    if not _same_config_value(actual, value):
+        raise RuntimeSwitchError(f"ACP TUI did not confirm {config_id!r}={value!r}; confirmed value is {actual!r}")
+    return value, next_options
 
 
 def _request_runtime_options(socket_path: Path, *, expected_session_id: str | None) -> RuntimeOptionsResult:
@@ -229,9 +230,7 @@ def _response_config_options(response: dict[str, Any]) -> list[dict[str, Any]]:
             if type(raw_option.get("currentValue")) is not bool:
                 raise RuntimeSwitchError(f"ACP TUI returned invalid current value for boolean option {config_id!r}")
         else:
-            raise RuntimeSwitchError(
-                f"ACP TUI returned unsupported config option type for {config_id!r}: {option_type!r}"
-            )
+            continue
         options.append(dict(raw_option))
     return options
 
@@ -297,6 +296,19 @@ def _first_category_value(options: Sequence[dict[str, Any]], category: str) -> s
     return None if option is None else option["currentValue"]
 
 
+def acp_option_capabilities(socket_path: Path, session_id: str) -> dict[str, Any]:
+    return _option_capabilities(_request_runtime_options(socket_path, expected_session_id=session_id).options)
+
+
+def _option_capabilities(options: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "acp_config": _current_values(options),
+        "acp_model": _first_category_value(options, "model"),
+        "acp_effort": _first_category_value(options, "thought_level"),
+        "acp_mode": _first_category_value(options, "mode"),
+    }
+
+
 def _persist_runtime_options(
     store: Store,
     conn: sqlite3.Connection,
@@ -306,16 +318,7 @@ def _persist_runtime_options(
     config_path = store.config.config_path
     if config_path is None:
         raise RuntimeSwitchError("runtime configure requires a config file")
-    update_role_capabilities(
-        config_path,
-        role,
-        {
-            "acp_config": _current_values(options),
-            "acp_model": _first_category_value(options, "model"),
-            "acp_effort": _first_category_value(options, "thought_level"),
-            "acp_mode": _first_category_value(options, "mode"),
-        },
-    )
+    update_role_capabilities(config_path, role, _option_capabilities(options))
     updated_config = load_config(config_path, store.runtime_dir)
     store.config = updated_config
     store.sync_roles(conn, updated_config.roles.values())
@@ -568,7 +571,7 @@ def switch_runtime(
             raise RuntimeSwitchError(
                 f"role {role!r} has an active ACP turn (state={state}); use --cancel-active to cancel it"
             )
-        send_control_request(socket_path, {"action": "cancel"})
+        send_control_request(socket_path, {"action": "cancel", "sessionId": prepared_session_id})
         wait_for_idle(socket_path, timeout=CANCEL_TIMEOUT_SECONDS)
     else:
         _require_idle(role, status, "switch runtime")
@@ -596,30 +599,46 @@ def switch_runtime(
     old_effort = _optional_string(capabilities.get("acp_effort"))
     old_command = _optional_string(capabilities.get("acp_agent_command"))
     new_provider = provider if provider is not None else old_provider
-    new_model = model if model is not None else old_model
-    new_effort = effort if effort is not None else old_effort
-    updates: dict[str, Any | None] = {
-        "acp_agent_command": command_value,
-        "runtime_session_id": new_session_id,
-        "previous_runtime_session_id": old_session_id,
-        "last_handoff_file": str(handoff_path),
-    }
-    if provider is not None:
-        updates["acp_provider"] = provider
-    if model is not None:
-        updates["acp_model"] = model
-    if effort is not None:
-        updates["acp_effort"] = effort
-    update_role_capabilities(store.config.config_path, role, updates)
-    updated_config = load_config(store.config.config_path, store.runtime_dir)
-    store.config = updated_config
-    store.sync_roles(conn, updated_config.roles.values())
+    options: tuple[dict[str, Any], ...] = ()
+    try:
+        options = _request_runtime_options(socket_path, expected_session_id=new_session_id).options
+        for category, requested in (("model", model), ("thought_level", effort)):
+            if requested is None:
+                continue
+            option = next((item for item in options if item.get("category") == category), None)
+            if option is None:
+                raise RuntimeSwitchError(f"replacement ACP session does not advertise a {category!r} option")
+            _, options = _set_runtime_option(socket_path, new_session_id, options, option["id"], requested)
+        for category, requested in (("model", model), ("thought_level", effort)):
+            if requested is not None and _first_category_value(options, category) != requested:
+                raise RuntimeSwitchError(f"replacement ACP session did not retain {category}={requested!r}")
+    except (ACPControlError, RuntimeSwitchError):
+        with suppress(ACPControlError, RuntimeSwitchError):
+            options = _request_runtime_options(socket_path, expected_session_id=new_session_id).options
+        raise
+    finally:
+        update_role_capabilities(
+            store.config.config_path,
+            role,
+            {
+                **_option_capabilities(options),
+                "acp_provider": new_provider,
+                "acp_agent_command": command_value,
+                "runtime_session_id": new_session_id,
+                "previous_runtime_session_id": old_session_id,
+                "last_handoff_file": str(handoff_path),
+                "acp_resume_supported": ready.get("resumeSupported"),
+            },
+        )
+        store.config = load_config(store.config.config_path, store.runtime_dir)
+        store.sync_roles(conn, store.config.roles.values())
 
-    prompt = recovery_prompt(updated_config, role, handoff_path)
+    prompt = recovery_prompt(store.config, role, handoff_path)
     send_control_request(
         socket_path,
         {
             "action": "prompt",
+            "sessionId": new_session_id,
             "text": prompt,
             "priority": "normal",
             "coalesceKey": "runtime-handoff",
@@ -640,8 +659,8 @@ def switch_runtime(
         },
         "new": {
             "provider": new_provider,
-            "model": new_model,
-            "effort": new_effort,
+            "model": _first_category_value(options, "model"),
+            "effort": _first_category_value(options, "thought_level"),
             "command": command_value,
             "session_id": new_session_id,
         },

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import socket
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,16 @@ class ACPControlError(RuntimeError):
 
 def control_socket_path(runtime_dir: Path, role: str) -> Path:
     return runtime_dir / "acp" / f"{role}.sock"
+
+
+def preflight_acp_tui(executable: str) -> None:
+    try:
+        result = subprocess.run([executable, "acp", "--help"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ACPControlError(f"could not check {executable!r} ACP support: {exc}") from exc
+    required = ("--control-socket", "--compact-ui", "--session-id")
+    if result.returncode or any(flag not in result.stdout for flag in required):
+        raise ACPControlError(f"{executable!r} lacks the tmux-team ACP control interface; install tmux-team[acp]")
 
 
 def send_control_request(
@@ -58,6 +69,9 @@ def send_control_request(
             message = str(error.get("message") or "request failed")
             raise ACPControlError(f"{code}: {message}")
         raise ACPControlError(str(error or "ACP TUI control request failed"))
+    session_id = payload.get("sessionId")
+    if session_id is not None and response.get("sessionId") != session_id:
+        raise ACPControlError(f"ACP session mismatch: expected {session_id!r}, got {response.get('sessionId')!r}")
     return response
 
 
@@ -73,7 +87,7 @@ def wait_for_acp_tui(socket_path: Path, timeout: float = 30.0) -> dict[str, Any]
             state = str(status.get("state") or "")
             if state == "failed":
                 raise ACPControlError("ACP TUI reported failed state")
-            if state and state != "starting":
+            if state and state != "starting" and status.get("sessionId"):
                 return status
         except ACPControlError as exc:
             last_error = exc

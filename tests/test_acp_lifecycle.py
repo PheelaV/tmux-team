@@ -159,6 +159,20 @@ acp_resume_supported = true
         self.assertIsNone(result.endpoint)
         self.assertIn("--session-id saved-session", command_text)
 
+    def test_resume_rejects_a_saved_poolside_adapter_before_launch(self) -> None:
+        snapshot = self.write_snapshot(policy="exact", resume_supported=True)
+        snapshot.write_text(
+            snapshot.read_text(encoding="utf-8").replace(
+                'acp_agent_command = "agent acp"', 'acp_agent_command = "pool acp"'
+            ),
+            encoding="utf-8",
+        )
+        with (
+            closing(self.store.connect()) as conn,
+            self.assertRaisesRegex(LifecycleError, "Poolside ACP command is unsupported"),
+        ):
+            resume_team(self.config, self.store, conn, snapshot_path=snapshot, dry_run=True)
+
     def test_handoff_resume_is_explicit_and_omits_saved_session(self) -> None:
         handoff = self.runtime / "handoffs" / "orchestrator" / "sleep.md"
         handoff.parent.mkdir(parents=True)
@@ -210,6 +224,7 @@ acp_resume_supported = true
         with (
             closing(self.store.connect()) as conn,
             patch("tmux_team.lifecycle.resolve_tool_executable", return_value="/bin/toad"),
+            patch("tmux_team.lifecycle.preflight_acp_tui") as preflight,
             patch("tmux_team.lifecycle.configure_session_truecolor"),
             patch("tmux_team.lifecycle.prepare_grouped_agent_window"),
             patch("tmux_team.lifecycle.subprocess_run_lifecycle", return_value=completed) as run,
@@ -217,6 +232,10 @@ acp_resume_supported = true
             patch("tmux_team.lifecycle.select_tiled_layout_commands", return_value=[]),
             patch("tmux_team.lifecycle.label_role_pane"),
             patch("tmux_team.lifecycle.wait_for_acp_tui", return_value=ready),
+            patch(
+                "tmux_team.lifecycle.acp_option_capabilities",
+                return_value={"acp_config": {"model": "restored-model"}, "acp_model": "restored-model"},
+            ) as read_options,
             patch.object(self.store, "notify_role", return_value=(True, "notified")) as notify,
         ):
             result = resume_team(
@@ -226,6 +245,7 @@ acp_resume_supported = true
                 snapshot_path=snapshot,
                 dry_run=False,
             )
+            self.assertEqual(self.store.get_role(conn, "orchestrator")["state"], "active")
 
         self.assertEqual(result.role_panes["orchestrator"], "%9")
         self.assertEqual(result.role_threads["orchestrator"], "saved-session")
@@ -233,10 +253,13 @@ acp_resume_supported = true
         self.assertIn("--session-id", spawn_command[-1])
         self.assertIn("saved-session", spawn_command[-1])
         notify.assert_called_once()
+        preflight.assert_called_once_with("/bin/toad")
+        self.assertEqual(read_options.call_args.args[1], "saved-session")
         config = load_config(self.config_path)
         self.assertEqual(config.roles["orchestrator"].pane, "%9")
         self.assertEqual(config.roles["orchestrator"].capabilities["runtime_session_id"], "saved-session")
         self.assertTrue(config.roles["orchestrator"].capabilities["acp_resume_supported"])
+        self.assertEqual(config.roles["orchestrator"].capabilities["acp_model"], "restored-model")
 
     def write_snapshot(
         self,

@@ -12,22 +12,14 @@ Three canonical provider names have ergonomic command presets:
 | `cursor` | `agent acp` | Cursor Agent native ACP server |
 | `codex` | `codex-acp` | `@agentclientprotocol/codex-acp`, backed by Codex app-server |
 | `claude` | `claude-agent-acp` | `@agentclientprotocol/claude-agent-acp`, backed by the official Claude Agent SDK |
-| `pool` | `pool acp` | Poolside Pool CLI native ACP server; deployment configuration remains Pool-owned |
 
-An explicit `--acp-agent-command` always overrides the preset. This supports flags, `npx`, pinned/local executables,
-and arbitrary future adapters without growing a provider-specific execution abstraction in core.
+An explicit `--acp-agent-command` overrides the selected preset for flags, `npx`, or pinned/local executables.
 
 ## Authentication And Policy
 
 - Cursor uses Cursor Agent login and provider-owned CLI policy.
 - Codex ACP uses local ChatGPT/Codex login, API-key environment, or a configured gateway.
 - Claude ACP uses local Claude credentials and Claude Code settings. It does not require an ACP URL.
-- Pool ACP uses `pool login` or Poolside API URL/key settings. `pool acp setup --editor ...` is not needed for Toad.
-- Pool skill discovery uses `.poolside/skills/`, `.agents/skills/`, or `~/.config/poolside/skills/`; do not assume the
-  Codex plugin directory alone guarantees native Pool skill registration.
-- Direct OpenAI-compatible standalone deployments use Pool-owned runtime configuration such as
-  `POOLSIDE_STANDALONE_BASE_URL`, `POOLSIDE_STANDALONE_MODEL`, and `POOLSIDE_API_KEY`; private endpoints and credentials
-  must not enter tmux-team config examples or tracked fixtures.
 - tmux-team checks that the local preset executable exists but never installs adapters or modifies global policy during
   bootstrap.
 
@@ -48,7 +40,7 @@ persisted for recovery; tmux-team must not infer it from a changing model catalo
 
 ## Test Contract
 
-Cursor, Codex, Claude, and Pool use the same public-snapshot scenario and verifier. A provider does not pass merely by
+Cursor, Codex, and Claude Code use the same public-snapshot scenario and verifier. A provider does not pass merely by
 starting. It must demonstrate:
 
 - private control-socket wake delivery with task bodies remaining in SQLite;

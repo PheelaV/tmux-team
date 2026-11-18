@@ -9,11 +9,15 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import tomli_w
 from scripts.live_demo_scenario import (
+    ROLES,
+    ScenarioError,
     acp_demo_initial_config,
     prepare_acp_demo_provider,
     start_goal,
     verify_acp_demo_model,
+    verify_acp_demo_options,
     wait_for_acp_session_idle,
     write_acp_goal,
 )
@@ -127,13 +131,29 @@ runtime_session_id = "collector-session"
             ),
         )
         self.assertEqual(
-            acp_demo_initial_config("claude", "us.anthropic.claude-opus-4-8", "medium", ""),
-            ("model=us.anthropic.claude-opus-4-8", "mode=bypassPermissions", "effort=medium"),
+            acp_demo_initial_config("claude", "example-model", "medium", "true"),
+            ("model=example-model", "mode=bypassPermissions", "effort=medium", "fast=true"),
         )
-        self.assertEqual(
-            acp_demo_initial_config("pool", "deployment-model", "", ""),
-            ("mode=always-allow",),
-        )
+
+    def test_fast_verification_uses_the_option_id_when_other_model_options_are_present(self) -> None:
+        sessions = {
+            name: {"control_socket": str(self.root / f"{name}.sock"), "runtime_session_id": name}
+            for name in ("operator", *ROLES)
+        }
+        operator = sessions.pop("operator")
+        self.config.write_text(tomli_w.dumps({"operator": operator, "roles": sessions}), encoding="utf-8")
+        response = {
+            "configOptions": [
+                {"id": "ultracode", "category": "model_config", "currentValue": True},
+                {"id": "fast", "category": "model_config", "currentValue": False},
+                {"id": "effort", "category": "thought_level", "currentValue": "medium"},
+            ]
+        }
+        with patch("scripts.live_demo_scenario.send_control_request", return_value=response) as control:
+            verify_acp_demo_options(self.config, "claude", "medium", "false")
+            self.assertEqual(control.call_count, 4)
+            with self.assertRaisesRegex(ScenarioError, "did not confirm fast=true"):
+                verify_acp_demo_options(self.config, "claude", "medium", "true")
 
     def test_prepare_claude_demo_provider_writes_ignored_local_permission_settings(self) -> None:
         for key in ("project", "implementer_worktree", "collector_worktree"):

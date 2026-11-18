@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
+import tempfile
 import time
-import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +21,8 @@ from .acp_providers import (
     acp_provider_install_hint,
     resolve_acp_provider,
 )
-from .acp_tui import ACPControlError, control_socket_path, send_control_request, wait_for_acp_tui
-from .app_server import AppServerClient
+from .acp_tui import ACPControlError, control_socket_path, preflight_acp_tui, send_control_request, wait_for_acp_tui
+from .app_server import AppServerClient, AppServerError
 from .config import (
     CONFIG_PATH_ENV,
     ENV_FILE_PATH,
@@ -34,7 +34,7 @@ from .config import (
 )
 from .store import Store
 
-ROLE_CONTRACT_VERSION = "2026-07-11.1"
+ROLE_CONTRACT_VERSION = "2026-11-18.1"
 DEFAULT_ROLES = ("orchestrator", "implementer", "collector", "trainer")
 DEFAULT_AGENT_LAYOUT = "grouped"
 DEFAULT_CONTROL_WINDOW = "tt-control"
@@ -44,6 +44,15 @@ AGENT_LAYOUTS = ("grouped", "separate-windows")
 AGENT_RUNTIMES = ("codex", "acp")
 ROLE_PANE_OPTION = "@tmux-team-role"
 TT_PREFIX = "tt-"
+CODEX_RESUME_PERMISSION_KEYS = {
+    "approval_policy",
+    "approvals_reviewer",
+    "default_permissions",
+    "network",
+    "permissions",
+    "sandbox_mode",
+    "sandbox_workspace_write",
+}
 
 
 @dataclass(frozen=True)
@@ -192,6 +201,7 @@ def bootstrap_team(
             hint = acp_provider_install_hint(acp_provider)
             suffix = f" {hint}" if hint else ""
             raise BootstrapError(f"ACP agent executable not found: {agent_executable}.{suffix}")
+        preflight_acp_tui(acp_tui_bin)
     if not dry_run and runtime.uses_app_server:
         ensure_start_skill_available()
     role_worktree_paths, worktree_commands = prepare_role_worktrees(
@@ -558,10 +568,10 @@ def start_role_panes_and_discover_threads(
     role_launch_options: dict[str, RoleLaunchOptions],
 ) -> dict[str, RoleBinding]:
     role_bindings: dict[str, RoleBinding] = {}
-    loaded = set(loaded_threads(endpoint))
     if agent_layout == "grouped":
         prepare_grouped_agent_window(tmux_bin, session, agents_window)
     for index, role in enumerate(roles):
+        launch_marker = f"tmux-team launch {secrets.token_hex(16)}"
         pane = ensure_role_pane(
             tmux_bin,
             codex_bin,
@@ -577,10 +587,13 @@ def start_role_panes_and_discover_threads(
             role_yolo,
             role_profile,
             role_launch_options.get(role, RoleLaunchOptions()),
+            launch_marker=launch_marker,
         )
-        thread_id = wait_for_new_loaded_thread(endpoint, loaded, timeout=20.0)
+        try:
+            thread_id = wait_for_role_thread(endpoint, launch_marker, timeout=20.0)
+        except (AppServerError, BootstrapError, OSError) as exc:
+            raise BootstrapError(f"could not bind Codex role {role!r} in pane {pane}: {exc}") from exc
         role_bindings[role] = RoleBinding(thread_id=thread_id, pane=pane, worktree=role_worktrees[role])
-        loaded.add(thread_id)
     return role_bindings
 
 
@@ -632,15 +645,17 @@ def start_acp_role_panes(
         label_role_pane(tmux_bin, pane, role)
         try:
             status = wait_for_acp_tui(role_sockets[role], timeout=30.0)
+            session_id = str(status["sessionId"])
             config_snapshot = apply_acp_initial_config(
                 role_sockets[role],
-                str(status.get("sessionId") or ""),
+                session_id,
                 initial_config,
             )
             send_control_request(
                 role_sockets[role],
                 {
                     "action": "prompt",
+                    "sessionId": session_id,
                     "text": role_startup_prompt(
                         role,
                         agent_runtime="acp",
@@ -653,6 +668,8 @@ def start_acp_role_panes(
             )
             time.sleep(3.0)
             status = wait_for_acp_tui(role_sockets[role], timeout=3.0)
+            if status.get("sessionId") != session_id:
+                raise ACPControlError("ACP session changed after startup prompt")
         except ACPControlError as exc:
             raise BootstrapError(f"ACP TUI role {role!r} did not start: {exc}") from exc
         role_bindings[role] = RoleBinding(
@@ -687,15 +704,17 @@ def initialize_acp_control_agent(
 ) -> OperatorConfig:
     try:
         status = wait_for_acp_tui(control_socket, timeout=30.0)
+        session_id = str(status["sessionId"])
         config_snapshot = apply_acp_initial_config(
             control_socket,
-            str(status.get("sessionId") or ""),
+            session_id,
             initial_config,
         )
         send_control_request(
             control_socket,
             {
                 "action": "prompt",
+                "sessionId": session_id,
                 "text": control_startup_prompt(config_path),
                 "priority": "normal",
                 "coalesceKey": "tmux-team-control-startup",
@@ -703,6 +722,8 @@ def initialize_acp_control_agent(
         )
         time.sleep(3.0)
         status = wait_for_acp_tui(control_socket, timeout=3.0)
+        if status.get("sessionId") != session_id:
+            raise ACPControlError("ACP session changed after control startup prompt")
     except ACPControlError as exc:
         raise BootstrapError(f"ACP TUI control agent did not start: {exc}") from exc
     capabilities = dict(operator.capabilities)
@@ -803,6 +824,8 @@ def ensure_role_pane(
     role_yolo: bool,
     role_profile: str | None,
     role_launch_options: RoleLaunchOptions,
+    *,
+    launch_marker: str,
 ) -> str:
     spawn_command = role_spawn_command(
         tmux_bin,
@@ -819,6 +842,7 @@ def ensure_role_pane(
         role_profile,
         role_launch_options,
         print_pane=True,
+        launch_marker=launch_marker,
     )
     if agent_layout == "grouped":
         result = run(spawn_command, check=True)
@@ -844,6 +868,7 @@ def ensure_role_pane(
             role_yolo=role_yolo,
             role_profile=role_profile,
             role_launch_options=role_launch_options,
+            launch_marker=launch_marker,
         )
         run(
             [tmux_bin, "respawn-window", "-k", "-t", f"{session}:{role_window}", "-c", str(role_worktree), command],
@@ -1113,45 +1138,58 @@ def render_operator_config(operator: OperatorConfig | None) -> dict[str, object]
 
 
 def wait_for_app_server(endpoint: str, timeout: float) -> None:
-    ready_url = endpoint.replace("ws://", "http://", 1).replace("wss://", "https://", 1).rstrip("/") + "/readyz"
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(ready_url, timeout=1.0) as response:
-                if response.status == 200:
-                    return
-        except Exception as exc:
+            with AppServerClient(endpoint, timeout=1.0) as client:
+                client.initialize()
+            return
+        except (AppServerError, OSError) as exc:
             last_error = exc
         time.sleep(0.2)
-    raise BootstrapError(f"app-server did not become ready at {ready_url}: {last_error}")
+    raise BootstrapError(f"app-server did not become ready at {endpoint}: {last_error}")
 
 
-def loaded_threads(endpoint: str) -> list[str]:
-    with AppServerClient(endpoint, timeout=10.0) as client:
-        client.initialize()
-        return client.list_loaded_threads()
-
-
-def wait_for_new_loaded_thread(endpoint: str, previous: set[str], timeout: float) -> str:
+def wait_for_role_thread(endpoint: str, launch_marker: str, timeout: float) -> str:
     deadline = time.monotonic() + timeout
-    last_loaded: list[str] = []
-    with AppServerClient(endpoint, timeout=10.0) as client:
+    with AppServerClient(endpoint, timeout=3.0) as client:
         client.initialize()
         while time.monotonic() < deadline:
-            last_loaded = client.list_loaded_threads()
-            new_threads = [thread_id for thread_id in last_loaded if thread_id not in previous]
-            if new_threads:
-                return max(new_threads)
+            for thread_id in client.list_loaded_threads():
+                try:
+                    thread = client.read_thread(thread_id)
+                except AppServerError:
+                    continue
+                preview = thread.get("preview")
+                if (
+                    thread.get("parentThreadId") is None
+                    and thread.get("forkedFromId") is None
+                    and isinstance(preview, str)
+                    and (preview == launch_marker or preview.startswith(launch_marker + "\n"))
+                ):
+                    return thread_id
             time.sleep(0.2)
-    raise BootstrapError(f"role TUI did not create a loaded app-server thread; loaded={last_loaded}")
+    raise BootstrapError("Codex role startup was not found in a loaded thread; inspect its tmux pane")
 
 
-def free_local_endpoint() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        _, port = sock.getsockname()
-    return f"ws://127.0.0.1:{port}"
+def wait_for_loaded_thread(endpoint: str, thread_id: str, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    with AppServerClient(endpoint, timeout=3.0) as client:
+        client.initialize()
+        while time.monotonic() < deadline:
+            if thread_id in client.list_loaded_threads():
+                return
+            time.sleep(0.2)
+    raise BootstrapError(f"Codex did not load saved thread {thread_id!r}; inspect its tmux pane")
+
+
+def local_app_server_endpoint() -> str:
+    socket_name = f"tmux-team-{secrets.token_hex(12)}.sock"
+    directory = Path(tempfile.gettempdir())
+    if len(os.fsencode(directory / socket_name)) >= 104:
+        directory = Path("/tmp")
+    return f"unix://{directory / socket_name}"
 
 
 def detect_current_tmux_session(tmux_bin: str = "tmux") -> str | None:
@@ -1366,6 +1404,7 @@ def role_shell_command(
     role_yolo: bool = False,
     role_profile: str | None = None,
     role_launch_options: RoleLaunchOptions | None = None,
+    launch_marker: str | None = None,
 ) -> str:
     role_launch_options = role_launch_options or RoleLaunchOptions()
     profile = role_launch_options.profile or role_profile
@@ -1374,30 +1413,31 @@ def role_shell_command(
         codex_args.append("resume")
     if profile:
         codex_args.extend(["--profile", profile])
-    if role_yolo or role_launch_options.yolo:
+    if thread_id is None and (role_yolo or role_launch_options.yolo):
         codex_args.append("--dangerously-bypass-approvals-and-sandbox")
     if role_launch_options.model:
         codex_args.extend(["--model", role_launch_options.model])
     if role_launch_options.reasoning_effort:
         codex_args.extend(["-c", f"model_reasoning_effort={json.dumps(role_launch_options.reasoning_effort)}"])
     for override in role_launch_options.config_overrides:
+        if thread_id and is_codex_permission_override(override):
+            continue
         codex_args.extend(["-c", override])
     codex_args.extend(["--cd", str(project_root)])
     codex_args.extend(["--remote", endpoint])
     if thread_id:
-        codex_args.extend(
-            [
-                thread_id,
-                role_resume_prompt(role, instruction_profile=role_launch_options.instruction_profile or "guided"),
-            ]
-        )
+        codex_args.append(thread_id)
     else:
-        codex_args.append(
-            role_startup_prompt(role, instruction_profile=role_launch_options.instruction_profile or "guided")
-        )
+        prompt = role_startup_prompt(role, instruction_profile=role_launch_options.instruction_profile or "guided")
+        codex_args.append(f"{launch_marker}\n{prompt}" if launch_marker else prompt)
     env_args = ["env", f"{CONFIG_PATH_ENV}={config_path}", f"{ROLE_ENV}={role}", *codex_args]
     command = f"cd {shlex.quote(str(project_root))} && {' '.join(shlex.quote(part) for part in env_args)}"
     return keep_open_command(command, "role TUI")
+
+
+def is_codex_permission_override(override: str) -> bool:
+    root_key = override.partition("=")[0].split(".", 1)[0].strip().strip("\"'")
+    return root_key in CODEX_RESUME_PERMISSION_KEYS
 
 
 def role_startup_prompt(
@@ -1515,6 +1555,7 @@ def role_spawn_command(
     role_launch_options: RoleLaunchOptions,
     *,
     print_pane: bool = False,
+    launch_marker: str | None = None,
 ) -> list[str]:
     command = role_shell_command(
         codex_bin,
@@ -1525,6 +1566,7 @@ def role_spawn_command(
         role_yolo=role_yolo,
         role_profile=role_profile,
         role_launch_options=role_launch_options,
+        launch_marker=launch_marker,
     )
     return role_pane_spawn_command(
         tmux_bin, session, project_root, role, index, agent_layout, agents_window, command, print_pane=print_pane

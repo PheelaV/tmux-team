@@ -9,8 +9,8 @@ from scripts.install_skill import install_skill, provider_skill_root, selected_p
 
 class InstallSkillTests(unittest.TestCase):
     def test_provider_selection_supports_subsets_and_all(self) -> None:
-        self.assertEqual(selected_providers("codex,pool,codex"), ("codex", "pool"))
-        self.assertEqual(selected_providers("all"), ("codex", "cursor", "claude", "pool"))
+        self.assertEqual(selected_providers("codex,cursor,codex"), ("codex", "cursor"))
+        self.assertEqual(selected_providers("all"), ("codex", "cursor", "claude"))
         with self.assertRaises(ValueError):
             selected_providers("unknown")
 
@@ -20,12 +20,10 @@ class InstallSkillTests(unittest.TestCase):
             "CODEX_HOME": "/opt/codex",
             "CURSOR_HOME": "/opt/cursor",
             "CLAUDE_HOME": "/opt/claude",
-            "POOL_SKILLS_HOME": "/opt/pool-skills",
         }
         self.assertEqual(provider_skill_root("codex", env), Path("/opt/codex/skills"))
         self.assertEqual(provider_skill_root("cursor", env), Path("/opt/cursor/skills"))
         self.assertEqual(provider_skill_root("claude", env), Path("/opt/claude/skills"))
-        self.assertEqual(provider_skill_root("pool", env), Path("/opt/pool-skills"))
 
     def test_install_copies_skill_and_references(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -35,9 +33,9 @@ class InstallSkillTests(unittest.TestCase):
             (source / "SKILL.md").write_text("skill\n", encoding="utf-8")
             (source / "references" / "invariants.md").write_text("invariants\n", encoding="utf-8")
 
-            destination = install_skill(source, "pool", {"HOME": str(root)})
+            destination = install_skill(source, "claude", {"HOME": str(root)})
 
-            self.assertEqual(destination, root / ".config" / "poolside" / "skills" / "start-tmux-team")
+            self.assertEqual(destination, root / ".claude" / "skills" / "start-tmux-team")
             self.assertEqual((destination / "SKILL.md").read_text(encoding="utf-8"), "skill\n")
             self.assertTrue((destination / "references" / "invariants.md").is_file())
 

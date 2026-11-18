@@ -49,7 +49,11 @@ Operator mapping metadata belongs in `[operator]`:
 - `codex_thread_id` records the operator Codex thread id when known;
 - the operator table is recovery metadata, not a managed role.
 
-Use `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>` when the operator thread id is known. `tmux-team sleep` snapshots operator metadata, configured role Codex launch settings, and running watchdog runners. `tmux-team resume` replays known role model, reasoning effort, profile, raw Codex config, and YOLO settings, then reinstantiates running watchdog panes. If a host or tmux session ended abruptly before sleep, resume can build a recovery snapshot from durable `team.toml` and SQLite runtime state. Live TUI-only state such as `/fast` remains unknown unless Codex exposes it as explicit config.
+Use `tmux-team operator bind --pane <pane> --codex-thread-id <thread-id>` when the operator thread ID is known.
+`tmux-team sleep` snapshots operator metadata, role launch settings, and running watchdogs. Resume verifies the
+saved Codex threads, restores compatible launch settings, and reinstantiates running watchdog panes. Permissions
+come from the saved threads. After an abrupt shutdown, resume can build a snapshot from `team.toml` and SQLite.
+Live TUI-only state such as `/fast` remains unknown unless explicit config records it.
 
 ## Obligations
 

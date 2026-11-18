@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import patch
 
 from tmux_team.app_server import AppServerClient, AppServerError, is_loopback_host
+from tmux_team.bootstrap import wait_for_role_thread
 from tmux_team.cli import main
 
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -44,7 +45,7 @@ notify_method = "app-server-turn"
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_app_server_turn_wakes_role_without_tmux_input(self) -> None:
+    def test_app_server_queues_normal_wake_without_tmux_input(self) -> None:
         with FakeAppServer() as server:
             code, out, err = self.run_cli(
                 "codex",
@@ -74,10 +75,10 @@ notify_method = "app-server-turn"
                 )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("notify: app-server turn submitted thread=thread_123 turn=turn_fake", out)
-        self.assertEqual(server.methods, ["initialize", "initialized", "turn/start"])
-        self.assertEqual(server.turn_start_params["threadId"], "thread_123")
-        wake_text = server.turn_start_params["input"][0]["text"]
+        self.assertIn("notify: app-server wake submitted thread=thread_123 queue=queue_fake", out)
+        self.assertEqual(server.methods, ["initialize", "initialized", "thread/queue/add"])
+        self.assertEqual(server.queue_params["threadId"], "thread_123")
+        wake_text = server.queue_params["input"][0]["text"]
         self.assertIn("Inbox wake: 1 pending message", wake_text)
         self.assertIn("tmux-team inbox message pending", wake_text)
         self.assertIn("From: orchestrator", wake_text)
@@ -105,7 +106,7 @@ notify_method = "app-server-turn"
         self.assertEqual(message["attempts"], 1)
         self.assertEqual(notification["method"], "app-server-turn")
         self.assertEqual(notification["state"], "submitted")
-        self.assertIn("turn_fake", notification["details"])
+        self.assertIn("queue_fake", notification["details"])
 
     def test_urgent_app_server_wake_includes_preemption_subject(self) -> None:
         with FakeAppServer() as server:
@@ -138,7 +139,8 @@ notify_method = "app-server-turn"
                 )
 
         self.assertEqual(code, 0, err)
-        self.assertIn("notify: app-server turn submitted", out)
+        self.assertIn("notify: app-server wake submitted thread=thread_123 turn=turn_fake", out)
+        self.assertEqual(server.methods, ["initialize", "initialized", "turn/start"])
         wake_text = server.turn_start_params["input"][0]["text"]
         self.assertIn("URGENT tmux-team inbox message pending", wake_text)
         self.assertIn("From: orchestrator", wake_text)
@@ -172,6 +174,18 @@ notify_method = "app-server-turn"
         self.assertEqual(threads, ["thread_a", "thread_b"])
         self.assertEqual(server.methods, ["initialize", "initialized", "thread/loaded/list"])
 
+    def test_role_binding_checks_startup_marker_instead_of_thread_order(self) -> None:
+        marker = "tmux-team launch test-marker"
+        with FakeAppServer() as server:
+            server.loaded_thread_ids = ["thread_other", "thread_fork", "thread_role"]
+            server.thread_metadata = {
+                "thread_other": {"preview": "Independent work"},
+                "thread_fork": {"preview": marker, "forkedFromId": "thread_role"},
+                "thread_role": {"preview": marker + "\nRole startup"},
+            }
+            with patch("socket.create_connection", server.create_connection):
+                self.assertEqual(wait_for_role_thread(server.endpoint, marker, timeout=1), "thread_role")
+
     def run_cli(self, *args: str) -> tuple[int, str, str]:
         stdout = StringIO()
         stderr = StringIO()
@@ -185,7 +199,9 @@ class FakeAppServer:
         self.methods: list[str] = []
         self.thread_resume_params: dict[str, Any] = {}
         self.turn_start_params: dict[str, Any] = {}
+        self.queue_params: dict[str, Any] = {}
         self.loaded_thread_ids: list[str] = []
+        self.thread_metadata: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> FakeAppServer:
         self.endpoint = "ws://127.0.0.1:1"
@@ -244,6 +260,13 @@ class FakeAppServer:
                     send_ws_json(sock, {"id": request_id, "result": {"codexHome": "/tmp/fake-codex"}})
                 elif method == "thread/loaded/list":
                     send_ws_json(sock, {"id": request_id, "result": {"data": self.loaded_thread_ids}})
+                elif method == "thread/read":
+                    thread_id = message["params"]["threadId"]
+                    thread = {"id": thread_id, **self.thread_metadata[thread_id]}
+                    send_ws_json(sock, {"id": request_id, "result": {"thread": thread}})
+                elif method == "thread/queue/add":
+                    self.queue_params = message["params"]
+                    send_ws_json(sock, {"id": request_id, "result": {"queuedSubmission": {"id": "queue_fake"}}})
                 elif method == "thread/resume":
                     self.thread_resume_params = message["params"]
                     send_ws_json(

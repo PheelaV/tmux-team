@@ -2,6 +2,21 @@
 
 All notable user-visible changes should be recorded here. Keep migration notes concrete enough that an operator or agent can resume an older tmux-team session safely.
 
+## Unreleased
+
+- Native Codex now uses a private Unix socket by default. Existing loopback WebSocket bindings still work with Codex 0.170.0.
+  Bootstrap verifies each role's startup thread. Normal wakes queue and urgent wakes start or steer a turn.
+- Native resume verifies every saved thread before reactivating roles and sending recovery wakes. Codex restores the
+  saved thread's permissions. Use `--role-yolo` when bootstrapping new threads. Remove it from resume scripts.
+- ACP wakes target the saved provider session. Switch applies and confirms requested model and effort before the
+  recovery prompt. Resume refreshes options from the resumed session. The ACP extra pins the compatible Toad revision.
+- Set `LIVE_DEMO_ACP_MODEL` explicitly for the named ACP demo targets. Choose a model advertised by the installed adapter.
+- The Claude Code demo accepts fast-mode overrides and checks the adapter's `fast` option separately from Ultracode.
+- ACP demos fall back to the default Toad executable name when the checkout lacks a local Toad binary.
+- Removed Poolside presets, skill installation, and demo targets. ACP supports Cursor, Codex, and Claude Code.
+  Switch a running Poolside role to a supported provider before sleeping it. For an already-slept Poolside team,
+  retain its snapshot and durable state and use the previous tmux-team version to restore the role for migration.
+
 ## 0.5.0 - 2026-07-11
 
 - Added a minimal Codex/ACP runtime adapter boundary while keeping Codex as the default built-in runtime.

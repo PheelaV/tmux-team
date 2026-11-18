@@ -8,6 +8,7 @@ import socket
 import struct
 from dataclasses import dataclass
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,9 +22,10 @@ class AppServerError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class AppServerTurn:
+class AppServerWake:
     thread_id: str
-    turn_id: str
+    submission_id: str
+    kind: str
     status: str | None
 
 
@@ -42,24 +44,41 @@ class AppServerClient:
         self.close()
 
     def connect(self) -> None:
-        parsed = urlparse(self.endpoint)
-        if parsed.scheme != "ws":
-            raise AppServerError(f"only local ws:// app-server endpoints are supported now: {self.endpoint}")
-        if parsed.hostname is None:
-            raise AppServerError(f"app-server endpoint is missing a host: {self.endpoint}")
-        if not is_loopback_host(parsed.hostname):
-            raise AppServerError(f"app-server endpoint must be loopback-only: {self.endpoint}")
-        port = parsed.port or 80
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
+        if self.endpoint.startswith("unix://"):
+            socket_path = Path(self.endpoint.removeprefix("unix://"))
+            if not socket_path.is_absolute():
+                raise AppServerError("app-server Unix endpoint requires an absolute socket path")
+            host, path = "localhost", "/"
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(self.timeout)
+                sock.connect(str(socket_path))
+            except BaseException:
+                sock.close()
+                raise
+        else:
+            parsed = urlparse(self.endpoint)
+            if parsed.scheme != "ws":
+                raise AppServerError(f"expected a Unix socket or local ws:// app-server endpoint: {self.endpoint}")
+            if parsed.hostname is None:
+                raise AppServerError(f"app-server endpoint is missing a host: {self.endpoint}")
+            if not is_loopback_host(parsed.hostname):
+                raise AppServerError(f"app-server endpoint must be loopback-only: {self.endpoint}")
+            sock = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=self.timeout)
+            host = parsed.netloc
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
 
-        sock = socket.create_connection((parsed.hostname, port), timeout=self.timeout)
-        sock.settimeout(self.timeout)
+        try:
+            self._upgrade(sock, host, path)
+        except BaseException:
+            sock.close()
+            raise
+        self._socket = sock
+
+    def _upgrade(self, sock: socket.socket, host: str, path: str) -> None:
         key = base64.b64encode(os.urandom(16)).decode("ascii")
-        host = parsed.hostname
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
         request = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
@@ -81,7 +100,6 @@ class AppServerClient:
         headers = _parse_headers(response)
         if headers.get("sec-websocket-accept") != expected_accept:
             raise AppServerError("app-server websocket upgrade returned an invalid accept key")
-        self._socket = sock
 
     def close(self) -> None:
         if self._socket is None:
@@ -144,7 +162,29 @@ class AppServerClient:
             raise AppServerError("thread/loaded/list result did not include a data list")
         return [str(thread_id) for thread_id in data]
 
-    def start_turn(self, thread_id: str, text: str, client_user_message_id: str | None = None) -> AppServerTurn:
+    def read_thread(self, thread_id: str) -> dict[str, Any]:
+        result = self.request("thread/read", {"threadId": thread_id})
+        thread = result.get("thread")
+        if not isinstance(thread, dict) or thread.get("id") != thread_id:
+            raise AppServerError("thread/read did not confirm the requested thread")
+        return thread
+
+    def queue_message(self, thread_id: str, text: str, client_user_message_id: str) -> AppServerWake:
+        result = self.request(
+            "thread/queue/add",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": text, "text_elements": []}],
+                "clientUserMessageId": client_user_message_id,
+            },
+        )
+        submission = result.get("queuedSubmission")
+        submission_id = submission.get("id") if isinstance(submission, dict) else None
+        if not isinstance(submission_id, str) or not submission_id:
+            raise AppServerError("thread/queue/add result did not include a queued submission ID")
+        return AppServerWake(thread_id, submission_id, "queue", "queued")
+
+    def start_turn(self, thread_id: str, text: str, client_user_message_id: str | None = None) -> AppServerWake:
         params: dict[str, Any] = {
             "threadId": thread_id,
             "input": [
@@ -165,7 +205,7 @@ class AppServerClient:
         if not turn_id:
             raise AppServerError("turn/start result did not include turn.id")
         status = turn.get("status")
-        return AppServerTurn(thread_id=thread_id, turn_id=turn_id, status=str(status) if status is not None else None)
+        return AppServerWake(thread_id, turn_id, "turn", str(status) if status is not None else None)
 
     def _send_json(self, payload: dict[str, Any]) -> None:
         self._send_frame(json.dumps(payload, separators=(",", ":")).encode("utf-8"), opcode=0x1)
@@ -222,12 +262,16 @@ def submit_app_server_wake(
     endpoint: str,
     thread_id: str,
     prompt: str,
-    client_user_message_id: str | None = None,
+    client_user_message_id: str,
     timeout: float = 10.0,
-) -> AppServerTurn:
+    urgent: bool = False,
+) -> AppServerWake:
     with AppServerClient(endpoint, timeout=timeout) as client:
         client.initialize()
-        return client.start_turn(thread_id, prompt, client_user_message_id=client_user_message_id)
+        if urgent:
+            # On an active thread Codex steers the existing turn atomically.
+            return client.start_turn(thread_id, prompt, client_user_message_id=client_user_message_id)
+        return client.queue_message(thread_id, prompt, client_user_message_id)
 
 
 def is_loopback_host(host: str) -> bool:

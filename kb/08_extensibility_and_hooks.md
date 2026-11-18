@@ -29,7 +29,7 @@ Do not add those until a real use case forces them.
 Extensions must not weaken the product invariants:
 
 - Task bodies stay in the durable inbox, not wake prompts or pane text.
-- Production Codex wake delivery stays app-server `turn/start`, not `tmux send-keys`.
+- Production Codex wakes go through app-server. Normal wakes queue and urgent wakes start or steer a turn.
 - The `tt-control` pane is not a role target.
 - The `tt-app-server` window remains infrastructure.
 - `team.sqlite`, message bodies, and `events.jsonl` remain the source of truth.

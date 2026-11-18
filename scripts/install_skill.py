@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 
-PROVIDERS = ("codex", "cursor", "claude", "pool")
+PROVIDERS = ("codex", "cursor", "claude")
 
 
 def parse_args() -> argparse.Namespace:
@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--providers",
         default="codex",
-        help="Comma-separated codex,cursor,claude,pool or all; default: codex",
+        help="Comma-separated codex,cursor,claude or all; default: codex",
     )
     return parser.parse_args()
 
@@ -38,9 +38,6 @@ def provider_skill_root(provider: str, environ: dict[str, str] | None = None) ->
         return Path(env.get("CURSOR_HOME") or home / ".cursor") / "skills"
     if provider == "claude":
         return Path(env.get("CLAUDE_HOME") or home / ".claude") / "skills"
-    if provider == "pool":
-        config_home = Path(env.get("XDG_CONFIG_HOME") or home / ".config")
-        return Path(env.get("POOL_SKILLS_HOME") or config_home / "poolside" / "skills")
     raise ValueError(f"unknown provider: {provider}")
 
 

@@ -23,7 +23,8 @@ Coverage target:
 - fake Codex app-server WebSocket delivery for `app-server-turn`.
 - fake ACP TUI control-socket delivery for `control-socket`.
 
-The app-server delivery unit test uses `socketpair()` and a fake WebSocket JSON-RPC server. It verifies the wake turn protocol without opening a network listener, starting Codex, or using credentials.
+The app-server delivery unit test uses `socketpair()` and a fake WebSocket JSON-RPC server. It verifies queued and urgent
+wakes without opening a network listener, starting Codex, or using credentials.
 
 The ACP TUI unit tests exercise the versioned Unix-socket client, readiness/status handshake, structured errors, and
 SQLite wake routing without starting Toad or a provider. They verify that task bodies stay out of wake prompts.
@@ -38,9 +39,8 @@ authorization.
 ACP lifecycle tests verify exact-session command generation and identity checks, explicit handoff override, pending
 work re-wake, capability refusal, quiescence rollback, and snapshot metadata.
 
-The live-demo fixture has `live-demo-bootstrap` for Codex/app-server recovery and provider-specific ACP entry points:
-`live-demo-acp-cursor-bootstrap`, `live-demo-acp-codex-bootstrap`, `live-demo-acp-claude-bootstrap`, and
-`live-demo-acp-pool-bootstrap`. All ACP paths
+The live-demo fixture has `live-demo-bootstrap` for native Codex and three ACP entry points:
+`live-demo-acp-cursor-bootstrap`, `live-demo-acp-codex-bootstrap`, and `live-demo-acp-claude-bootstrap`. All ACP paths
 use Toad control-socket delivery, intentionally wait for the operator to attach, and then use `live-demo-acp-start` to
 submit the same durable goal. Every provider must pass the same public snapshot and deterministic verifier.
 
@@ -49,7 +49,7 @@ prompt. Install/authenticate the selected local adapter first, then run for exam
 
 ```bash
 make live-demo-setup
-TMUX_TEAM_RUN_LIVE_ACP=1 make live-demo-acp-codex-bootstrap
+TMUX_TEAM_RUN_LIVE_ACP=1 LIVE_DEMO_ACP_MODEL='<advertised-model-id>' make live-demo-acp-codex-bootstrap
 tmux attach -t tt-live-demo
 make live-demo-acp-start
 # after role work completes:
@@ -61,10 +61,9 @@ make live-demo-clean
 
 Codex and Claude adapters are local stdio processes. The tests do not require an ACP service URL. The Claude demo
 writes ignored `bypassPermissions` settings only into its disposable role worktrees; the Codex demo uses the explicit
-`INITIAL_AGENT_MODE=agent-full-access` process setting. Current defaults are GPT-5.6 Terra with medium reasoning and
-fast off for Cursor/Codex, and Claude Opus 4.8 with medium effort for Claude. Claude ACP does not currently advertise a
-fast-mode config option. Override the provider-specific Make variables deliberately when testing another configuration.
-The live matrix covers native Codex plus Cursor ACP, Codex ACP, Claude ACP, and Pool ACP. Each ACP provider
+`INITIAL_AGENT_MODE=agent-full-access` process setting. Choose a model advertised by the adapter. The named Codex target
+requests medium reasoning and fast mode off. The named Claude target requests medium effort.
+Record `codex --version`, `toad --version`, and the selected adapter version with each live result. Each ACP provider
 uses the same public snapshot, durable orchestration flow, exact sleep/resume check, and deterministic verifier.
 ACP startup prompts must settle before the goal is released. The demo waits up to 180 seconds by default because adapter
 startup and first skill loading vary by provider; override `LIVE_DEMO_ACP_STARTUP_TIMEOUT` when needed.
