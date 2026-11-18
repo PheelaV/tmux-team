@@ -735,7 +735,7 @@ def sleep_team(root: Path) -> None:
     run(["tmux-team", "--config", str(config_path), "sleep"])
     print("LIVE DEMO SLEEP OK")
     print(f"config: {config_path}")
-    print("resume next: make live-demo-resume")
+    print("resume next: just live-demo-resume")
 
 
 def resume_team(root: Path) -> None:
@@ -748,7 +748,7 @@ def resume_team(root: Path) -> None:
     print("LIVE DEMO RESUME OK")
     print(f"config: {config_path}")
     if not is_acp:
-        print("nudge watchdog next: make live-demo-watchdog-now")
+        print("nudge watchdog next: just live-demo-watchdog-now")
 
 
 def nudge_resumed_watchdog(root: Path) -> None:

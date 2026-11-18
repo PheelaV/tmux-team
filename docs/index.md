@@ -9,7 +9,7 @@ Start here for operator-facing tmux-team docs. The `kb/` directory is agent-faci
 3. Bootstrap the team through the `start-tmux-team` skill, or run `tmux-team bootstrap --project-root . --goal "..."`
 4. Operate from durable state first: `status`, `dashboard`, `send`, `inbox`, `todo`, `obligation`, `watchdog`, `milestone`, `pane`, `role`, `stable`, `sleep`, and `resume`. See [CLI Reference](cli-reference.md) for the command map.
 5. Stop managed panes with `tmux-team sleep`; restore them with `tmux-team resume`.
-6. Test locally with `make integration-test`; use Docker and real-Codex tests only when needed.
+6. Test locally with `just integration-test`. Use Docker and real-Codex tests when needed.
 
 ## Core Docs
 

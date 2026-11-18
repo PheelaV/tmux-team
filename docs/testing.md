@@ -9,7 +9,7 @@ Purpose: verify deterministic local behavior with no tmux, no Docker, no Codex, 
 Run:
 
 ```bash
-make test
+just test
 ```
 
 Coverage target:
@@ -39,30 +39,29 @@ authorization.
 ACP lifecycle tests verify exact-session command generation and identity checks, explicit handoff override, pending
 work re-wake, capability refusal, quiescence rollback, and snapshot metadata.
 
-The live-demo fixture has `live-demo-bootstrap` for native Codex and three ACP entry points:
-`live-demo-acp-cursor-bootstrap`, `live-demo-acp-codex-bootstrap`, and `live-demo-acp-claude-bootstrap`. All ACP paths
-use Toad control-socket delivery, intentionally wait for the operator to attach, and then use `live-demo-acp-start` to
-submit the same durable goal. Every provider must pass the same public snapshot and deterministic verifier.
+Use `just live-demo-bootstrap` for native Codex and `just live-demo-acp-bootstrap <provider> <model>` for ACP.
+Use `just live-demo-acp-start` after attaching to submit the same durable goal. Every provider runs against the
+same public snapshot and deterministic verifier.
 
 Real ACP tests are cost-gated and use explicit provider-specific model/effort/fast settings before the first startup
 prompt. Install/authenticate the selected local adapter first, then run for example:
 
 ```bash
-make live-demo-setup
-TMUX_TEAM_RUN_LIVE_ACP=1 LIVE_DEMO_ACP_MODEL='<advertised-model-id>' make live-demo-acp-codex-bootstrap
+just live-demo-setup
+TMUX_TEAM_RUN_LIVE_ACP=1 just live-demo-acp-bootstrap codex '<advertised-model-id>'
 tmux attach -t tt-live-demo
-make live-demo-acp-start
+just live-demo-acp-start
 # after role work completes:
-make live-demo-sleep
-make live-demo-resume
-make live-demo-verify
-make live-demo-clean
+just live-demo-sleep
+just live-demo-resume
+just live-demo-verify
+just live-demo-clean
 ```
 
 Codex and Claude adapters are local stdio processes. The tests do not require an ACP service URL. The Claude demo
 writes ignored `bypassPermissions` settings only into its disposable role worktrees; the Codex demo uses the explicit
-`INITIAL_AGENT_MODE=agent-full-access` process setting. Choose a model advertised by the adapter. The named Codex target
-requests medium reasoning and fast mode off. The named Claude target requests medium effort.
+`INITIAL_AGENT_MODE=agent-full-access` process setting. Choose a model advertised by the adapter. Codex defaults to
+medium reasoning and fast mode off. Claude defaults to medium effort.
 Record `codex --version`, `toad --version`, and the selected adapter version with each live result. Each ACP provider
 uses the same public snapshot, durable orchestration flow, exact sleep/resume check, and deterministic verifier.
 ACP startup prompts must settle before the goal is released. The demo waits up to 180 seconds by default because adapter
@@ -77,10 +76,10 @@ Purpose: verify the tmux-backed control plane with fake deterministic agents.
 Run locally:
 
 ```bash
-make integration-test
-make bootstrap-layout-smoke-test
-make smoke-test
-make congestion-smoke-test
+just integration-test
+just bootstrap-layout-smoke-test
+just smoke-test
+just congestion-smoke-test
 ```
 
 `integration-test` is the default local confidence suite. It runs:
@@ -96,9 +95,9 @@ make congestion-smoke-test
 Run in Docker:
 
 ```bash
-make docker-test
-make docker-smoke-test
-make docker-congestion-smoke-test
+just docker-test
+just docker-smoke-test
+just docker-congestion-smoke-test
 ```
 
 This test creates a disposable project with a failing calculator unit test. Three shell-driven fake roles run inside tmux:
@@ -133,7 +132,7 @@ Purpose: verify that a real Codex agent can consume a `tmux-team` inbox item, ex
 Run on the host:
 
 ```bash
-TMUX_TEAM_RUN_CODEX=1 make codex-integration-test
+TMUX_TEAM_RUN_CODEX=1 just codex-integration-test
 ```
 
 This test is opt-in because it requires:
@@ -151,7 +150,7 @@ The test uses `codex exec`, not the interactive TUI. That is intentional: the te
 For individual Pro accounts, prefer the pass-through mode:
 
 ```bash
-TMUX_TEAM_RUN_CODEX=1 make codex-docker-fs-integration-test
+TMUX_TEAM_RUN_CODEX=1 just codex-docker-fs-integration-test
 ```
 
 This mode keeps Codex in user space on the host, so it can use the normal local ChatGPT login. The disposable project is a host directory under `/tmp`, and Docker bind-mounts that directory only for final verification:

@@ -1,19 +1,19 @@
 # Contributing
 
-Use the checkout for local development:
+Install `just` for checkout workflows. Run `just --list` to see the available commands.
 
 ```bash
-make install-dev
-make install-skill SKILL_PROVIDERS=codex
+just install-dev
+just install-skill codex
 ```
 
 Run the default local checks before committing:
 
 ```bash
-make integration-test
+just integration-test
 ```
 
-`make integration-test` runs lint, unit tests, the tmux bootstrap/sleep layout smoke test, and deterministic fake-agent workflows.
+`just integration-test` runs lint, unit tests, the tmux bootstrap/sleep layout smoke test, and deterministic fake-agent workflows.
 
 ## Change Discipline
 
@@ -39,7 +39,7 @@ For a release:
 4. Validate:
 
 ```bash
-make integration-test
+just integration-test
 uv run --with pyyaml python /path/to/validate_plugin.py .
 ```
 

@@ -1519,7 +1519,7 @@ def ensure_start_skill_available() -> None:
         return
     raise BootstrapError(
         "start-tmux-team Codex skill is not installed in CODEX_HOME. "
-        "Install it before bootstrapping role panes with `make install-skill` from a tmux-team "
+        "Install it before bootstrapping role panes with `just install-skill` from a tmux-team "
         f"checkout, or copy skills/start-tmux-team into {skill_path.parent}"
     )
 
