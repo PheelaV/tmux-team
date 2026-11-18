@@ -49,11 +49,11 @@ own flags and argument shape.
 Run the narrowest useful tests while iterating. Before handing off a substantial change, run:
 
 ```bash
-make lint
-make test
+just lint
+just test
 ```
 
-Run `make integration-test` for bootstrap, delivery, layout, lifecycle, or workflow changes.
+Run `just integration-test` for bootstrap, delivery, layout, lifecycle, or workflow changes.
 
 ## Runtime State Concepts
 

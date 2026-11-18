@@ -12,14 +12,14 @@ The bias is boring reliability: visible panes, explicit states, recoverable clai
 
 ## Feel The Magic
 
-From a checkout, run the repeatable live demo:
+Install `just` to run the repeatable demo from a checkout.
 
 ```bash
-make live-demo-setup
-make live-demo-bootstrap
+just live-demo-setup
+just live-demo-bootstrap
 tmux attach -t tt-live-demo
-make live-demo-verify
-make live-demo-clean
+just live-demo-verify
+just live-demo-clean
 ```
 
 The demo starts a visible Codex team, gives the orchestrator a failing test, routes implementation work, verifies the fix in a collector worktree, approves a stable commit, and exits with a clean inbox.
@@ -27,16 +27,14 @@ The demo starts a visible Codex team, gives the orchestrator a failing test, rou
 Run the same public-snapshot task through an external ACP TUI runtime with:
 
 ```bash
-make live-demo-setup
-TMUX_TEAM_RUN_LIVE_ACP=1 \
-LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
-make live-demo-acp-cursor-bootstrap  # or: codex / claude
+just live-demo-setup
+TMUX_TEAM_RUN_LIVE_ACP=1 just live-demo-acp-bootstrap cursor '<provider-model-and-options>'
 tmux attach -t tt-live-demo
-make live-demo-acp-start
-make live-demo-sleep       # after role work completes
-make live-demo-resume
-make live-demo-verify
-make live-demo-clean
+just live-demo-acp-start
+just live-demo-sleep       # after role work completes
+just live-demo-resume
+just live-demo-verify
+just live-demo-clean
 ```
 
 The ACP path uses the same control interface for Cursor, Codex, and Claude Code. Use
@@ -162,10 +160,10 @@ Checkout fallback for the skill:
 ```bash
 git clone https://github.com/PheelaV/tmux-team.git
 cd tmux-team
-make install-skill
+just install-skill
 # or select one or more Agent Skills homes explicitly:
-make install-skill SKILL_PROVIDERS=codex,cursor,claude
-make install-skill SKILL_PROVIDERS=all
+just install-skill codex,cursor,claude
+just install-skill all
 ```
 
 The default is `codex`. Provider-specific destinations honor `CODEX_HOME`, `CURSOR_HOME`, and `CLAUDE_HOME`.
@@ -241,7 +239,7 @@ The ACP runtime launches one visible Toad TUI per role. Toad owns the ACP child 
 launches the TUI and sends compact prompts through its local control socket:
 
 ```bash
-make install-skill SKILL_PROVIDERS=cursor
+just install-skill cursor
 
 tmux-team bootstrap \
   --project-root . \
@@ -430,8 +428,8 @@ Use scratchpad memory for long-lived role state, todos for active-message subste
 Unit tests:
 
 ```bash
-make lint
-make test
+just lint
+just test
 ```
 
 The unit suite includes a fake app-server WebSocket test for `app-server-turn` delivery.
@@ -439,13 +437,13 @@ The unit suite includes a fake app-server WebSocket test for `app-server-turn` d
 Deterministic fake-agent smoke test:
 
 ```bash
-make integration-test
-make bootstrap-layout-smoke-test
-make smoke-test
-make congestion-smoke-test
+just integration-test
+just bootstrap-layout-smoke-test
+just smoke-test
+just congestion-smoke-test
 ```
 
-`make integration-test` is the default local confidence suite. It runs Ruff, unit tests, the real tmux bootstrap/sleep layout smoke, the basic fake-agent workflow, and the congestion/multiple-message workflow.
+`just integration-test` runs Ruff, unit tests, the tmux bootstrap/sleep layout smoke, the basic fake-agent workflow, and the congestion workflow.
 
 Visible tmux run:
 
@@ -463,19 +461,19 @@ uv run --with-editable . python scripts/sandbox_demo.py --session tt-sandbox --r
 Dockerized deterministic smoke test:
 
 ```bash
-make docker-test
-make docker-smoke-test
-make docker-congestion-smoke-test
+just docker-test
+just docker-smoke-test
+just docker-congestion-smoke-test
 ```
 
 Repeatable live Codex dogfood scenario:
 
 ```bash
-make live-demo-setup
-make live-demo-bootstrap
+just live-demo-setup
+just live-demo-bootstrap
 tmux attach -t tt-live-demo
-make live-demo-verify
-make live-demo-clean
+just live-demo-verify
+just live-demo-clean
 ```
 
 The live demo clones a public snapshot, seeds a real failing test, opens the dashboard beside `tt-control`, and asks a
@@ -487,7 +485,7 @@ setup, and clean final inbox state. See [docs/live-demo.md](docs/live-demo.md).
 Opt-in real Codex integration:
 
 ```bash
-TMUX_TEAM_RUN_CODEX=1 make codex-integration-test
+TMUX_TEAM_RUN_CODEX=1 just codex-integration-test
 ```
 
 The real Codex test uses `codex exec` against a disposable project. It is skipped unless `TMUX_TEAM_RUN_CODEX=1` is set because it requires auth, network, model availability, and a real model call.
@@ -495,7 +493,7 @@ The real Codex test uses `codex exec` against a disposable project. It is skippe
 Pro-friendly Docker filesystem pass-through:
 
 ```bash
-TMUX_TEAM_RUN_CODEX=1 make codex-docker-fs-integration-test
+TMUX_TEAM_RUN_CODEX=1 just codex-docker-fs-integration-test
 ```
 
 This runs Codex on the host, using your normal local Codex auth, while Docker only sees the bind-mounted sandbox filesystem for final verification.

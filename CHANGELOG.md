@@ -10,7 +10,10 @@ All notable user-visible changes should be recorded here. Keep migration notes c
   saved thread's permissions. Use `--role-yolo` when bootstrapping new threads. Remove it from resume scripts.
 - ACP wakes target the saved provider session. Switch applies and confirms requested model and effort before the
   recovery prompt. Resume refreshes options from the resumed session. The ACP extra pins the compatible Toad revision.
-- Set `LIVE_DEMO_ACP_MODEL` explicitly for the named ACP demo targets. Choose a model advertised by the installed adapter.
+- Contributor commands now use `just`. Run `just integration-test` for the full local suite and
+  `just install-skill codex,cursor,claude` for skill installation. The live ACP demo takes a provider and an
+  adapter-advertised model as arguments, for example `just live-demo-acp-bootstrap claude '<model-id>'`.
+  Set `TMUX_TEAM_RUN_LIVE_ACP=1` to enable provider calls.
 - The Claude Code demo accepts fast-mode overrides and checks the adapter's `fast` option separately from Ultracode.
 - ACP demos fall back to the default Toad executable name when the checkout lacks a local Toad binary.
 - Removed Poolside presets, skill installation, and demo targets. ACP supports Cursor, Codex, and Claude Code.
