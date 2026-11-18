@@ -48,7 +48,7 @@ tmux-team bootstrap \
   --role-worktree implementer=/repo/main \
   --role-worktree collector=/repo/main-collector \
   --allow-shared-worktree orchestrator,implementer \
-  --role-model orchestrator=gpt-5.5 \
+  --role-model 'orchestrator=<model-id>' \
   --role-reasoning-effort orchestrator=xhigh \
   --role-codex-profile implementer=tmux-team-role
 ```
@@ -261,16 +261,17 @@ For Codex context resets, configure a `SessionStart` hook with matcher `startup|
 tmux-team codex session-context
 ```
 
-Wake-capable Codex delivery uses Codex app-server remote TUI mode. Bootstrap configures this automatically, but the manual form is:
+Bootstrap connects managed TUIs to a private Codex app-server Unix socket. For a manual binding, set `endpoint` to
+an absolute Unix endpoint such as `unix:///path/to/app-server.sock`.
 
 ```bash
-codex app-server --listen ws://127.0.0.1:4500
-codex --remote ws://127.0.0.1:4500
-tmux-team codex bind implementer --endpoint ws://127.0.0.1:4500 --thread-id <thread-id>
+codex app-server --listen "$endpoint"
+codex --remote "$endpoint"
+tmux-team codex bind implementer --endpoint "$endpoint" --thread-id <thread-id>
 tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
 ```
 
-`app-server-turn` submits a real Codex turn to the role's thread. The pane stays the live Codex UI, but `tmux-team` never types into the pane.
+`app-server-turn` queues a normal wake to the role's thread. An urgent wake starts or steers a turn immediately.
 
 ACP TUI delivery uses `control-socket`: `tmux-team send` writes the durable task to SQLite, sends a compact wake to
 the role's private Unix socket, and Toad queues an ACP `session/prompt`. The task body is never sent through the
@@ -306,7 +307,7 @@ failure preserves earlier confirmed changes and their audit events; no rollback
 or new session is claimed.
 
 These commands require Toad's `configOptions`/`setConfig` control actions. The
-temporary `tmux-team[acp]` extra pins the compatible feature branch.
+`tmux-team[acp]` extra pins the compatible Toad revision.
 
 ## ACP Runtime Handoffs
 
@@ -336,14 +337,14 @@ tmux-team runtime switch implementer \
   --handoff-file .tmux-team/runtime/handoffs/implementer/<handoff>.md
 ```
 
-Canonical `cursor`, `codex`, `claude`, and `pool` providers default to `agent acp`, `codex-acp`,
-`claude-agent-acp`, and `pool acp`.
+The supported provider presets are `cursor` (`agent acp`), `codex` (`codex-acp`), and `claude`
+(`claude-agent-acp` for Claude Code).
 
 Startup guidance can be selected team-wide with `--instruction-profile compact|guided` and overridden per role with
 `--role-instruction-profile ROLE=PROFILE`. Both profiles mandate loading the same `start-tmux-team` skill and invariants;
 the profile changes repeated prompt detail, not the operating contract. Resume accepts the same switches as overrides.
-Provider-specific flags belong inside `--acp-agent-command`; `--model` and
-`--effort` record provider-neutral provenance for the new session. Use
+Put provider-specific flags in `--acp-agent-command`. `--model` and
+`--effort` must match values advertised by the replacement session. Switch confirms them before sending recovery. Use
 `--dry-run` to inspect the `tmux respawn-pane` command without mutation. An
 active turn is refused by default; `--cancel-active` requests cooperative
 cancellation and still requires the TUI to reach idle.
@@ -397,7 +398,9 @@ tmux-team resume --no-reactivate-roles
 tmux-team resume --no-truecolor
 ```
 
-Resume replays configured role Codex launch settings from the sleep or recovery snapshot, including model, reasoning effort, profile, raw `-c` config overrides, and YOLO mode. It also reinstantiates running watchdog runner panes from durable runner state. Live TUI-only settings such as `/fast` are not observable unless Codex exposes them through explicit config, so `resume` warns when they matter and the live dashboard omits them rather than showing a noisy unknown chip.
+Resume verifies saved Codex threads, restores their model, reasoning effort, profile, and compatible config overrides,
+and reinstates running watchdogs. Codex restores permissions from the saved thread. Set permissions when creating new
+role threads with `bootstrap`. Resume reports live TUI-only settings such as `/fast` as unknown.
 
 Resume also reapplies the default tmux truecolor session options unless `--no-truecolor` is passed.
 

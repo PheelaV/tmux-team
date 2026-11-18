@@ -30,7 +30,7 @@ Run the same public-snapshot task through an external ACP TUI runtime with:
 make live-demo-setup
 TMUX_TEAM_RUN_LIVE_ACP=1 \
 LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
-make live-demo-acp-cursor-bootstrap  # or: codex / claude / pool
+make live-demo-acp-cursor-bootstrap  # or: codex / claude
 tmux attach -t tt-live-demo
 make live-demo-acp-start
 make live-demo-sleep       # after role work completes
@@ -39,8 +39,8 @@ make live-demo-verify
 make live-demo-clean
 ```
 
-The ACP path is provider-agnostic at the tmux-team boundary. Named Cursor, Codex, Claude, and Pool targets use their canonical
-local adapters; `live-demo-acp-bootstrap` plus `LIVE_DEMO_ACP_AGENT_COMMAND` remains available for custom providers.
+The ACP path uses the same control interface for Cursor, Codex, and Claude Code. Use
+`LIVE_DEMO_ACP_AGENT_COMMAND` to override the local adapter command for the selected provider.
 
 Expected shape:
 
@@ -71,7 +71,8 @@ verifier: LIVE DEMO VERIFY OK
 
 ## Install
 
-Default-runtime prerequisites: `tmux`, Codex CLI authenticated locally, and either `uv` or `pipx`.
+Default-runtime prerequisites include `tmux`, an authenticated Codex CLI (validated against 0.170.0), and `uv` or `pipx`.
+Trust the project and any role worktrees in Codex and resolve any model upgrade prompts before bootstrap.
 
 Install the CLI from GitHub:
 
@@ -89,13 +90,14 @@ uv tool install "tmux-team[dashboard] @ git+https://github.com/PheelaV/tmux-team
 pipx install "tmux-team[dashboard] @ git+https://github.com/PheelaV/tmux-team.git"
 ```
 
-The experimental external ACP TUI runtime uses Toad and requires Python 3.14. Base tmux-team and Codex operation
-remain Python 3.11+. Until the Toad control-socket branch is released, install the temporary extra with:
+The experimental external ACP TUI runtime uses a pinned Toad build with Python 3.14. Base tmux-team
+and Codex operation require Python 3.11 or later.
 
 ```bash
-uv tool install --python 3.14 "tmux-team[acp] @ git+https://github.com/PheelaV/tmux-team.git"
+uv tool install --python 3.14 --with-executables-from batrachian-toad \
+  "tmux-team[acp] @ git+https://github.com/PheelaV/tmux-team.git"
 # or, from a checkout:
-uv tool install --python 3.14 --force --editable ".[acp]"
+uv tool install --python 3.14 --with-executables-from batrachian-toad --force --editable ".[acp]"
 ```
 
 ### Runtime Setup Matrix
@@ -107,36 +109,24 @@ CLIs, credentials, or every adapter.
 | --- | --- | --- | --- |
 | Native Codex | `tmux`, [Codex CLI](https://developers.openai.com/codex/cli), tmux-team CLI/skill | Authenticate Codex locally | default; no ACP flags |
 | Cursor ACP | Toad, [Cursor Agent](https://cursor.com/docs/cli/installation) | `agent login`; use project policy for autonomous commands | `--agent-runtime acp --acp-provider cursor` |
-| Codex ACP | Toad, `@agentclientprotocol/codex-acp`, Codex CLI/auth | Install the Node adapter and authenticate Codex | `--agent-runtime acp --acp-provider codex` |
-| Claude ACP | Toad, `@agentclientprotocol/claude-agent-acp`, Claude credentials | Install the Node adapter; authenticate Claude Code | `--agent-runtime acp --acp-provider claude` |
-| Pool ACP | Toad, [Poolside Pool CLI](https://poolside.ai/get-started) | `pool login`, or configure Poolside API URL/key; `pool acp setup --editor ...` is not needed for Toad | `--agent-runtime acp --acp-provider pool` |
-
-Pool discovers project skills under `.poolside/skills/` or `.agents/skills/` and global skills under
-`~/.config/poolside/skills/`. Install the tmux-team skill globally with `make install-pool-skill`, or expose the same
-`start-tmux-team` directory through one of the documented project locations.
+| Codex ACP | Toad, `@agentclientprotocol/codex-acp` | Install the adapter with its bundled Codex binary and authenticate Codex | `--agent-runtime acp --acp-provider codex` |
+| Claude ACP | Toad, `@agentclientprotocol/claude-agent-acp`, Claude credentials | Install the npm adapter or standalone bundle and authenticate Claude Code | `--agent-runtime acp --acp-provider claude` |
 
 Preflight the selected runtime before bootstrap:
 
 ```bash
-toad --version
+toad acp --help
 agent status  # Cursor
 codex --version
-claude --version
-pool --version
 
 # Install only the adapter(s) you use:
 npm install -g @agentclientprotocol/codex-acp       # Codex
 npm install -g @agentclientprotocol/claude-agent-acp  # Claude
 ```
 
-Canonical provider presets are `cursor` -> `agent acp`, `codex` -> `codex-acp`, `claude` -> `claude-agent-acp`, and
-`pool` -> `pool acp`. Codex ACP uses local Codex/ChatGPT or API-key authentication. Claude ACP runs the
-official Claude Agent SDK and uses local Claude credentials and settings; it does not require an ACP URL. The ACP extra
-installs Toad transport only; installation stays non-interactive and never selects or installs every provider adapter.
-
-The tested runtime matrix is native Codex (the default), Cursor through native ACP, Codex through `codex-acp`, and
-Claude through `claude-agent-acp`; Pool ACP uses the same canonical adapter boundary and deterministic test target.
-ACP remains optional; native Codex does not require Toad or a provider adapter.
+The default ACP commands are `agent acp` for Cursor, `codex-acp` for Codex, and `claude-agent-acp` for Claude Code.
+Codex ACP uses local Codex/ChatGPT or API-key authentication. Claude ACP uses local Claude credentials and settings
+through the Claude Agent SDK.
 
 Startup instruction verbosity is configurable without changing the operating framework. Both profiles require every
 spawned role to load the `start-tmux-team` skill and invariants:
@@ -174,13 +164,12 @@ git clone https://github.com/PheelaV/tmux-team.git
 cd tmux-team
 make install-skill
 # or select one or more Agent Skills homes explicitly:
-make install-skill SKILL_PROVIDERS=codex,cursor,claude,pool
+make install-skill SKILL_PROVIDERS=codex,cursor,claude
 make install-skill SKILL_PROVIDERS=all
 ```
 
-The default is `codex`. Provider-specific destinations honor `CODEX_HOME`, `CURSOR_HOME`, `CLAUDE_HOME`,
-`POOL_SKILLS_HOME`, and `XDG_CONFIG_HOME` where applicable. Installation is non-interactive and copies the same
-canonical skill/invariants to every selected provider.
+The default is `codex`. Provider-specific destinations honor `CODEX_HOME`, `CURSOR_HOME`, and `CLAUDE_HOME`.
+Installation copies the same skill and invariants to every selected provider.
 
 ## Getting Started: Fix A Failing Test
 
@@ -210,7 +199,9 @@ tmux-team bootstrap --project-root . --goal "Run the smallest failing test, rout
 
 If bootstrap is launched from inside tmux, it uses the current tmux session unless `--session` is provided. Otherwise it creates `tt-<project>` from the project directory name.
 
-Bootstrap names the launcher window `tt-control`, starts a visible `tt-app-server` tmux window, opens remote Codex TUI panes in a tiled `tt-agents` window with `codex --cd <role-worktree> --remote ...`, waits for each TUI to create a loaded app-server thread, writes those discovered thread IDs and pane targets to `.tmux-team/team.toml`, queues the initial goal to `orchestrator`, and wakes the orchestrator with app-server `turn/start`. It does not type into any tmux prompt.
+Bootstrap names the launcher window `tt-control` and starts an isolated `tt-app-server` on a private Unix socket.
+It opens remote Codex TUIs in `tt-agents`, verifies each role's startup thread, and writes the thread IDs and pane
+targets to `.tmux-team/team.toml`. It queues the initial goal in SQLite and submits a compact wake to Codex.
 
 `--goal` and `--goal-file` seed only the initial operator message to `orchestrator`. Keep them to the objective, boundaries, and success criteria; the orchestrator should decompose that into scoped role inbox messages.
 
@@ -261,7 +252,7 @@ tmux-team bootstrap \
 ```
 
 Use `--acp-provider codex` or `--acp-provider claude` to select their installed standard adapters. Pass
-`--acp-agent-command` only for flags, `npx`, a pinned/local executable, or a custom provider.
+`--acp-agent-command` for flags, `npx`, or a pinned/local executable for the selected provider.
 
 Use repeatable `--acp-initial-config ID=VALUE` when the first model turn must use an explicit model, effort, fast mode,
 or permission preset. tmux-team applies and confirms those provider-advertised options before sending startup prompts.
@@ -277,9 +268,8 @@ Production wake delivery does not type into the pane:
 SQLite inbox -> private Unix socket -> visible Toad TUI -> ACP session/prompt -> provider agent
 ```
 
-The socket carries only the compact wake; durable task bodies remain in SQLite. Provider-specific flags belong in
-`--acp-agent-command`. For the three canonical providers, `--acp-provider` selects the standard command when no command
-override is supplied; it remains provenance metadata for custom commands. Inspect or control a role with
+The socket carries compact wakes addressed to the saved provider session. Durable task bodies remain in SQLite.
+Inspect or control a role with
 `tmux-team acp status|wake|cancel <role>`.
 ACP sleep/resume uses explicit `exact` or `handoff` policy and never silently opens a blank provider session.
 
@@ -298,8 +288,7 @@ no provider model catalog or hard-coded config IDs. Each confirmed response
 replaces the complete stored `acp_config` map, updates model/effort/mode
 summaries by ACP category, and records same-session lineage. A failed later
 `--set` does not roll back earlier confirmed changes. These commands require a
-Toad build with `configOptions`/`setConfig`; the temporary `tmux-team[acp]`
-extra pins the compatible feature branch.
+Toad build with `configOptions`/`setConfig`. The `tmux-team[acp]` extra pins the compatible revision.
 
 Switch an idle ACP role to a new provider/model session without changing panes
 or losing durable work context:
@@ -315,9 +304,9 @@ tmux-team runtime switch implementer \
 ```
 
 The handoff capsule contains bounded role, inbox, todo, memory, and Git state,
-but never durable task bodies or a full transcript. The replacement Toad
-process starts in the same tmux pane and receives a recovery prompt that points
-to the durable capsule and current worktree. Inspect current and previous
+but never durable task bodies or a full transcript. The replacement Toad process starts in the same tmux pane,
+confirms any requested model or effort, and receives a recovery prompt pointing to the capsule and current
+worktree. Inspect current and previous
 provider sessions with `tmux-team runtime show <role>`.
 
 See [External ACP TUI Runtime](docs/acp-runtime.md) for installation, constrained permissions, delivery mechanics,
@@ -330,16 +319,19 @@ tmux-team bootstrap --project-root . --role-profile tmux-team-role
 tmux-team bootstrap --project-root . --role-yolo
 ```
 
-`--role-profile` passes a named Codex profile to each managed role TUI. `--role-yolo` passes Codex `--dangerously-bypass-approvals-and-sandbox` to managed role TUIs only. Use YOLO mode only when the project/worktree is already the sandbox you accept for those agents.
+`--role-profile` selects a named Codex profile file at `$CODEX_HOME/<name>.config.toml` for each managed role TUI.
+Use `on-request` or `never` for `approval_policy`. `--role-yolo` applies Codex
+`--dangerously-bypass-approvals-and-sandbox` when creating new managed role threads. Use it only when the roles
+already run within an external sandbox you accept.
 
 Set role-specific Codex launch options when roles need different models, reasoning effort, or profiles:
 
 ```bash
 tmux-team bootstrap \
   --project-root . \
-  --role-model orchestrator=gpt-5.5 \
+  --role-model 'orchestrator=<model-id>' \
   --role-reasoning-effort orchestrator=xhigh \
-  --role-model collector=gpt-5.5 \
+  --role-model 'collector=<model-id>' \
   --role-reasoning-effort collector=high \
   --role-codex-profile implementer=tmux-team-role
 ```
@@ -350,7 +342,11 @@ For advanced Codex config, pass repeatable per-role `-c` overrides:
 tmux-team bootstrap --project-root . --role-codex-config collector='model_reasoning_effort="high"'
 ```
 
-Configured role Codex launch settings are recorded in `team.toml`, included in sleep snapshots, and replayed by `tmux-team resume`. Running watchdog runners are also reinstantiated on resume. If a host or tmux session ends before a graceful sleep, resume can build a recovery snapshot from `team.toml` and SQLite runtime state. Live TUI-only state that Codex does not expose, such as `/fast`, is reported as unknown; verify it manually after recovery if it matters.
+tmux-team records Codex launch settings in `team.toml` and sleep snapshots. Resume reuses model, reasoning effort,
+profile, and compatible config overrides. Codex restores permissions from the saved thread. tmux-team verifies that
+thread before reactivating the role and sending its recovery wake. Running watchdogs are reinstantiated on resume.
+After an abrupt shutdown, tmux-team can reconstruct a snapshot from `team.toml` and SQLite. The CLI reports live
+`/fast` state as unknown, so verify it in the resumed pane if it matters.
 
 Bootstrap and resume set tmux truecolor options on the managed session by default: `default-terminal` to `tmux-256color`, RGB terminal features when supported, and `COLORTERM=truecolor`. Use `--no-truecolor` only for unusual terminal stacks that mis-render color.
 

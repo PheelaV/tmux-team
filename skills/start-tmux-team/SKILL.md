@@ -104,9 +104,8 @@ ACP TUI bootstrap runs a Toad operator agent in `tt-control`, visible `tt-agents
 sockets; the control agent is not a role and receives no inbox work. The detailed runtime contract is in
 `references/acp-runtime.md`.
 
-For ACP teams, `--acp-provider cursor|codex|claude|pool` selects the canonical local stdio command when no explicit command
-is supplied. Unknown providers require `--acp-agent-command`. Never infer a remote URL or modify global provider
-credentials/permission policy.
+For ACP teams, `--acp-provider cursor|codex|claude` selects the local stdio adapter. Use `--acp-agent-command`
+for flags or a pinned executable for the selected provider. Keep provider credentials and permissions external.
 
 After startup, report the tmux session, config path, app-server endpoint, role thread IDs, and attach command:
 
@@ -224,7 +223,9 @@ Use `tmux-team pane capture <role> --lines N --offset N` to inspect live pane ou
 
 Use `tmux-team watchdog` for report-only durable-state checks. Use delivery-enabled `watchdog run --once` or `watchdog start` when findings should create durable inbox pressure and wake a role. Runners are visible panes in `tt-watchdogs`, not role agents; change them with `watchdog update/pause/resume/stop`.
 
-Use `tmux-team sleep` to snapshot role/app-server bindings, operator metadata, running watchdogs, and configured Codex launch settings before tearing down managed role, app-server, and watchdog windows. Use `tmux-team resume` to restore from the latest snapshot or durable runtime state after abrupt shutdown. Treat TUI-only Codex state such as `/fast` as unknown unless explicit config records it.
+Use `tmux-team sleep` to snapshot bindings, watchdogs, and launch settings. Use `tmux-team resume` to verify and
+restore saved sessions before reactivating roles. Codex restores the saved thread's permissions. Treat TUI-only
+state such as `/fast` as unknown unless explicit config records it.
 
 Bootstrap and resume set tmux truecolor options on the managed session by default. Use `--no-truecolor` only if the operator's terminal stack mis-renders color.
 
@@ -232,7 +233,7 @@ Bootstrap and resume set tmux truecolor options on the managed session by defaul
 
 - Keep agents in visible tmux panes.
 - Keep `tt-control`, runtime infrastructure, and role panes isolated by purpose.
-- Use app-server `turn/start` for Codex delivery and the generic control socket for ACP TUI delivery.
+- Codex queues normal wakes and starts or steers a turn for urgent wakes. ACP wakes target the saved session through its control socket.
 - Never use `tmux send-keys` as the production wake path.
 - Keep task bodies in the inbox, not wake prompts or scratchpads.
 - Preserve user takeover: role panes and infrastructure panes stay inspectable.

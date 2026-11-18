@@ -27,11 +27,8 @@ make live-demo-acp-cursor-bootstrap
 tmux attach -t tt-live-demo
 ```
 
-Replace `cursor` in the target with `codex`, `claude`, or `pool` to run the same orchestrated scenario through
-`codex-acp`, `claude-agent-acp`, or `pool acp`. Set `LIVE_DEMO_ACP_POOL_MODEL` explicitly because Pool model catalogs
-are deployment-specific. All providers run as local stdio adapters; Pool may separately target a remote deployment
-through Pool-owned settings/environment.
-The Pool target verifies its already-advertised runtime model instead of mutating model selection through ACP.
+Replace `cursor` in the target with `codex` or `claude` to run the same scenario through `codex-acp` or
+`claude-agent-acp`. Each adapter runs locally over stdio.
 
 ACP bootstrap intentionally defers the goal so the operator can attach before work starts. From another shell, start
 the durable scenario after the observer is ready:
@@ -49,16 +46,18 @@ LIVE_DEMO_ACP_MODEL='<provider-model-and-options>' \
 make live-demo-acp-bootstrap
 ```
 
-Override `LIVE_DEMO_ACP_AGENT_COMMAND`, `LIVE_DEMO_ACP_PROVIDER`, or `LIVE_DEMO_ACP_TUI_BIN` to exercise another
-compatible ACP provider/TUI. The autonomous Cursor demo uses `agent --force acp`; choose a stricter command when a
+Set `LIVE_DEMO_ACP_PROVIDER` to `cursor`, `codex`, or `claude`. Override `LIVE_DEMO_ACP_AGENT_COMMAND` or
+`LIVE_DEMO_ACP_TUI_BIN` to test a specific adapter or compatible Toad build. The Cursor demo uses `agent --force acp`.
+Choose a stricter command when a
 human will approve role tools. ACP mode uses the same seeded repository and role worktrees and verifies control-socket
 delivery plus exact provider-session sleep/resume. Toad must first establish each provider session; tmux-team then
 confirms the requested model before dispatching the durable scenario goal.
 
-The Cursor and Codex targets explicitly select GPT-5.6 Terra with medium reasoning and fast off. The Claude target
-selects Claude Opus 4.8 with medium effort. Claude ACP does not currently advertise a fast-mode config option. Bootstrap
-applies and confirms these options before sending
-the first startup prompt. The Codex target also selects `INITIAL_AGENT_MODE=agent-full-access`; the Claude target
+Set the model to a value advertised by the selected adapter. The Codex target requests medium reasoning and disables
+fast mode. The Claude target requests medium effort and accepts `LIVE_DEMO_ACP_FAST=true` or `false` when the adapter
+advertises fast mode. For Cursor, choose an advertised model variant with the options
+you intend to test. Bootstrap confirms these options before sending the first startup prompt. Codex uses
+`INITIAL_AGENT_MODE=agent-full-access`. The Claude target
 creates ignored worktree-local `bypassPermissions` settings only inside the disposable fixture.
 
 The live scenario has an operator recovery phase. After the collector reports the first passing stable verification and the orchestrator arms the post-resume watchdog, trigger sleep/resume from the control side:

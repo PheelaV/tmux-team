@@ -6,33 +6,27 @@ remain in SQLite and are never typed into the terminal composer.
 
 ## Install And Preflight
 
-ACP support currently requires Python 3.14 and the temporary Toad control-socket branch:
+ACP uses protocol v1. Install the pinned Toad control-socket build with Python 3.14.
 
 ```bash
-uv tool install --python 3.14 \
+uv tool install --python 3.14 --with-executables-from batrachian-toad \
   "tmux-team[acp] @ git+https://github.com/PheelaV/tmux-team.git"
 
-toad --version
+toad acp --help
 agent status
 codex --version
 claude --version
-pool --version
 
 npm install -g @agentclientprotocol/codex-acp
 npm install -g @agentclientprotocol/claude-agent-acp
-
-# Pool: install from https://poolside.ai/get-started, then authenticate/configure:
-pool login
-make install-skill SKILL_PROVIDERS=pool
 ```
 
 `tmux-team[acp]` installs the ACP TUI/control transport, not every provider adapter. Install only the adapter(s) you use;
 bootstrap preflights the selected command and prints its provider-specific install hint when it is missing. Package
 installation remains non-interactive and does not choose a provider for the user.
 
-Pool skill discovery is separate from Codex plugin installation. Pool scans `.poolside/skills/`, `.agents/skills/`, and
-`~/.config/poolside/skills/`; `make install-skill SKILL_PROVIDERS=pool` copies the canonical skill to the global Pool directory (or
-`POOL_SKILLS_HOME`). Every Pool role must have the skill available before bootstrap.
+Bootstrap checks that Toad exposes `--control-socket`, `--compact-ui`, and `--session-id` before creating the team.
+The Codex npm adapter includes a compatible Codex binary. The Claude adapter also publishes standalone bundles.
 
 ## Instruction Profiles
 
@@ -48,12 +42,8 @@ Canonical provider presets:
 | Cursor | `agent acp` | Cursor Agent login |
 | Codex | `codex-acp` | local ChatGPT/Codex login, API key, or configured gateway |
 | Claude | `claude-agent-acp` | local Claude credentials/settings through the official Claude Agent SDK |
-| Pool | `pool acp` | `pool login` or Poolside-owned `POOLSIDE_API_URL` / `POOLSIDE_API_KEY` configuration |
 
-These are local child processes launched by Toad. Claude ACP does not require a remote URL. Pool can target a remote
-OpenAI-compatible deployment, but endpoint/model/auth configuration remains Pool-owned and must be supplied through
-Pool settings or environment, never tmux-team config. `pool acp setup --editor zed|jetbrains` only registers editors;
-Toad invokes `pool acp` directly. Bootstrap a team with:
+Toad launches these adapters as local child processes over stdio.
 
 ```bash
 tmux-team bootstrap --project-root . \
@@ -63,28 +53,15 @@ tmux-team bootstrap --project-root . \
   --goal "Inspect the failing test and report verified evidence."
 ```
 
-Pool example with generic runtime-only endpoint placeholders:
-
-```bash
-POOLSIDE_STANDALONE_BASE_URL='http://<openai-compatible-host>/v1' \
-POOLSIDE_STANDALONE_MODEL='<deployment-model>' \
-POOLSIDE_API_KEY='<runtime-secret>' \
-tmux-team bootstrap --project-root . --agent-runtime acp --acp-provider pool
-```
-
-Do not commit deployment URLs, API keys, or private network addresses. Prefer Pool's credential/settings facilities or
-shell/session environment injection.
-
-Use `--acp-agent-command` to override a preset with `npx`, a pinned/local executable, provider flags, or an arbitrary
-ACP stdio adapter. Unknown providers require an explicit command. Bootstrap fails before creating team state when a
-preset executable is missing and prints its install hint.
+Use `--acp-agent-command` for `npx`, a pinned/local executable, or provider flags for Cursor, Codex, or Claude Code.
+Bootstrap prints the provider install hint when its executable is missing.
 
 Apply provider-advertised options before the first startup prompt when model/cost or permission behavior must be
 deterministic:
 
 ```bash
 tmux-team bootstrap --project-root . --agent-runtime acp --acp-provider codex \
-  --acp-initial-config model=gpt-5.6-terra \
+  --acp-initial-config 'model=<model-id>' \
   --acp-initial-config reasoning_effort=medium \
   --acp-initial-config fast-mode=false
 ```
@@ -140,6 +117,8 @@ ACP wake delivery is:
 SQLite inbox -> private Unix socket -> visible Toad TUI -> ACP session/prompt -> provider agent
 ```
 
+Wake requests include the saved session ID. Delivery is recorded after Toad confirms that identity.
+
 Inspect or control a role without touching terminal input:
 
 ```bash
@@ -169,6 +148,10 @@ prompts before replacing the pane. Active turns are refused unless
 `--cancel-active` reaches idle. Failed replacement leaves the role `draining` for explicit recovery. Inspect current
 and previous session metadata with `tmux-team runtime show <role>`.
 
+Switch resolves `--model` and `--effort` from the replacement agent's advertised options and confirms them before
+sending the recovery prompt. If configuration fails after the new session starts, its binding and confirmed options
+are saved. Inspect it with `runtime options` and prepare a new capsule to retry the handoff.
+
 ## Current Limits
 
 - Same-session changes are limited to options advertised by the active ACP agent.
@@ -186,7 +169,7 @@ tmux-team resume
 
 Sleep requires every role to be idle with an empty external queue, verifies `resumeSupported`, quiesces new prompts,
 and snapshots the provider session ID plus launch/binding metadata and a fallback capsule. Resume starts Toad with
-`--session-id`, requires the loaded ID to match, and then re-wakes durable pending inbox work.
+`--session-id`, requires the loaded ID to match, and refreshes the advertised options before re-waking pending work.
 
 Use a fresh provider session only by explicit choice:
 

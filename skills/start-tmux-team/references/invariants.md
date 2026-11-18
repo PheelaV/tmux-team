@@ -10,8 +10,8 @@ The Codex session that invokes the skill is the operator control session.
 - Do not treat `tt-control` as a managed role.
 - Do not route `tmux-team send` work to `tt-control` unless the operator explicitly adds it as a role.
 - Record operator recovery metadata in `[operator]` when available. `operator.pane` and `operator.codex_thread_id` help recovery, but they do not make the control pane a managed role.
-- Resolve canonical ACP providers locally: Cursor `agent acp`, Codex `codex-acp`, Claude `claude-agent-acp`, and Pool `pool acp`.
-  Require an explicit command for any other provider; never invent an ACP URL or alter global provider policy.
+- Resolve the supported local ACP adapters: Cursor `agent acp`, Codex `codex-acp`, and Claude Code `claude-agent-acp`.
+  Keep provider credentials and global permissions external.
 
 ## App Server
 
@@ -19,7 +19,7 @@ The app-server is isolated infrastructure.
 
 - Keep it in its own tmux window named `tt-app-server`.
 - Do not group it with role agents.
-- Use it for app-server `turn/start` wake delivery.
+- Use a private Unix socket by default. Use the app-server queue for normal wakes and `turn/start` for urgent wakes.
 
 Experimental ACP TUI roles do not create `tt-app-server`. Their visible Toad pane owns the configured ACP child and
 private control socket.
@@ -54,10 +54,10 @@ Never use tmux stdin as the production wake path for managed agent roles.
 
 - Do not paste task bodies into panes.
 - Do not use `tmux send-keys` for normal Codex wake.
-- Use app-server `turn/start`.
+- Queue normal Codex wakes behind an active turn. Urgent wakes may steer the active turn.
 - Experimental ACP roles use a private Unix socket into the visible Toad TUI, which queues `session/prompt`.
-- Each ACP role has a unique socket; bootstrap must complete a versioned `ping`/`status` handshake before sending the
-  startup prompt.
+- Each ACP role has a unique socket. Bootstrap verifies readiness with `ping` and `status`. Send and confirm the
+  saved session ID for each wake.
 - Wake prompts should be blunt interrupts; do not restate the skill, scratchpad rules, or ack/complete syntax in every wake turn.
 - App-server wake prompts may include compact metadata for the highest-priority pending message: sender, priority, summary, total pending count, and urgent count. They must not include the task body.
 - If an urgent message is pending, the app-server wake must tell the role to stop at the current safe point and claim the urgent message before continuing other work.
@@ -229,6 +229,9 @@ Autonomous role-to-role messaging requires role panes that can run the `tmux-tea
 
 Use `tmux-team sleep` to snapshot role state, pane targets, app-server bindings, running watchdog runners, operator mapping metadata, and configured Codex launch settings before tearing down managed role, app-server, and watchdog windows. Sleep must leave `tt-control` alive by default and pauses active/draining roles unless explicitly told not to.
 
-Use `tmux-team resume` to restore a slept team from the latest or specified sleep snapshot. Resume must recreate managed role panes with `codex resume <saved-session>`, replay known model/reasoning/profile/config/YOLO launch settings, update pane/app-server bindings, reinstantiate running watchdog runner panes, and reactivate roles by default unless the operator passes `--no-reactivate-roles`. Treat TUI-only settings such as `/fast` as unknown unless Codex exposes it through explicit config. If no graceful sleep snapshot exists after an abrupt host or tmux shutdown, resume must use durable `team.toml` and SQLite runtime state to build a recovery snapshot when role thread ids, app-server endpoints, worktrees, and watchdog runner rows are available.
+Use `tmux-team resume` to restore a team from its snapshot or durable runtime state. Native Codex resumes the saved
+thread with its permissions and replays compatible model, effort, profile, and config settings. Confirm the thread
+loaded before rebinding, reactivating, and waking the role. Restore running watchdogs and honor
+`--no-reactivate-roles`. Treat TUI-only settings such as `/fast` as unknown unless explicit config records them.
 
 Bootstrap and resume should set tmux truecolor options on the managed session by default: `tmux-256color`, RGB terminal features when supported, and `COLORTERM=truecolor`. Use `--no-truecolor` only as an operator opt-out for unusual terminal stacks.

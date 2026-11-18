@@ -103,19 +103,20 @@ Use Codex app-server remote TUI mode instead:
 
 ```text
 tmux-team queue
-  -> app-server turn/start
-  -> pane-resident Codex TUI receives and renders the same turn
-  -> service records turn submission status
+  -> app-server queue (normal) or turn/start (urgent)
+  -> pane-resident Codex TUI receives the wake
+  -> service records submission status
 ```
 
 The agent remains in the tmux pane. The difference is that the pane is connected to Codex through app-server, and `tmux-team` submits turns through the app-server control protocol instead of terminal keystrokes.
 
-Operator shape:
+Normal wakes queue behind an active turn. Urgent wakes can steer an active turn at a safe point.
+To bind a role to a dedicated server manually, set `endpoint` to an absolute Unix socket path.
 
 ```bash
-codex app-server --listen ws://127.0.0.1:4500
-codex --remote ws://127.0.0.1:4500
-tmux-team codex bind implementer --endpoint ws://127.0.0.1:4500 --thread-id <thread-id>
+codex app-server --listen "$endpoint"
+codex --remote "$endpoint"
+tmux-team codex bind implementer --endpoint "$endpoint" --thread-id <thread-id>
 tmux-team send --to implementer --summary "..." --body-file task.md --notify-method app-server-turn
 ```
 
@@ -136,8 +137,8 @@ tmux-team queue
 ```
 
 This avoids tmux stdin and preserves the human composer. Each role uses a unique mode-`0600` socket. Bootstrap waits
-for versioned `ping` and `status` responses before sending the startup prompt. Wakes use `prompt` with
-`coalesceKey="inbox"`; urgent work is marked urgent but does not cancel an active turn. ACP exact resume uses the
+for versioned `ping` and `status` responses before sending the startup prompt. Wakes use `prompt` with the saved
+`sessionId` and `coalesceKey="inbox"`. Toad prioritizes urgent work when dispatching queued prompts. ACP exact resume uses the
 provider's negotiated `session/load` capability; explicit handoff resume creates a fresh session from durable state.
 
 The same socket exposes live ACP session configuration when Toad advertises
@@ -254,7 +255,7 @@ Current Codex CLI supports non-interactive session resume:
 codex exec resume <session-id> "prompt text"
 ```
 
-That prompts a saved conversation through a separate Codex process. It is useful for automation, but the pane-resident path is app-server remote TUI plus `turn/start`.
+That prompts a saved conversation through a separate Codex process. The pane-resident path uses app-server wake delivery.
 
 ## Test Harness Driving
 

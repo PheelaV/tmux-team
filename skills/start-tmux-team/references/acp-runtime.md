@@ -9,9 +9,8 @@ Each ACP role remains visible in a Toad pane. Toad owns the configured ACP child
 tmux-team sends compact wake prompts through a private role Unix socket. Durable task bodies remain exclusively in the
 SQLite inbox. ACP roles do not create `tt-app-server`.
 
-ACP sleep/resume supports explicit `exact` and `handoff` policies. Provider-specific flags belong in
-`--acp-agent-command`; `--acp-provider`, `--model`, and `--effort` are provenance metadata unless the provider protocol
-proves otherwise.
+ACP sleep/resume supports explicit `exact` and `handoff` policies. Put provider-specific launch flags in
+`--acp-agent-command`. A switch applies and verifies `--model` and `--effort` using the replacement session's options.
 
 ## Preflight And Bootstrap
 
@@ -19,21 +18,17 @@ Verify Python 3.14+, Toad, and the local provider adapter before bootstrap:
 
 ```bash
 python3.14 --version
-toad --version
+toad acp --help
 agent status
 codex-acp --version
 claude-agent-acp --version
-pool --version
 tmux-team bootstrap --project-root . --agent-runtime acp \
   --acp-tui-bin toad --acp-provider claude \
   --goal "USER_GOAL"
 ```
 
-Canonical presets are Cursor `agent acp`, Codex `codex-acp`, Claude `claude-agent-acp`, and Pool `pool acp`. They are local stdio
-children, not ACP URLs. Codex ACP uses local Codex authentication; Claude ACP uses local Claude credentials/settings;
-Pool uses `pool login` or Poolside-owned API URL/key configuration. `pool acp setup --editor ...` is editor registration
-and is not required for Toad.
-Use `--acp-agent-command` for provider flags, `npx`, pinned/local adapters, or custom providers.
+The supported local adapters are Cursor `agent acp`, Codex `codex-acp`, and Claude Code `claude-agent-acp`.
+Use `--acp-agent-command` for provider flags, `npx`, or pinned/local executables for those providers.
 
 Bootstrap must wait for every role's versioned `ping`/`status` handshake, then record its control socket and runtime
 session ID. A provider-triggered TUI crash is a bootstrap failure, not a healthy team.
@@ -74,7 +69,7 @@ use separate worktrees, ensure the project-local policy is available in every ro
 
 Use `tmux-team sleep --acp-resume-policy exact` by default. Exact sleep requires each provider to advertise session
 loading, drains and quiesces every role, records session/launch/socket metadata plus a fallback capsule, then tears down
-managed panes. `tmux-team resume` starts Toad with the saved session ID and must verify the returned ID before waking
+managed panes. `tmux-team resume` verifies the saved session ID and refreshes its advertised options before waking
 pending work.
 
 Use `tmux-team resume --acp-resume-policy handoff` only when the operator explicitly accepts a fresh provider session.
